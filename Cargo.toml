@@ -1,0 +1,19 @@
+[package]
+name = "mqtr"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4.17"
+
+arbitrary = { version = "1.1.0", features = ["derive"], optional = true }
+
+[dev-dependencies]
+rand = "0.8.5"
+arbitrary = { version = "1.1.0", features = ["derive"] }
+
+[features]
+backtrace = []
+fuzzy = ["arbitrary"]
