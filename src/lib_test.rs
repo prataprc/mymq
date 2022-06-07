@@ -1,4 +1,4 @@
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Unstructured;
 use rand::{prelude::random, rngs::StdRng, Rng, SeedableRng};
 
 use super::*;

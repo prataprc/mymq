@@ -1,4 +1,4 @@
-use rand::rngs::StdRng;
+use rand::{rngs::StdRng, Rng};
 
 use std::collections::BTreeMap;
 
@@ -37,4 +37,19 @@ pub trait Fuzzy<T> {
     fn value(rng: &mut StdRng, ctx: &mut Context) -> FuzzyValue<T>;
 
     fn binary(rng: &mut StdRng, ctx: &mut Context) -> FuzzyBinary;
+}
+
+pub fn dna_string(rng: &mut StdRng, mut n: usize) -> Vec<u8> {
+    let mut rand_bytes: [u8; 32] = rng.gen();
+
+    let mut out = Vec::default();
+    while n > 32 {
+        out.extend_from_slice(&rand_bytes);
+        rand_bytes = rng.gen();
+        n -= 32;
+    }
+
+    out.extend_from_slice(&rand_bytes[..n]);
+
+    out
 }

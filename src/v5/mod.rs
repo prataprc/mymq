@@ -5,9 +5,6 @@ use std::ops::Deref;
 
 use crate::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result};
 
-#[cfg(any(feature = "fuzzy", test))]
-pub mod fuzzy;
-
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
 
@@ -146,6 +143,7 @@ impl From<QoS> for u8 {
 /// i/p stream: 0b0www_wwww 0b1zzz_zzzz 0b1yyy_yyyy 0b1xxx_xxxx, low-byte to high-byte
 /// o/p u32:    0bwww_wwww_zzz_zzzz_yyy_yyyy_xxx_xxxx
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub struct VarU32(pub u32);
 
 impl Deref for VarU32 {
@@ -185,21 +183,21 @@ impl Packetize for VarU32 {
                 1
             }
             val if val < 16_384 => {
-                data[0] = (val & 0x7f_u32) as u8;
+                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
                 data[1] = ((val >> 7) & 0x7f_u32) as u8;
                 2
             }
             val if val < 2_097_152 => {
-                data[0] = (val & 0x7f_u32) as u8;
-                data[1] = ((val >> 7) & 0x7f_u32) as u8;
+                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
+                data[1] = (((val >> 7) & 0x7f_u32) as u8) | 0x80;
                 data[2] = ((val >> 14) & 0x7f_u32) as u8;
                 3
             }
             val if val <= *VarU32::MAX => {
-                data[0] = (val & 0x7f_u32) as u8;
-                data[0] = ((val >> 7) & 0x7f_u32) as u8;
-                data[0] = ((val >> 14) & 0x7f_u32) as u8;
-                data[0] = ((val >> 21) & 0x7f_u32) as u8;
+                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
+                data[1] = (((val >> 7) & 0x7f_u32) as u8) | 0x80;
+                data[2] = (((val >> 14) & 0x7f_u32) as u8) | 0x80;
+                data[3] = ((val >> 21) & 0x7f_u32) as u8;
                 4
             }
             val => err!(InvalidInput, desc: "VarU32:write({})", val)?,
@@ -241,14 +239,14 @@ pub struct FixedHeader {
 impl Packetize for FixedHeader {
     fn decode(stream: &[u8]) -> Result<(FixedHeader, usize)> {
         let (byte1, m) = u8::decode(stream)?;
-        let (remaining_len, n) = VarU32::decode(stream)?;
+        let (remaining_len, n) = VarU32::decode(&stream[m..])?;
         Ok((FixedHeader { byte1, remaining_len }, m + n))
     }
 
     /// Same as read, but no checks are done, assumes that stream is well formed.
     fn decode_unchecked(stream: &[u8]) -> (FixedHeader, usize) {
         let (byte1, m) = u8::decode_unchecked(stream);
-        let (remaining_len, n) = VarU32::decode_unchecked(stream);
+        let (remaining_len, n) = VarU32::decode_unchecked(&stream[m..]);
         (FixedHeader { byte1, remaining_len }, m + n)
     }
 
@@ -321,14 +319,16 @@ impl FixedHeader {
     /// Length of fixed header. Byte 1 + (1..4) bytes. So fixed header
     /// len can vary from 2 bytes to 5 bytes 1..4 bytes are variable length encoded
     /// to represent remaining length
-    pub fn len(&self) -> usize {
-        1 + match *self.remaining_len {
+    pub fn len(&self) -> Result<usize> {
+        let val = 1 + match *self.remaining_len {
             n if n < 128 => 1,
             n if n < 16_384 => 2,
             n if n < 2_097_152 => 3,
             n if n < *VarU32::MAX => 4,
-            _ => unreachable!(),
-        }
+            n => err!(InvalidInput, code: MalformedPacket, "remaining-len {}", n)?,
+        };
+
+        Ok(val)
     }
 }
 
@@ -337,7 +337,7 @@ pub type UserPair = (String, String);
 impl Packetize for UserPair {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         let (key, m) = String::decode(stream)?;
-        let (val, n) = String::decode(&stream[..m])?;
+        let (val, n) = String::decode(&stream[m..])?;
         Ok(((key, val), (m + n)))
     }
 
@@ -348,10 +348,22 @@ impl Packetize for UserPair {
     }
 
     fn encode(&self) -> Result<Blob> {
-        let mut data = Vec::with_capacity(64);
-        data.extend_from_slice(self.0.encode()?.as_ref());
-        data.extend_from_slice(self.1.encode()?.as_ref());
-        Ok(Blob::Large { data })
+        let key_blob = self.0.encode()?;
+        let val_blob = self.1.encode()?;
+        let m = key_blob.as_ref().len();
+        let n = val_blob.as_ref().len();
+
+        if (m + n) < 32 {
+            let mut data = [0_u8; 32];
+            data[..m].copy_from_slice(key_blob.as_ref());
+            data[m..m + n].copy_from_slice(val_blob.as_ref());
+            Ok(Blob::Small { data, size: m + n })
+        } else {
+            let mut data = Vec::with_capacity(64);
+            data.extend_from_slice(self.0.encode()?.as_ref());
+            data.extend_from_slice(self.1.encode()?.as_ref());
+            Ok(Blob::Large { data })
+        }
     }
 
     fn into_blob(self) -> Result<Blob> {

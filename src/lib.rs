@@ -4,6 +4,8 @@
 
 #[macro_use]
 mod error;
+#[cfg(any(feature = "fuzzy", test))]
+pub mod fuzzy;
 pub mod v5;
 
 pub use error::{Error, ErrorKind, ReasonCode};
@@ -11,6 +13,7 @@ pub use error::{Error, ErrorKind, ReasonCode};
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Blob {
     Small { data: [u8; 32], size: usize },
     Large { data: Vec<u8> },
@@ -26,8 +29,7 @@ impl AsRef<[u8]> for Blob {
 }
 
 impl Blob {
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         self.as_ref()
     }
 }
@@ -161,6 +163,12 @@ impl Packetize for String {
         match self.len() {
             n if n > (u16::MAX as usize) => {
                 err!(InvalidInput, desc: "String::write({})", n)
+            }
+            n if n < 30 => {
+                let mut data = [0_u8; 32];
+                data[0..2].copy_from_slice(&(n as u16).to_be_bytes());
+                data[2..2 + n].copy_from_slice(self.as_bytes());
+                Ok(Blob::Small { data, size: 2 + n })
             }
             n => {
                 let mut data = Vec::with_capacity(2 + n);
