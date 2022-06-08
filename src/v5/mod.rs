@@ -5,6 +5,10 @@ use std::ops::Deref;
 
 use crate::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result};
 
+mod connect;
+
+pub use connect::ConnectFlags;
+
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
 // TODO: first socket read for fixed-header can wait indefinitely, but the next read
@@ -97,14 +101,6 @@ impl From<PacketType> for u8 {
             PacketType::Auth => 15,
         }
     }
-}
-
-/// Protocol type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-pub enum Protocol {
-    V4 = 4,
-    V5 = 5,
 }
 
 /// Quality of service
@@ -230,6 +226,7 @@ pub struct FixedHeader {
     remaining_len: VarU32,
 }
 
+#[macro_export]
 macro_rules! fixed_byte {
     ($pkt_type:expr, $retain:ident, $qos:ident, $dup:ident) => {{
         let retain: u8 = if $retain { 0b0001 } else { 0b0000 };
@@ -250,12 +247,6 @@ impl Packetize for FixedHeader {
         fh.validate()?;
 
         Ok((fh, m + n))
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (FixedHeader, usize) {
-        let (byte1, m) = u8::decode_unchecked(stream);
-        let (remaining_len, n) = VarU32::decode_unchecked(&stream[m..]);
-        (FixedHeader { byte1, remaining_len }, m + n)
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -343,19 +334,13 @@ impl FixedHeader {
     }
 }
 
-pub type UserPair = (String, String);
+pub type UserProperty = (String, String);
 
-impl Packetize for UserPair {
+impl Packetize for UserProperty {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         let (key, m) = String::decode(stream)?;
         let (val, n) = String::decode(&stream[m..])?;
         Ok(((key, val), (m + n)))
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        let (key, m) = String::decode_unchecked(stream);
-        let (val, n) = String::decode_unchecked(&stream[m..]);
-        ((key, val), (m + n))
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -473,7 +458,7 @@ pub enum Property {
     TopicAlias(u16),
     MaximumQoS(QoS),
     RetainAvailable(u8),
-    UserProperty(UserPair),
+    UserProperty(UserProperty),
     MaximumPacketSize(u32),
     WildcardSubscriptionAvailable(u8),
     SubscriptionIdentifierAvailable(u8),
@@ -482,119 +467,117 @@ pub enum Property {
 
 impl Packetize for Property {
     fn decode(mut stream: &[u8]) -> Result<(Self, usize)> {
-        use Property::*;
-
         let (t, m) = VarU32::decode(stream)?;
         stream = &stream[m..];
         let (property, n) = match PropertyType::try_from(*t)? {
             PropertyType::PayloadFormatIndicator => {
                 let (val, n) = u8::decode(stream)?;
-                (PayloadFormatIndicator(val), n)
+                (Property::PayloadFormatIndicator(val), n)
             }
             PropertyType::MessageExpiryInterval => {
                 let (val, n) = u32::decode(stream)?;
-                (MessageExpiryInterval(val), n)
+                (Property::MessageExpiryInterval(val), n)
             }
             PropertyType::ContentType => {
                 let (val, n) = String::decode(stream)?;
-                (ContentType(val), n)
+                (Property::ContentType(val), n)
             }
             PropertyType::ResponseTopic => {
                 let (val, n) = String::decode(stream)?;
-                (ResponseTopic(val), n)
+                (Property::ResponseTopic(val), n)
             }
             PropertyType::CorrelationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;
-                (CorrelationData(val), n)
+                (Property::CorrelationData(val), n)
             }
             PropertyType::SubscriptionIdentifier => {
                 let (val, n) = VarU32::decode(stream)?;
-                (SubscriptionIdentifier(val), n)
+                (Property::SubscriptionIdentifier(val), n)
             }
             PropertyType::SessionExpiryInterval => {
                 let (val, n) = u32::decode(stream)?;
-                (SessionExpiryInterval(val), n)
+                (Property::SessionExpiryInterval(val), n)
             }
             PropertyType::AssignedClientIdentifier => {
                 let (val, n) = String::decode(stream)?;
-                (AssignedClientIdentifier(val), n)
+                (Property::AssignedClientIdentifier(val), n)
             }
             PropertyType::ServerKeepAlive => {
                 let (val, n) = u16::decode(stream)?;
-                (ServerKeepAlive(val), n)
+                (Property::ServerKeepAlive(val), n)
             }
             PropertyType::AuthenticationMethod => {
                 let (val, n) = String::decode(stream)?;
-                (AuthenticationMethod(val), n)
+                (Property::AuthenticationMethod(val), n)
             }
             PropertyType::AuthenticationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;
-                (AuthenticationData(val), n)
+                (Property::AuthenticationData(val), n)
             }
             PropertyType::RequestProblemInformation => {
                 let (val, n) = u8::decode(stream)?;
-                (RequestProblemInformation(val), n)
+                (Property::RequestProblemInformation(val), n)
             }
             PropertyType::WillDelayInterval => {
                 let (val, n) = u32::decode(stream)?;
-                (WillDelayInterval(val), n)
+                (Property::WillDelayInterval(val), n)
             }
             PropertyType::RequestResponseInformation => {
                 let (val, n) = u8::decode(stream)?;
-                (RequestResponseInformation(val), n)
+                (Property::RequestResponseInformation(val), n)
             }
             PropertyType::ResponseInformation => {
                 let (val, n) = String::decode(stream)?;
-                (ResponseInformation(val), n)
+                (Property::ResponseInformation(val), n)
             }
             PropertyType::ServerReference => {
                 let (val, n) = String::decode(stream)?;
-                (ServerReference(val), n)
+                (Property::ServerReference(val), n)
             }
             PropertyType::ReasonString => {
                 let (val, n) = String::decode(stream)?;
-                (ReasonString(val), n)
+                (Property::ReasonString(val), n)
             }
             PropertyType::ReceiveMaximum => {
                 let (val, n) = u16::decode(stream)?;
-                (ReceiveMaximum(val), n)
+                (Property::ReceiveMaximum(val), n)
             }
             PropertyType::TopicAliasMaximum => {
                 let (val, n) = u16::decode(stream)?;
-                (TopicAliasMaximum(val), n)
+                (Property::TopicAliasMaximum(val), n)
             }
             PropertyType::TopicAlias => {
                 let (val, n) = u16::decode(stream)?;
-                (TopicAlias(val), n)
+                (Property::TopicAlias(val), n)
             }
             PropertyType::MaximumQoS => {
                 let (val, n) = u8::decode(stream)?;
                 let qos = QoS::try_from(val)?;
-                (MaximumQoS(qos), n)
+                (Property::MaximumQoS(qos), n)
             }
             PropertyType::RetainAvailable => {
                 let (val, n) = u8::decode(stream)?;
-                (RetainAvailable(val), n)
+                (Property::RetainAvailable(val), n)
             }
             PropertyType::UserProperty => {
-                let (val, n) = UserPair::decode(stream)?;
-                (UserProperty(val), n)
+                let (val, n) = UserProperty::decode(stream)?;
+                (Property::UserProperty(val), n)
             }
             PropertyType::MaximumPacketSize => {
                 let (val, n) = u32::decode(stream)?;
-                (MaximumPacketSize(val), n)
+                (Property::MaximumPacketSize(val), n)
             }
             PropertyType::WildcardSubscriptionAvailable => {
                 let (val, n) = u8::decode(stream)?;
-                (WildcardSubscriptionAvailable(val), n)
+                (Property::WildcardSubscriptionAvailable(val), n)
             }
             PropertyType::SubscriptionIdentifierAvailable => {
                 let (val, n) = u8::decode(stream)?;
-                (SubscriptionIdentifierAvailable(val), n)
+                (Property::SubscriptionIdentifierAvailable(val), n)
             }
             PropertyType::SharedSubscriptionAvailable => {
                 let (val, n) = u8::decode(stream)?;
-                (SharedSubscriptionAvailable(val), n)
+                (Property::SharedSubscriptionAvailable(val), n)
             }
         };
 
@@ -764,10 +747,10 @@ impl Packetize for Property {
     }
 }
 
-#[cfg(any(feature = "fuzzy", test))]
-#[path = "mod_fuzzy.rs"]
-mod mod_fuzzy;
-
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod mod_test;
+
+#[cfg(any(feature = "fuzzy", test))]
+#[path = "mod_fuzzy.rs"]
+mod mod_fuzzy;

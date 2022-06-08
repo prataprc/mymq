@@ -3,13 +3,23 @@
 #![feature(backtrace)]
 #![feature(error_iter)]
 
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::Arbitrary;
+
 #[macro_use]
 mod error;
-#[cfg(any(feature = "fuzzy", test))]
-pub mod fuzzy;
+mod clientid;
+mod topic;
+
+#[macro_use]
 pub mod v5;
 
+#[cfg(any(feature = "fuzzy", test))]
+pub mod fuzzy;
+
+pub use clientid::ClientID;
 pub use error::{Error, ErrorKind, ReasonCode};
+pub use topic::{TopicFilter, TopicName};
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation
@@ -46,18 +56,15 @@ pub trait Packetize: Sized {
     /// boundry to re-detect the error.
     fn decode(stream: &[u8]) -> Result<(Self, usize)>;
 
-    /// Same as read, but no checks are done, assumes that stream is well formed.
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        Self::decode(stream).unwrap()
-    }
-
     /// Serialize value into bytes, for small frames.
     fn encode(&self) -> Result<Blob>;
+}
 
-    /// Serialize value into bytes, for large payloads.
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+pub enum MqttProtocol {
+    V4 = 4,
+    V5 = 5,
 }
 
 impl Packetize for u8 {
@@ -66,10 +73,6 @@ impl Packetize for u8 {
             n if n >= 1 => Ok((stream[0], 1)),
             _ => err!(InsufficientBytes, code: MalformedPacket, "u8::decode()"),
         }
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        (stream[0], 1)
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -81,10 +84,6 @@ impl Packetize for u8 {
 
         Ok(blob)
     }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
 }
 
 impl Packetize for u16 {
@@ -93,10 +92,6 @@ impl Packetize for u16 {
             n if n >= 2 => Ok((u16::from_be_bytes(stream[..2].try_into().unwrap()), 2)),
             _ => err!(InsufficientBytes, code: MalformedPacket, "u16::decode()"),
         }
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        (u16::from_be_bytes(stream[..2].try_into().unwrap()), 2)
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -108,10 +103,6 @@ impl Packetize for u16 {
 
         Ok(blob)
     }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
 }
 
 impl Packetize for u32 {
@@ -122,10 +113,6 @@ impl Packetize for u32 {
         }
     }
 
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        (u32::from_be_bytes(stream[..4].try_into().unwrap()), 4)
-    }
-
     fn encode(&self) -> Result<Blob> {
         let mut blob = Blob::Small { data: Default::default(), size: 4 };
         match &mut blob {
@@ -134,10 +121,6 @@ impl Packetize for u32 {
         }
 
         Ok(blob)
-    }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
     }
 }
 
@@ -160,15 +143,6 @@ impl Packetize for String {
                 err!(MalformedPacket, code: MalformedPacket, cause: err, "String::decode")
             }
         }
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        use std::str::from_utf8_unchecked;
-
-        let (len, _) = u16::decode_unchecked(stream);
-        let len = usize::from(len);
-        let s = unsafe { from_utf8_unchecked(&stream[2..2 + len]).to_string() };
-        (s, 2 + len)
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -194,10 +168,6 @@ impl Packetize for String {
             }
         }
     }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
 }
 
 impl Packetize for Vec<u8> {
@@ -208,12 +178,6 @@ impl Packetize for Vec<u8> {
             return err!(InsufficientBytes, code: MalformedPacket, "Vector::read");
         }
         Ok((stream[2..2 + len].to_vec(), 2 + len))
-    }
-
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        let (len, _) = u16::decode_unchecked(stream);
-        let len = usize::from(len);
-        (stream[2..2 + len].to_vec(), 2 + len)
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -228,10 +192,6 @@ impl Packetize for Vec<u8> {
                 Ok(Blob::Large { data })
             }
         }
-    }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
     }
 }
 

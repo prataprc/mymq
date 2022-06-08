@@ -189,6 +189,7 @@ impl Error {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
     NoError,
+    UnsupportedProtocolVersion,
     InsufficientBytes,
     MalformedPacket,
     ProtocolError,
@@ -202,13 +203,14 @@ impl fmt::Display for ErrorKind {
         use ErrorKind::*;
 
         match self {
+            NoError => write!(f, "NoError"),
+            UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
             ProtocolError => write!(f, "ProtocolError"),
             IOError => write!(f, "IOError"),
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
-            NoError => write!(f, "NoError"),
         }
     }
 }

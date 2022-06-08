@@ -16,7 +16,6 @@ fn test_varu32() {
         let ref_val: VarU32 = uns.arbitrary().unwrap();
         if ref_val <= VarU32::MAX {
             let blob = ref_val.encode().unwrap();
-            assert_eq!(blob, ref_val.into_blob().unwrap());
 
             let (val, n) = VarU32::decode(blob.as_bytes()).unwrap();
             assert_eq!(val, ref_val);

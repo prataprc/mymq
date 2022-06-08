@@ -259,20 +259,6 @@ where
                 (val.clone(), stream.as_ref().len()),
                 T::decode(stream.as_bytes()).unwrap()
             );
-            assert_eq!(
-                (val.clone(), stream.as_ref().len()),
-                T::decode_unchecked(stream.as_bytes())
-            );
-
-            let stream: Blob = val.clone().into_blob().unwrap();
-            assert_eq!(
-                (val.clone(), stream.as_ref().len()),
-                T::decode(stream.as_bytes()).unwrap()
-            );
-            assert_eq!(
-                (val.clone(), stream.as_ref().len()),
-                T::decode_unchecked(stream.as_bytes())
-            );
         }
         FuzzyValue::Bad { val, err } if err.kind() == ErrorKind::NoError => {
             val.encode().unwrap();
@@ -287,24 +273,6 @@ where
             let (val, n) = T::decode(&stream).unwrap();
             assert_eq!(n, stream.len());
             let blob: Blob = val.encode().unwrap();
-            assert_eq!(
-                (stream.as_ref(), stream.len()),
-                (blob.as_ref(), blob.as_ref().len())
-            );
-            let blob: Blob = val.into_blob().unwrap();
-            assert_eq!(
-                (stream.as_ref(), stream.len()),
-                (blob.as_ref(), blob.as_ref().len())
-            );
-
-            let (val, n) = T::decode_unchecked(&stream);
-            assert_eq!(n, stream.len());
-            let blob: Blob = val.encode().unwrap();
-            assert_eq!(
-                (stream.as_ref(), stream.len()),
-                (blob.as_ref(), blob.as_ref().len())
-            );
-            let blob: Blob = val.into_blob().unwrap();
             assert_eq!(
                 (stream.as_ref(), stream.len()),
                 (blob.as_ref(), blob.as_ref().len())
