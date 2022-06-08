@@ -7,6 +7,8 @@ use crate::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result};
 
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
+// TODO: first socket read for fixed-header can wait indefinitely, but the next read
+//       for remaining_len must timeout within a stipulated period.
 
 /// All that is MQTT
 #[derive(Debug, Clone, PartialEq)]
@@ -171,10 +173,6 @@ impl Packetize for VarU32 {
         err!(MalformedPacket, code: MalformedPacket, "VarU32::read")
     }
 
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        Self::decode(stream).unwrap()
-    }
-
     fn encode(&self) -> Result<Blob> {
         let mut data = [0_u8; 32];
         let size = match *(&self.0) {
@@ -205,10 +203,6 @@ impl Packetize for VarU32 {
 
         Ok(Blob::Small { data, size })
     }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
 }
 
 impl VarU32 {
@@ -236,21 +230,34 @@ pub struct FixedHeader {
     remaining_len: VarU32,
 }
 
+macro_rules! fixed_byte {
+    ($pkt_type:expr, $retain:ident, $qos:ident, $dup:ident) => {{
+        let retain: u8 = if $retain { 0b0001 } else { 0b0000 };
+        let qos: u8 = u8::from($qos) << 1;
+        let dup: u8 = if $dup { 0b1000 } else { 0b0000 };
+        let pkt_type = $pkt_type << 4;
+
+        pkt_type | retain | qos | dup
+    }};
+}
+
 impl Packetize for FixedHeader {
     fn decode(stream: &[u8]) -> Result<(FixedHeader, usize)> {
         let (byte1, m) = u8::decode(stream)?;
         let (remaining_len, n) = VarU32::decode(&stream[m..])?;
-        Ok((FixedHeader { byte1, remaining_len }, m + n))
+
+        let fh = FixedHeader { byte1, remaining_len };
+        fh.validate()?;
+
+        Ok((fh, m + n))
     }
 
-    /// Same as read, but no checks are done, assumes that stream is well formed.
     fn decode_unchecked(stream: &[u8]) -> (FixedHeader, usize) {
         let (byte1, m) = u8::decode_unchecked(stream);
         let (remaining_len, n) = VarU32::decode_unchecked(&stream[m..]);
         (FixedHeader { byte1, remaining_len }, m + n)
     }
 
-    /// Serialize value into bytes, for small frames.
     fn encode(&self) -> Result<Blob> {
         let byte1 = self.byte1.encode()?;
         let remaining_len = self.remaining_len.encode()?;
@@ -261,11 +268,6 @@ impl Packetize for FixedHeader {
         data[m..m + n].copy_from_slice(remaining_len.as_ref());
 
         Ok(Blob::Small { data, size: m + n })
-    }
-
-    /// Serialize value into bytes, for large payloads.
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
     }
 }
 
@@ -278,7 +280,7 @@ impl FixedHeader {
         Ok(FixedHeader { byte1, remaining_len })
     }
 
-    pub fn new_pubish(
+    pub fn new_publish(
         retain: bool,
         qos: QoS,
         dup: bool,
@@ -288,13 +290,8 @@ impl FixedHeader {
             err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
         }
 
-        let retain: u8 = if retain { 0b0001 } else { 0b0000 };
-        let qos: u8 = u8::from(qos) << 1;
-        let dup: u8 = if dup { 0b1000 } else { 0b0000 };
-        let pkt_type = u8::from(PacketType::Publish) << 4;
-
         let val = FixedHeader {
-            byte1: pkt_type | retain | qos | dup,
+            byte1: fixed_byte!(u8::from(PacketType::Publish), retain, qos, dup),
             remaining_len,
         };
 
@@ -330,6 +327,20 @@ impl FixedHeader {
 
         Ok(val)
     }
+
+    fn validate(&self) -> Result<()> {
+        let (pkt_type, retain, qos, dup) = self.unwrap()?;
+        match pkt_type {
+            PacketType::Publish => Ok(()),
+            _ if retain || dup || qos != QoS::AtMostOnce => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "flags found for {:?}",
+                pkt_type
+            ),
+            _ => Ok(()),
+        }
+    }
 }
 
 pub type UserPair = (String, String);
@@ -343,7 +354,7 @@ impl Packetize for UserPair {
 
     fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
         let (key, m) = String::decode_unchecked(stream);
-        let (val, n) = String::decode_unchecked(&stream[..m]);
+        let (val, n) = String::decode_unchecked(&stream[m..]);
         ((key, val), (m + n))
     }
 
@@ -364,10 +375,6 @@ impl Packetize for UserPair {
             data.extend_from_slice(self.1.encode()?.as_ref());
             Ok(Blob::Large { data })
         }
-    }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
     }
 }
 
@@ -594,10 +601,6 @@ impl Packetize for Property {
         Ok((property, m + n))
     }
 
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
-        Self::decode(stream).unwrap()
-    }
-
     fn encode(&self) -> Result<Blob> {
         use Property::*;
 
@@ -759,15 +762,11 @@ impl Packetize for Property {
 
         Ok(Blob::Large { data })
     }
-
-    fn into_blob(self) -> Result<Blob> {
-        self.encode()
-    }
 }
 
-//#[cfg(any(feature = "fuzzy", test))]
-//#[path = "types_arbitrary.rs"]
-//mod types_arbitrary;
+#[cfg(any(feature = "fuzzy", test))]
+#[path = "mod_fuzzy.rs"]
+mod mod_fuzzy;
 
 #[cfg(test)]
 #[path = "mod_test.rs"]

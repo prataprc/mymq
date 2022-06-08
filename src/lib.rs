@@ -1,6 +1,7 @@
 //! Package implement MQTT protocol-framing for both client and server.
 
 #![feature(backtrace)]
+#![feature(error_iter)]
 
 #[macro_use]
 mod error;
@@ -9,6 +10,9 @@ pub mod fuzzy;
 pub mod v5;
 
 pub use error::{Error, ErrorKind, ReasonCode};
+
+// TODO: restrict packet size to maximum allowed for each session or use
+//       protocol-limitation
 
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,6 +33,7 @@ impl AsRef<[u8]> for Blob {
 }
 
 impl Blob {
+    #[cfg(test)]
     fn as_bytes(&self) -> &[u8] {
         self.as_ref()
     }
@@ -42,13 +47,17 @@ pub trait Packetize: Sized {
     fn decode(stream: &[u8]) -> Result<(Self, usize)>;
 
     /// Same as read, but no checks are done, assumes that stream is well formed.
-    fn decode_unchecked(stream: &[u8]) -> (Self, usize);
+    fn decode_unchecked(stream: &[u8]) -> (Self, usize) {
+        Self::decode(stream).unwrap()
+    }
 
     /// Serialize value into bytes, for small frames.
     fn encode(&self) -> Result<Blob>;
 
     /// Serialize value into bytes, for large payloads.
-    fn into_blob(self) -> Result<Blob>;
+    fn into_blob(self) -> Result<Blob> {
+        self.encode()
+    }
 }
 
 impl Packetize for u8 {
@@ -139,13 +148,16 @@ impl Packetize for String {
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
         if len + 2 > stream.len() {
-            return err!(InsufficientBytes, code: MalformedPacket, "String::read");
+            return err!(InsufficientBytes, code: MalformedPacket, "String::decode");
         }
 
         match from_utf8(&stream[2..2 + len]) {
+            Ok(s) if s.chars().any(is_invalid_utf8_code_point) => {
+                err!(MalformedPacket, code: MalformedPacket, "invalid utf8 string")
+            }
             Ok(s) => Ok((s.to_string(), 2 + len)),
             Err(err) => {
-                err!(MalformedPacket, code: MalformedPacket, cause: err, "String::read")
+                err!(MalformedPacket, code: MalformedPacket, cause: err, "String::decode")
             }
         }
     }
@@ -160,9 +172,13 @@ impl Packetize for String {
     }
 
     fn encode(&self) -> Result<Blob> {
+        if self.chars().any(is_invalid_utf8_code_point) {
+            return err!(InvalidInput, desc: "invalid utf8 string");
+        }
+
         match self.len() {
             n if n > (u16::MAX as usize) => {
-                err!(InvalidInput, desc: "String::write({})", n)
+                err!(InvalidInput, desc: "String too large {:?}", n)
             }
             n if n < 30 => {
                 let mut data = [0_u8; 32];
@@ -217,6 +233,11 @@ impl Packetize for Vec<u8> {
     fn into_blob(self) -> Result<Blob> {
         self.encode()
     }
+}
+
+pub(crate) fn is_invalid_utf8_code_point(ch: char) -> bool {
+    let c = ch as u32;
+    (c >= 0xD800 && c <= 0xDFFF) || c <= 0x1F || (c >= 0x7F && c <= 0x9F)
 }
 
 #[cfg(test)]

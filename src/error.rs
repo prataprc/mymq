@@ -143,6 +143,11 @@ impl std::error::Error for Error {
     fn cause(&self) -> Option<&dyn std::error::Error> {
         self.cause.as_ref().map(|b| b.as_ref())
     }
+
+    #[cfg(feature = "backtrace")]
+    fn backtrace(&self) -> Option<&Backtrace> {
+        self.backtrace.as_ref()
+    }
 }
 
 impl Error {
@@ -151,15 +156,39 @@ impl Error {
         self.kind
     }
 
+    /// Return error kinds from this error and all of the root causes.
+    pub fn kinds(&self) -> Vec<ErrorKind> {
+        let mut kinds = vec![self.kind];
+        match &self.cause {
+            Some(err) => {
+                kinds.extend_from_slice(&err.downcast_ref::<Error>().unwrap().kinds());
+                kinds
+            }
+            None => kinds,
+        }
+    }
+
     /// Reason code as defined by `MQTT-spec`.
     pub fn code(&self) -> Option<ReasonCode> {
         self.code
+    }
+
+    pub fn has(&self, kind: ErrorKind) -> bool {
+        if self.kind == kind {
+            true
+        } else {
+            match &self.cause {
+                Some(err) => err.downcast_ref::<Error>().unwrap().has(kind),
+                None => false,
+            }
+        }
     }
 }
 
 /// Error kind expected to be handled by calling functions.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
+    NoError,
     InsufficientBytes,
     MalformedPacket,
     ProtocolError,
@@ -179,6 +208,7 @@ impl fmt::Display for ErrorKind {
             IOError => write!(f, "IOError"),
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
+            NoError => write!(f, "NoError"),
         }
     }
 }
