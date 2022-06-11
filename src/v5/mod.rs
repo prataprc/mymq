@@ -1,13 +1,13 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
 
-use std::ops::Deref;
-
-use crate::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result};
+use crate::util::advance;
+use crate::{Blob, Packetize, Result, UserProperty, VarU32};
+use crate::{Error, ErrorKind, ReasonCode};
 
 mod connect;
 
-pub use connect::ConnectFlags;
+pub use connect::{ConnectFlags, ConnectProperties, WillProperties};
 
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
@@ -137,74 +137,6 @@ impl From<QoS> for u8 {
     }
 }
 
-/// Uses continuation bit at position 7 to continue reading next byte to frame 'u32'.
-/// i/p stream: 0b0www_wwww 0b1zzz_zzzz 0b1yyy_yyyy 0b1xxx_xxxx, low-byte to high-byte
-/// o/p u32:    0bwww_wwww_zzz_zzzz_yyy_yyyy_xxx_xxxx
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-pub struct VarU32(pub u32);
-
-impl Deref for VarU32 {
-    type Target = u32;
-
-    fn deref(&self) -> &u32 {
-        &self.0
-    }
-}
-
-impl Packetize for VarU32 {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use std::{cmp, mem};
-
-        let n = cmp::min(stream.len(), mem::size_of::<u32>());
-        let mut out = 0_u32;
-        for i in 0..n {
-            let val = ((stream[i] as u32) & 0x7f) << (7 * (i as u32));
-            out += val;
-            if stream[i] < 0x80 {
-                return Ok((VarU32(out), i + 1));
-            }
-        }
-
-        err!(MalformedPacket, code: MalformedPacket, "VarU32::read")
-    }
-
-    fn encode(&self) -> Result<Blob> {
-        let mut data = [0_u8; 32];
-        let size = match *(&self.0) {
-            val if val < 128 => {
-                data[0] = (val & 0x7f_u32) as u8;
-                1
-            }
-            val if val < 16_384 => {
-                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
-                data[1] = ((val >> 7) & 0x7f_u32) as u8;
-                2
-            }
-            val if val < 2_097_152 => {
-                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
-                data[1] = (((val >> 7) & 0x7f_u32) as u8) | 0x80;
-                data[2] = ((val >> 14) & 0x7f_u32) as u8;
-                3
-            }
-            val if val <= *VarU32::MAX => {
-                data[0] = ((val & 0x7f_u32) as u8) | 0x80;
-                data[1] = (((val >> 7) & 0x7f_u32) as u8) | 0x80;
-                data[2] = (((val >> 14) & 0x7f_u32) as u8) | 0x80;
-                data[3] = ((val >> 21) & 0x7f_u32) as u8;
-                4
-            }
-            val => err!(InvalidInput, desc: "VarU32:write({})", val)?,
-        };
-
-        Ok(Blob::Small { data, size })
-    }
-}
-
-impl VarU32 {
-    pub const MAX: VarU32 = VarU32(268_435_455);
-}
-
 /// Packet type from a byte
 ///
 /// ```ignore
@@ -241,7 +173,7 @@ macro_rules! fixed_byte {
 impl Packetize for FixedHeader {
     fn decode(stream: &[u8]) -> Result<(FixedHeader, usize)> {
         let (byte1, m) = u8::decode(stream)?;
-        let (remaining_len, n) = VarU32::decode(&stream[m..])?;
+        let (remaining_len, n) = VarU32::decode(advance(stream, m)?)?;
 
         let fh = FixedHeader { byte1, remaining_len };
         fh.validate()?;
@@ -334,35 +266,6 @@ impl FixedHeader {
     }
 }
 
-pub type UserProperty = (String, String);
-
-impl Packetize for UserProperty {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        let (key, m) = String::decode(stream)?;
-        let (val, n) = String::decode(&stream[m..])?;
-        Ok(((key, val), (m + n)))
-    }
-
-    fn encode(&self) -> Result<Blob> {
-        let key_blob = self.0.encode()?;
-        let val_blob = self.1.encode()?;
-        let m = key_blob.as_ref().len();
-        let n = val_blob.as_ref().len();
-
-        if (m + n) < 32 {
-            let mut data = [0_u8; 32];
-            data[..m].copy_from_slice(key_blob.as_ref());
-            data[m..m + n].copy_from_slice(val_blob.as_ref());
-            Ok(Blob::Small { data, size: m + n })
-        } else {
-            let mut data = Vec::with_capacity(64);
-            data.extend_from_slice(self.0.encode()?.as_ref());
-            data.extend_from_slice(self.1.encode()?.as_ref());
-            Ok(Blob::Large { data })
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyType {
     PayloadFormatIndicator = 1,
@@ -387,7 +290,7 @@ pub enum PropertyType {
     TopicAlias = 35,
     MaximumQoS = 36,
     RetainAvailable = 37,
-    UserProperty = 38,
+    UserProp = 38,
     MaximumPacketSize = 39,
     WildcardSubscriptionAvailable = 40,
     SubscriptionIdentifierAvailable = 41,
@@ -423,7 +326,7 @@ impl TryFrom<u32> for PropertyType {
             35 => TopicAlias,
             36 => MaximumQoS,
             37 => RetainAvailable,
-            38 => UserProperty,
+            38 => UserProp,
             39 => MaximumPacketSize,
             40 => WildcardSubscriptionAvailable,
             41 => SubscriptionIdentifierAvailable,
@@ -458,126 +361,80 @@ pub enum Property {
     TopicAlias(u16),
     MaximumQoS(QoS),
     RetainAvailable(u8),
-    UserProperty(UserProperty),
+    UserProp(UserProperty),
     MaximumPacketSize(u32),
     WildcardSubscriptionAvailable(u8),
     SubscriptionIdentifierAvailable(u8),
     SharedSubscriptionAvailable(u8),
 }
 
+macro_rules! dec_prop {
+    ($varn:ident, $valtype:ty, $stream:expr) => {{
+        let (val, n) = <$valtype>::decode($stream)?;
+        (Property::$varn(val), n)
+    }};
+}
+
+macro_rules! enc_prop {
+    ($data:ident, $varn:ident, $($action:tt)*) => {{
+        $data.extend_from_slice(&(PropertyType::$varn as u8).to_be_bytes());
+        $data.extend_from_slice($($action)*);
+    }};
+}
+
 impl Packetize for Property {
     fn decode(mut stream: &[u8]) -> Result<(Self, usize)> {
+        use PropertyType::*;
+
         let (t, m) = VarU32::decode(stream)?;
-        stream = &stream[m..];
+        stream = advance(stream, m)?;
         let (property, n) = match PropertyType::try_from(*t)? {
-            PropertyType::PayloadFormatIndicator => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::PayloadFormatIndicator(val), n)
-            }
-            PropertyType::MessageExpiryInterval => {
-                let (val, n) = u32::decode(stream)?;
-                (Property::MessageExpiryInterval(val), n)
-            }
-            PropertyType::ContentType => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ContentType(val), n)
-            }
-            PropertyType::ResponseTopic => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ResponseTopic(val), n)
-            }
-            PropertyType::CorrelationData => {
+            PayloadFormatIndicator => dec_prop!(PayloadFormatIndicator, u8, stream),
+            MessageExpiryInterval => dec_prop!(MessageExpiryInterval, u32, stream),
+            ContentType => dec_prop!(ContentType, String, stream),
+            ResponseTopic => dec_prop!(ResponseTopic, String, stream),
+            CorrelationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;
                 (Property::CorrelationData(val), n)
             }
-            PropertyType::SubscriptionIdentifier => {
-                let (val, n) = VarU32::decode(stream)?;
-                (Property::SubscriptionIdentifier(val), n)
+            SubscriptionIdentifier => dec_prop!(SubscriptionIdentifier, VarU32, stream),
+            SessionExpiryInterval => dec_prop!(SessionExpiryInterval, u32, stream),
+            AssignedClientIdentifier => {
+                dec_prop!(AssignedClientIdentifier, String, stream)
             }
-            PropertyType::SessionExpiryInterval => {
-                let (val, n) = u32::decode(stream)?;
-                (Property::SessionExpiryInterval(val), n)
-            }
-            PropertyType::AssignedClientIdentifier => {
-                let (val, n) = String::decode(stream)?;
-                (Property::AssignedClientIdentifier(val), n)
-            }
-            PropertyType::ServerKeepAlive => {
-                let (val, n) = u16::decode(stream)?;
-                (Property::ServerKeepAlive(val), n)
-            }
-            PropertyType::AuthenticationMethod => {
-                let (val, n) = String::decode(stream)?;
-                (Property::AuthenticationMethod(val), n)
-            }
-            PropertyType::AuthenticationData => {
+            ServerKeepAlive => dec_prop!(ServerKeepAlive, u16, stream),
+            AuthenticationMethod => dec_prop!(AuthenticationMethod, String, stream),
+            AuthenticationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;
                 (Property::AuthenticationData(val), n)
             }
-            PropertyType::RequestProblemInformation => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::RequestProblemInformation(val), n)
+            RequestProblemInformation => dec_prop!(RequestProblemInformation, u8, stream),
+            WillDelayInterval => dec_prop!(WillDelayInterval, u32, stream),
+            RequestResponseInformation => {
+                dec_prop!(RequestResponseInformation, u8, stream)
             }
-            PropertyType::WillDelayInterval => {
-                let (val, n) = u32::decode(stream)?;
-                (Property::WillDelayInterval(val), n)
-            }
-            PropertyType::RequestResponseInformation => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::RequestResponseInformation(val), n)
-            }
-            PropertyType::ResponseInformation => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ResponseInformation(val), n)
-            }
-            PropertyType::ServerReference => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ServerReference(val), n)
-            }
-            PropertyType::ReasonString => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ReasonString(val), n)
-            }
-            PropertyType::ReceiveMaximum => {
-                let (val, n) = u16::decode(stream)?;
-                (Property::ReceiveMaximum(val), n)
-            }
-            PropertyType::TopicAliasMaximum => {
-                let (val, n) = u16::decode(stream)?;
-                (Property::TopicAliasMaximum(val), n)
-            }
-            PropertyType::TopicAlias => {
-                let (val, n) = u16::decode(stream)?;
-                (Property::TopicAlias(val), n)
-            }
-            PropertyType::MaximumQoS => {
+            ResponseInformation => dec_prop!(ResponseInformation, String, stream),
+            ServerReference => dec_prop!(ServerReference, String, stream),
+            ReasonString => dec_prop!(ReasonString, String, stream),
+            ReceiveMaximum => dec_prop!(ReceiveMaximum, u16, stream),
+            TopicAliasMaximum => dec_prop!(TopicAliasMaximum, u16, stream),
+            TopicAlias => dec_prop!(TopicAlias, u16, stream),
+            MaximumQoS => {
                 let (val, n) = u8::decode(stream)?;
                 let qos = QoS::try_from(val)?;
                 (Property::MaximumQoS(qos), n)
             }
-            PropertyType::RetainAvailable => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::RetainAvailable(val), n)
+            RetainAvailable => dec_prop!(RetainAvailable, u8, stream),
+            UserProp => dec_prop!(UserProp, UserProperty, stream),
+            MaximumPacketSize => dec_prop!(MaximumPacketSize, u32, stream),
+            WildcardSubscriptionAvailable => {
+                dec_prop!(WildcardSubscriptionAvailable, u8, stream)
             }
-            PropertyType::UserProperty => {
-                let (val, n) = UserProperty::decode(stream)?;
-                (Property::UserProperty(val), n)
+            SubscriptionIdentifierAvailable => {
+                dec_prop!(SubscriptionIdentifierAvailable, u8, stream)
             }
-            PropertyType::MaximumPacketSize => {
-                let (val, n) = u32::decode(stream)?;
-                (Property::MaximumPacketSize(val), n)
-            }
-            PropertyType::WildcardSubscriptionAvailable => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::WildcardSubscriptionAvailable(val), n)
-            }
-            PropertyType::SubscriptionIdentifierAvailable => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::SubscriptionIdentifierAvailable(val), n)
-            }
-            PropertyType::SharedSubscriptionAvailable => {
-                let (val, n) = u8::decode(stream)?;
-                (Property::SharedSubscriptionAvailable(val), n)
+            SharedSubscriptionAvailable => {
+                dec_prop!(SharedSubscriptionAvailable, u8, stream)
             }
         };
 
@@ -590,156 +447,85 @@ impl Packetize for Property {
         let mut data = Vec::with_capacity(64);
         match self {
             PayloadFormatIndicator(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::PayloadFormatIndicator as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, PayloadFormatIndicator, &val.to_be_bytes());
             }
             MessageExpiryInterval(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::MessageExpiryInterval as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, MessageExpiryInterval, &val.to_be_bytes());
             }
             ContentType(val) => {
-                data.extend_from_slice(&(PropertyType::ContentType as u8).to_be_bytes());
-                data.extend_from_slice(val.encode()?.as_ref());
+                enc_prop!(data, ContentType, val.encode()?.as_ref());
             }
             ResponseTopic(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::ResponseTopic as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, ResponseTopic, &val.encode()?.as_ref());
             }
             CorrelationData(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::CorrelationData as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, CorrelationData, &val.encode()?.as_ref());
             }
             SubscriptionIdentifier(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::SubscriptionIdentifier as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, SubscriptionIdentifier, &val.encode()?.as_ref());
             }
             SessionExpiryInterval(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::SessionExpiryInterval as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, SessionExpiryInterval, &val.to_be_bytes());
             }
             AssignedClientIdentifier(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::AssignedClientIdentifier as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, AssignedClientIdentifier, &val.encode()?.as_ref());
             }
             ServerKeepAlive(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::ServerKeepAlive as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, ServerKeepAlive, &val.to_be_bytes());
             }
             AuthenticationMethod(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::AuthenticationMethod as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, AuthenticationMethod, &val.encode()?.as_ref());
             }
             AuthenticationData(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::AuthenticationData as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, AuthenticationData, &val.encode()?.as_ref());
             }
             RequestProblemInformation(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::RequestProblemInformation as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, RequestProblemInformation, &val.to_be_bytes());
             }
             WillDelayInterval(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::WillDelayInterval as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, WillDelayInterval, &val.to_be_bytes());
             }
             RequestResponseInformation(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::RequestResponseInformation as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, RequestResponseInformation, &val.to_be_bytes());
             }
             ResponseInformation(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::ResponseInformation as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(val.encode()?.as_ref());
+                enc_prop!(data, ResponseInformation, val.encode()?.as_ref());
             }
             ServerReference(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::ServerReference as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(val.encode()?.as_ref());
+                enc_prop!(data, ServerReference, val.encode()?.as_ref());
             }
             ReasonString(val) => {
-                data.extend_from_slice(&(PropertyType::ReasonString as u8).to_be_bytes());
-                data.extend_from_slice(&val.encode()?.as_ref());
+                enc_prop!(data, ReasonString, &val.encode()?.as_ref());
             }
             ReceiveMaximum(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::ReceiveMaximum as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, ReceiveMaximum, &val.to_be_bytes());
             }
             TopicAliasMaximum(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::TopicAliasMaximum as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, TopicAliasMaximum, &val.to_be_bytes());
             }
             TopicAlias(val) => {
-                data.extend_from_slice(&(PropertyType::TopicAlias as u8).to_be_bytes());
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, TopicAlias, &val.to_be_bytes());
             }
             MaximumQoS(val) => {
-                data.extend_from_slice(&(PropertyType::MaximumQoS as u8).to_be_bytes());
-                data.extend_from_slice(&u8::from(*val).to_be_bytes());
+                enc_prop!(data, MaximumQoS, &u8::from(*val).to_be_bytes());
             }
             RetainAvailable(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::RetainAvailable as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, RetainAvailable, &val.to_be_bytes());
             }
-            UserProperty(val) => {
-                data.extend_from_slice(&(PropertyType::UserProperty as u8).to_be_bytes());
-                data.extend_from_slice(&val.encode()?.as_ref());
+            UserProp(val) => {
+                enc_prop!(data, UserProp, &val.encode()?.as_ref());
             }
             MaximumPacketSize(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::MaximumPacketSize as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, MaximumPacketSize, &val.to_be_bytes());
             }
             WildcardSubscriptionAvailable(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::WildcardSubscriptionAvailable as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, WildcardSubscriptionAvailable, &val.to_be_bytes());
             }
             SubscriptionIdentifierAvailable(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::SubscriptionIdentifierAvailable as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, SubscriptionIdentifierAvailable, &val.to_be_bytes());
             }
             SharedSubscriptionAvailable(val) => {
-                data.extend_from_slice(
-                    &(PropertyType::SharedSubscriptionAvailable as u8).to_be_bytes(),
-                );
-                data.extend_from_slice(&val.to_be_bytes());
+                enc_prop!(data, SharedSubscriptionAvailable, &val.to_be_bytes());
             }
         };
 
@@ -747,6 +533,78 @@ impl Packetize for Property {
     }
 }
 
+impl Property {
+    fn to_property_type(&self) -> PropertyType {
+        use PropertyType::*;
+
+        match self {
+            Property::PayloadFormatIndicator(_) => PayloadFormatIndicator,
+            Property::MessageExpiryInterval(_) => MessageExpiryInterval,
+            Property::ContentType(_) => ContentType,
+            Property::ResponseTopic(_) => ResponseTopic,
+            Property::CorrelationData(_) => CorrelationData,
+            Property::SubscriptionIdentifier(_) => SubscriptionIdentifier,
+            Property::SessionExpiryInterval(_) => SessionExpiryInterval,
+            Property::AssignedClientIdentifier(_) => AssignedClientIdentifier,
+            Property::ServerKeepAlive(_) => ServerKeepAlive,
+            Property::AuthenticationMethod(_) => AuthenticationMethod,
+            Property::AuthenticationData(_) => AuthenticationData,
+            Property::RequestProblemInformation(_) => RequestProblemInformation,
+            Property::WillDelayInterval(_) => WillDelayInterval,
+            Property::RequestResponseInformation(_) => RequestResponseInformation,
+            Property::ResponseInformation(_) => ResponseInformation,
+            Property::ServerReference(_) => ServerReference,
+            Property::ReasonString(_) => ReasonString,
+            Property::ReceiveMaximum(_) => ReceiveMaximum,
+            Property::TopicAliasMaximum(_) => TopicAliasMaximum,
+            Property::TopicAlias(_) => TopicAlias,
+            Property::MaximumQoS(_) => MaximumQoS,
+            Property::RetainAvailable(_) => RetainAvailable,
+            Property::UserProp(_) => UserProp,
+            Property::MaximumPacketSize(_) => MaximumPacketSize,
+            Property::WildcardSubscriptionAvailable(_) => WildcardSubscriptionAvailable,
+            Property::SubscriptionIdentifierAvailable(_) => {
+                SubscriptionIdentifierAvailable
+            }
+            Property::SharedSubscriptionAvailable(_) => SharedSubscriptionAvailable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFormat {
+    Binary = 0,
+    Utf8 = 1,
+}
+
+impl Default for PayloadFormat {
+    fn default() -> PayloadFormat {
+        PayloadFormat::Binary
+    }
+}
+
+impl TryFrom<u8> for PayloadFormat {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<PayloadFormat> {
+        match val {
+            0 => Ok(PayloadFormat::Binary),
+            1 => Ok(PayloadFormat::Utf8),
+            _ => {
+                err!(ProtocolError, code: ProtocolError, "invalid payload format {}", val)
+            }
+        }
+    }
+}
+
+impl From<PayloadFormat> for u8 {
+    fn from(val: PayloadFormat) -> u8 {
+        match val {
+            PayloadFormat::Binary => 0,
+            PayloadFormat::Utf8 => 1,
+        }
+    }
+}
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod mod_test;

@@ -5,13 +5,31 @@
 // TODO: Test case for server unavailable.
 // TODO: Test case for server busy.
 // TODO: The Server MUST validate that the reserved flag in the CONNECT packet is set to 0
+// TODO: The Server MAY validate that the Will Message is of the format indicated,
+//       and if it is not send a CONNACK with the Reason Code of
+//       0x99 (Payload format invalid) as described in section 4.13
+// TODO: The Server MUST NOT send packets exceeding Maximum Packet Size in CONNECT msg.
+//    ** Where a Packet is too large to send, the Server MUST discard it without sending
+//       it and then behave as if it had completed sending that Application Message.
+//    ** In the case of a Shared Subscription where the message is too large to send
+//       to one or more of the Clients but other Clients can receive it, the Server
+//       can choose either discard the message without sending the message to any of
+//       the Clients, or to send the message to one of the Clients that can receive it.
+// TODO: Protocol confirmance for Request Response Information.
+// TODO: Protocol confirmance for Request Problem Information.
+// TODO: Extended authentication Section 4.12
+// TODO: If a Client sets an Authentication Method in the CONNECT, the Client MUST NOT
+//       send any packets other than AUTH or DISCONNECT packets until it has received
+//       a CONNACK packet
 
 use std::ops::{Deref, DerefMut};
 
-use crate::v5::{QoS, UserProperty};
-use crate::{Blob, ClientID, MqttProtocol, Packetize, Result, TopicName};
+use crate::util::{self, advance};
+use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
+use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ConnectFlags(pub u8);
 
 impl Deref for ConnectFlags {
@@ -79,54 +97,120 @@ pub struct Connect {
     pub payload: ConnectPayload,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConnectProperties {
-    pub session_expiry_interval: Option<u32>,
-    pub receive_maximum: Option<u16>,
-    pub max_packet_size: Option<u32>,
-    pub topic_alias_max: Option<u16>,
-    pub request_response_info: Option<u8>,
-    pub request_problem_info: Option<u8>,
-    pub user_properties: Vec<UserProperty>,
-    pub authentication_method: Option<String>,
-    pub authentication_data: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConnectPayload {
-    pub client_id: ClientID,
-    pub will_properties: Option<WillProperties>,
-    pub topic: TopicName,
-    pub payload: Vec<u8>,
-    pub user_name: String,
-    pub password: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WillProperties {
-    pub will_delay_interval: Option<u32>,
-    pub payload_format_indicator: u8,
-    pub message_expiry_interval: Option<u32>,
-    pub content_type: String,
-    pub response_topic: String,
-    pub correlation_data: Vec<u8>,
-    pub user_properties: Vec<UserProperty>,
-}
-
-impl WillProperties {
-    const WILL_DELAY_INTERVAL: u32 = 0;
-
-    fn will_delay_interval(&self) -> u32 {
-        self.will_delay_interval
-            .as_ref()
-            .map(|v| *v)
-            .unwrap_or(Self::WILL_DELAY_INTERVAL)
-    }
-}
-
-impl Packetize for WillProperties {
+impl Packetize for Connect {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        todo!()
+        let (_, mut n) = FixedHeader::decode(stream)?;
+
+        let (protocol_name, m) = String::decode(advance(stream, n)?)?;
+        n += m;
+        if protocol_name != "MQTT" {
+            err!(
+                UnsupportedProtocolVersion,
+                code: UnsupportedProtocolVersion,
+                "invalid protocol name {:?}",
+                protocol_name
+            )?;
+        }
+
+        let (val, m) = u8::decode(advance(stream, n)?)?;
+        let protocol_version = match MqttProtocol::try_from(val)? {
+            MqttProtocol::V5 => MqttProtocol::V5,
+            protocol_version => err!(
+                UnsupportedProtocolVersion,
+                code: UnsupportedProtocolVersion,
+                "can't support {:?}",
+                protocol_version
+            )?,
+        };
+        n += m;
+
+        let (flags, m) = {
+            let (val, m) = u8::decode(advance(stream, n)?)?;
+            (ConnectFlags(val), m)
+        };
+        n += m;
+        if (*flags & 1) > 0 {
+            err!(MalformedPacket, code: MalformedPacket, "connect-flags has reserved")?;
+        }
+        flags.qos()?; // validate qos
+
+        let (keep_alive, m) = u16::decode(advance(stream, n)?)?;
+        n += m;
+
+        let (properties, m) = match VarU32::decode(advance(stream, n)?)? {
+            (VarU32(0), m) => (None, m),
+            _ => {
+                let (p, m) = ConnectProperties::decode(advance(stream, n)?)?;
+                (Some(p), m)
+            }
+        };
+        n += m;
+
+        let (client_id, m) = String::decode(advance(stream, n)?)?;
+        n += m;
+
+        let (will_properties, m) = match flags.is_will_flag() {
+            true => {
+                let (val, m) = WillProperties::decode(advance(stream, n)?)?;
+                (Some(val), m)
+            }
+            false => (None, 0),
+        };
+        n += m;
+
+        let (will_topic, m) = match flags.is_will_flag() {
+            true => {
+                let (val, m) = String::decode(advance(stream, n)?)?;
+                (Some(TopicName::try_from(val)?), m)
+            }
+            false => (None, 0),
+        };
+        n += m;
+
+        let (will_payload, m) = match flags.is_will_flag() {
+            true => {
+                let (val, m) = Vec::<u8>::decode(advance(stream, n)?)?;
+                (Some(val), m)
+            }
+            false => (None, 0),
+        };
+        n += m;
+
+        let (user_name, m) = match flags.is_username() {
+            true => {
+                let (val, m) = String::decode(advance(stream, n)?)?;
+                (Some(val), m)
+            }
+            false => (None, 0),
+        };
+        n += m;
+
+        let (password, m) = match flags.is_username() {
+            true => {
+                let (val, m) = String::decode(advance(stream, n)?)?;
+                (Some(val), m)
+            }
+            false => (None, 0),
+        };
+        n += m;
+
+        let val = Connect {
+            protocol_name,
+            protocol_version,
+            flags,
+            keep_alive,
+            properties,
+            payload: ConnectPayload {
+                client_id: ClientID(client_id),
+                will_properties,
+                will_topic,
+                will_payload,
+                user_name,
+                password,
+            },
+        };
+
+        Ok((val, n))
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -134,319 +218,269 @@ impl Packetize for WillProperties {
     }
 }
 
-impl Connect {
-    //pub fn new<S: Into<String>>(id: S) -> Connect {
-    //    Connect {
-    //        keep_alive: 10,
-    //        client_id: id.into(),
-    //        clean_session: true,
-    //        last_will: None,
-    //        login: None,
-    //        properties: None,
-    //    }
-    //}
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConnectProperties {
+    pub session_expiry_interval: Option<u32>, // 0=disable, 0xFFFFFFFF=indefinite
+    pub receive_maximum: Option<u16>,         // default=65535, can't be ZERO
+    pub max_packet_size: Option<u32>,         // default=protocol-limit, can't be ZERO
+    pub topic_alias_max: Option<u16>,         // default=0
+    pub request_response_info: Option<bool>,
+    pub request_problem_info: Option<bool>,
+    pub user_properties: Vec<UserProperty>,
+    pub authentication_method: Option<String>,
+    pub authentication_data: Option<Vec<u8>>,
 }
 
-//impl Packetize for Connect {
-//    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-//        let (fh, mut n) = FixedHeader::decode(stream)?;
-//
-//        let (proto_name, m) = String::decode(stream[n..]);
-//        n += m;
-//
-//        if &proto_name != "MQTT" {
-//            err!(
-//                UnsupportedProtocolVersion,
-//                code: UnsupportedProtocolVersion,
-//                "protocol is {}",
-//                proto_name
-//            )?
-//        }
-//
-//        let version = stream[n];
-//        n += 1;
-//
-//        if version != 5 {
-//            err!(
-//                UnsupportedProtocolVersion,
-//                code: UnsupportedProtocolVersion,
-//                "protocol version {}",
-//                version
-//            )?
-//        }
-//    }
-//
-//    fn encode(&self) -> Result<Blob> {
-//        todo!()
-//    }
-//
-//    pub fn read(fixed_header: FixedHeader, mut bytes: Bytes) -> Result<Connect, Error> {
-//        let variable_header_index = fixed_header.fixed_header_len;
-//        bytes.advance(variable_header_index);
-//
-//        // Variable header
-//        let protocol_name = read_mqtt_bytes(&mut bytes)?;
-//        let protocol_name = std::str::from_utf8(&protocol_name)?.to_owned();
-//        if protocol_name != "MQTT" {
-//            return Err(Error::InvalidProtocol);
-//        }
-//
-//        let protocol_level = read_u8(&mut bytes)?;
-//        if protocol_level != 5 {
-//            return Err(Error::InvalidProtocolLevel(protocol_level));
-//        }
-//
-//        let connect_flags = read_u8(&mut bytes)?;
-//        let clean_session = (connect_flags & 0b10) != 0;
-//        let keep_alive = read_u16(&mut bytes)?;
-//
-//        let properties = ConnectProperties::read(&mut bytes)?;
-//
-//        // Payload
-//        let client_id = read_mqtt_bytes(&mut bytes)?;
-//        let client_id = std::str::from_utf8(&client_id)?.to_owned();
-//        let last_will = LastWill::read(connect_flags, &mut bytes)?;
-//        let login = Login::read(connect_flags, &mut bytes)?;
-//
-//        let connect = Connect {
-//            keep_alive,
-//            client_id,
-//            clean_session,
-//            last_will,
-//            login,
-//            properties,
-//        };
-//
-//        Ok(connect)
-//    }
-//}
+impl Packetize for ConnectProperties {
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        let mut dups = [false; 256];
+        let mut props = ConnectProperties::default();
 
-//impl LastWill {
-//    pub fn _new(
-//        topic: impl Into<String>,
-//        payload: impl Into<Vec<u8>>,
-//        qos: QoS,
-//        retain: bool,
-//    ) -> LastWill {
-//        LastWill {
-//            topic: topic.into(),
-//            message: Bytes::from(payload.into()),
-//            qos,
-//            retain,
-//        }
-//    }
-//
-//    fn len(&self) -> usize {
-//        let mut len = 0;
-//        len += 2 + self.topic.len() + 2 + self.message.len();
-//        len
-//    }
-//
-//    fn read(connect_flags: u8, mut bytes: &mut Bytes) -> Result<Option<LastWill>, Error> {
-//        let last_will = match connect_flags & 0b100 {
-//            0 if (connect_flags & 0b0011_1000) != 0 => {
-//                return Err(Error::IncorrectPacketFormat);
-//            }
-//            0 => None,
-//            _ => {
-//                let will_topic = read_mqtt_bytes(&mut bytes)?;
-//                let will_topic = std::str::from_utf8(&will_topic)?.to_owned();
-//                let will_message = read_mqtt_bytes(&mut bytes)?;
-//                let will_qos = qos((connect_flags & 0b11000) >> 3)?;
-//                Some(LastWill {
-//                    topic: will_topic,
-//                    message: will_message,
-//                    qos: will_qos,
-//                    retain: (connect_flags & 0b0010_0000) != 0,
-//                })
-//            }
-//        };
-//
-//        Ok(last_will)
-//    }
-//}
+        let (count, mut n) = VarU32::decode(stream)?;
 
-//impl Login {
-//    pub fn new<S: Into<String>>(u: S, p: S) -> Login {
-//        Login { username: u.into(), password: p.into() }
-//    }
-//
-//    fn read(connect_flags: u8, mut bytes: &mut Bytes) -> Result<Option<Login>, Error> {
-//        let username = match connect_flags & 0b1000_0000 {
-//            0 => String::new(),
-//            _ => {
-//                let username = read_mqtt_bytes(&mut bytes)?;
-//                std::str::from_utf8(&username)?.to_owned()
-//            }
-//        };
-//
-//        let password = match connect_flags & 0b0100_0000 {
-//            0 => String::new(),
-//            _ => {
-//                let password = read_mqtt_bytes(&mut bytes)?;
-//                std::str::from_utf8(&password)?.to_owned()
-//            }
-//        };
-//
-//        if username.is_empty() && password.is_empty() {
-//            Ok(None)
-//        } else {
-//            Ok(Some(Login { username, password }))
-//        }
-//    }
-//
-//    fn len(&self) -> usize {
-//        let mut len = 0;
-//
-//        if !self.username.is_empty() {
-//            len += 2 + self.username.len();
-//        }
-//
-//        if !self.password.is_empty() {
-//            len += 2 + self.password.len();
-//        }
-//
-//        len
-//    }
-//}
+        for _i in 0..*count {
+            let (property, m) = Property::decode(&stream[n..])?;
+            n += m;
 
-//impl ConnectProperties {
-//    fn _new() -> ConnectProperties {
-//        ConnectProperties {
-//            session_expiry_interval: None,
-//            receive_maximum: None,
-//            max_packet_size: None,
-//            topic_alias_max: None,
-//            request_response_info: None,
-//            request_problem_info: None,
-//            user_properties: Vec::new(),
-//            authentication_method: None,
-//            authentication_data: None,
-//        }
-//    }
-//
-//    fn read(mut bytes: &mut Bytes) -> Result<Option<ConnectProperties>, Error> {
-//        let mut session_expiry_interval = None;
-//        let mut receive_maximum = None;
-//        let mut max_packet_size = None;
-//        let mut topic_alias_max = None;
-//        let mut request_response_info = None;
-//        let mut request_problem_info = None;
-//        let mut user_properties = Vec::new();
-//        let mut authentication_method = None;
-//        let mut authentication_data = None;
-//
-//        let (properties_len_len, properties_len) = length(bytes.iter())?;
-//        bytes.advance(properties_len_len);
-//        if properties_len == 0 {
-//            return Ok(None);
-//        }
-//
-//        let mut cursor = 0;
-//        // read until cursor reaches property length. properties_len = 0 will skip this loop
-//        while cursor < properties_len {
-//            let prop = read_u8(&mut bytes)?;
-//            cursor += 1;
-//            match property(prop)? {
-//                PropertyType::SessionExpiryInterval => {
-//                    session_expiry_interval = Some(read_u32(&mut bytes)?);
-//                    cursor += 4;
-//                }
-//                PropertyType::ReceiveMaximum => {
-//                    receive_maximum = Some(read_u16(&mut bytes)?);
-//                    cursor += 2;
-//                }
-//                PropertyType::MaximumPacketSize => {
-//                    max_packet_size = Some(read_u32(&mut bytes)?);
-//                    cursor += 4;
-//                }
-//                PropertyType::TopicAliasMaximum => {
-//                    topic_alias_max = Some(read_u16(&mut bytes)?);
-//                    cursor += 2;
-//                }
-//                PropertyType::RequestResponseInformation => {
-//                    request_response_info = Some(read_u8(&mut bytes)?);
-//                    cursor += 1;
-//                }
-//                PropertyType::RequestProblemInformation => {
-//                    request_problem_info = Some(read_u8(&mut bytes)?);
-//                    cursor += 1;
-//                }
-//                PropertyType::UserProperty => {
-//                    let key = read_mqtt_bytes(&mut bytes)?;
-//                    let key = std::str::from_utf8(&key)?.to_owned();
-//                    let value = read_mqtt_bytes(&mut bytes)?;
-//                    let value = std::str::from_utf8(&value)?.to_owned();
-//                    cursor += 2 + key.len() + 2 + value.len();
-//                    user_properties.push((key, value));
-//                }
-//                PropertyType::AuthenticationMethod => {
-//                    let method = read_mqtt_bytes(&mut bytes)?;
-//                    let method = std::str::from_utf8(&method)?.to_owned();
-//                    cursor += 2 + method.len();
-//                    authentication_method = Some(method);
-//                }
-//                PropertyType::AuthenticationData => {
-//                    let data = read_mqtt_bytes(&mut bytes)?;
-//                    cursor += 2 + data.len();
-//                    authentication_data = Some(data);
-//                }
-//                _ => return Err(Error::InvalidPropertyType(prop)),
-//            }
-//        }
-//
-//        Ok(Some(ConnectProperties {
-//            session_expiry_interval,
-//            receive_maximum,
-//            max_packet_size,
-//            topic_alias_max,
-//            request_response_info,
-//            request_problem_info,
-//            user_properties,
-//            authentication_method,
-//            authentication_data,
-//        }))
-//    }
-//
-//    fn len(&self) -> usize {
-//        let mut len = 0;
-//
-//        if self.session_expiry_interval.is_some() {
-//            len += 1 + 4;
-//        }
-//
-//        if self.receive_maximum.is_some() {
-//            len += 1 + 2;
-//        }
-//
-//        if self.max_packet_size.is_some() {
-//            len += 1 + 4;
-//        }
-//
-//        if self.topic_alias_max.is_some() {
-//            len += 1 + 2;
-//        }
-//
-//        if self.request_response_info.is_some() {
-//            len += 1 + 1;
-//        }
-//
-//        if self.request_problem_info.is_some() {
-//            len += 1 + 1;
-//        }
-//
-//        for (key, value) in self.user_properties.iter() {
-//            len += 1 + 2 + key.len() + 2 + value.len();
-//        }
-//
-//        if let Some(authentication_method) = &self.authentication_method {
-//            len += 1 + 2 + authentication_method.len();
-//        }
-//
-//        if let Some(authentication_data) = &self.authentication_data {
-//            len += 1 + 2 + authentication_data.len();
-//        }
-//
-//        len
-//    }
-//}
+            let pt = property.to_property_type();
+            if pt != PropertyType::UserProp && dups[pt as usize] {
+                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+            }
+            dups[pt as usize] = true;
+
+            match property {
+                Property::SessionExpiryInterval(val) => {
+                    props.session_expiry_interval = Some(val);
+                }
+                Property::ReceiveMaximum(val) if val == 0 => {
+                    err!(ProtocolError, code: ProtocolError, "receive_maximum is ZERO")?;
+                }
+                Property::ReceiveMaximum(val) => {
+                    props.receive_maximum = Some(val);
+                }
+                Property::MaximumPacketSize(val) if val == 0 => {
+                    err!(ProtocolError, code: ProtocolError, "max_packet_size is ZERO")?;
+                }
+                Property::TopicAliasMaximum(val) => {
+                    props.topic_alias_max = Some(val);
+                }
+                Property::RequestResponseInformation(val) => {
+                    props.request_response_info =
+                        Some(util::u8_to_bool(val, "request_response_info")?);
+                }
+                Property::RequestProblemInformation(val) => {
+                    props.request_problem_info =
+                        Some(util::u8_to_bool(val, "request_problem_info")?);
+                }
+                Property::UserProp(val) => {
+                    props.user_properties.push(val);
+                }
+                Property::AuthenticationMethod(val) => {
+                    props.authentication_method = Some(val);
+                }
+                Property::AuthenticationData(val)
+                    if props.authentication_method.is_some() =>
+                {
+                    props.authentication_data = Some(val);
+                }
+                p => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{:?} found in will properties",
+                    p.to_property_type()
+                )?,
+            }
+        }
+
+        Ok((props, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        let mut data = Vec::with_capacity(64);
+        if let Some(val) = &self.session_expiry_interval {
+            data.extend_from_slice(
+                Property::SessionExpiryInterval(*val).encode()?.as_ref(),
+            );
+        }
+        if let Some(val) = &self.receive_maximum {
+            data.extend_from_slice(Property::ReceiveMaximum(*val).encode()?.as_ref());
+        }
+        if let Some(val) = &self.max_packet_size {
+            data.extend_from_slice(Property::MaximumPacketSize(*val).encode()?.as_ref());
+        }
+        if let Some(val) = &self.topic_alias_max {
+            data.extend_from_slice(Property::TopicAliasMaximum(*val).encode()?.as_ref());
+        }
+        if let Some(val) = &self.request_response_info {
+            data.extend_from_slice(
+                Property::RequestResponseInformation(util::bool_to_u8(*val))
+                    .encode()?
+                    .as_ref(),
+            );
+        }
+        if let Some(val) = &self.request_problem_info {
+            data.extend_from_slice(
+                Property::RequestProblemInformation(util::bool_to_u8(*val))
+                    .encode()?
+                    .as_ref(),
+            );
+        }
+        if let Some(val) = self.authentication_method.clone() {
+            data.extend_from_slice(
+                Property::AuthenticationMethod(val).encode()?.as_ref(),
+            );
+        }
+        if let Some(val) = self.authentication_data.clone() {
+            data.extend_from_slice(Property::AuthenticationData(val).encode()?.as_ref());
+        }
+
+        for uprop in self.user_properties.iter() {
+            data.extend_from_slice(Property::UserProp(uprop.clone()).encode()?.as_ref());
+        }
+
+        Ok(Blob::Large { data })
+    }
+}
+
+impl ConnectProperties {
+    pub const RECEIVE_MAXIMUM: u16 = 65535;
+    pub const TOPIC_ALIAS_MAXIMUM: u16 = 0;
+
+    pub fn session_expiry_interval(&self) -> u32 {
+        self.session_expiry_interval.unwrap_or(0)
+    }
+
+    pub fn receive_maximum(&self) -> u16 {
+        self.receive_maximum.clone().unwrap_or(Self::RECEIVE_MAXIMUM)
+    }
+
+    pub fn topic_alias_maximum(&self) -> u16 {
+        self.topic_alias_max.clone().unwrap_or(Self::TOPIC_ALIAS_MAXIMUM)
+    }
+
+    pub fn request_response_info(&self) -> bool {
+        self.request_response_info.clone().unwrap_or(false)
+    }
+
+    pub fn request_problem_info(&self) -> bool {
+        self.request_response_info.clone().unwrap_or(true)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct ConnectPayload {
+    pub client_id: ClientID,
+    pub will_properties: Option<WillProperties>,
+    pub will_topic: Option<TopicName>,
+    pub will_payload: Option<Vec<u8>>,
+    pub user_name: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct WillProperties {
+    pub will_delay_interval: Option<u32>,
+    pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary
+    pub message_expiry_interval: Option<u32>,
+    pub content_type: Option<String>,
+    pub response_topic: Option<String>,
+    pub correlation_data: Option<Vec<u8>>,
+    pub user_properties: Vec<UserProperty>,
+}
+
+impl Packetize for WillProperties {
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        let mut dups = [false; 256];
+        let mut wps = WillProperties::default();
+
+        let (count, mut n) = VarU32::decode(stream)?;
+
+        for _i in 0..*count {
+            let (property, m) = Property::decode(&stream[n..])?;
+            n += m;
+
+            let pt = property.to_property_type();
+            if pt != PropertyType::UserProp && dups[pt as usize] {
+                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+            }
+            dups[pt as usize] = true;
+
+            match property {
+                Property::WillDelayInterval(val) => {
+                    wps.will_delay_interval = Some(val);
+                }
+                Property::PayloadFormatIndicator(val) => {
+                    wps.payload_format_indicator = val.try_into()?;
+                }
+                Property::MessageExpiryInterval(val) => {
+                    wps.message_expiry_interval = Some(val);
+                }
+                Property::ContentType(val) => {
+                    wps.content_type = Some(val);
+                }
+                Property::ResponseTopic(val) => {
+                    wps.response_topic = Some(val);
+                }
+                Property::CorrelationData(val) => {
+                    wps.correlation_data = Some(val);
+                }
+                Property::UserProp(val) => {
+                    wps.user_properties.push(val);
+                }
+                p => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{:?} found in will properties",
+                    p.to_property_type()
+                )?,
+            }
+        }
+
+        Ok((wps, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        let mut data = Vec::with_capacity(64);
+        if let Some(val) = &self.will_delay_interval {
+            data.extend_from_slice(Property::WillDelayInterval(*val).encode()?.as_ref());
+        }
+        if let PayloadFormat::Utf8 = self.payload_format_indicator {
+            data.extend_from_slice(
+                Property::PayloadFormatIndicator(PayloadFormat::Utf8.into())
+                    .encode()?
+                    .as_ref(),
+            );
+        }
+        if let Some(val) = self.message_expiry_interval {
+            data.extend_from_slice(
+                Property::MessageExpiryInterval(val).encode()?.as_ref(),
+            );
+        }
+        if let Some(val) = &self.content_type {
+            data.extend_from_slice(Property::ContentType(val.clone()).encode()?.as_ref());
+        }
+        if let Some(val) = &self.response_topic {
+            data.extend_from_slice(
+                Property::ResponseTopic(val.clone()).encode()?.as_ref(),
+            );
+        }
+        if let Some(val) = &self.correlation_data {
+            data.extend_from_slice(
+                Property::CorrelationData(val.clone()).encode()?.as_ref(),
+            );
+        }
+        for uprop in self.user_properties.iter() {
+            data.extend_from_slice(Property::UserProp(uprop.clone()).encode()?.as_ref());
+        }
+
+        Ok(Blob::Large { data })
+    }
+}
+
+impl WillProperties {
+    pub const WILL_DELAY_INTERVAL: u32 = 0;
+
+    pub fn will_delay_interval(&self) -> u32 {
+        self.will_delay_interval.clone().unwrap_or(Self::WILL_DELAY_INTERVAL)
+    }
+}
