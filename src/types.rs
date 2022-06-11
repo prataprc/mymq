@@ -33,16 +33,16 @@ impl Blob {
 pub struct TopicName(String);
 
 impl Deref for TopicName {
-    type Target = str;
+    type Target = String;
 
-    fn deref(&self) -> &str {
-        self.0.as_str()
+    fn deref(&self) -> &String {
+        &self.0
     }
 }
 
 impl DerefMut for TopicName {
-    fn deref_mut(&mut self) -> &mut str {
-        self.0.as_mut_str()
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
     }
 }
 
@@ -70,16 +70,16 @@ impl TopicName {
 pub struct TopicFilter(String);
 
 impl Deref for TopicFilter {
-    type Target = str;
+    type Target = String;
 
-    fn deref(&self) -> &str {
-        self.0.as_str()
+    fn deref(&self) -> &String {
+        &self.0
     }
 }
 
 impl DerefMut for TopicFilter {
-    fn deref_mut(&mut self) -> &mut str {
-        self.0.as_mut_str()
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
     }
 }
 
@@ -105,16 +105,16 @@ impl TopicFilter {
 pub struct ClientID(pub String);
 
 impl Deref for ClientID {
-    type Target = str;
+    type Target = String;
 
-    fn deref(&self) -> &str {
-        self.0.as_str()
+    fn deref(&self) -> &String {
+        &self.0
     }
 }
 
 impl DerefMut for ClientID {
-    fn deref_mut(&mut self) -> &mut str {
-        self.0.as_mut_str()
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
     }
 }
 
@@ -363,6 +363,15 @@ impl TryFrom<u8> for MqttProtocol {
                 "found: {:?}",
                 val
             )?,
+        }
+    }
+}
+
+impl From<MqttProtocol> for u8 {
+    fn from(val: MqttProtocol) -> u8 {
+        match val {
+            MqttProtocol::V4 => 4,
+            MqttProtocol::V5 => 5,
         }
     }
 }

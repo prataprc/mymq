@@ -5,14 +5,47 @@ use crate::util::advance;
 use crate::{Blob, Packetize, Result, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
+mod connack;
 mod connect;
 
-pub use connect::{ConnectFlags, ConnectProperties, WillProperties};
+pub use connack::{ConnAck, ConnAckProperties, ConnackFlags};
+pub use connect::{Connect, ConnectFlags, ConnectProperties, WillProperties};
 
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
 // TODO: first socket read for fixed-header can wait indefinitely, but the next read
 //       for remaining_len must timeout within a stipulated period.
+// TODO: If a Server receives a CONNECT packet containing a Will Message with the Will
+//       Retain set to 1, and it does not support retained messages, the Server MUST
+//       reject the connection request. It SHOULD send CONNACK with Reason Code
+//       0x9A (Retain not supported) and then it MUST close the Network Connection.
+// TODO: A Client receiving Retain Available set to 0 from the Server MUST NOT send a
+//       PUBLISH packet with the RETAIN flag set to 1. If the Server receives such a
+//       packet, this is a Protocol Error. The Server SHOULD send a DISCONNECT with
+//       Reason Code of 0x9A (Retain not supported) as described in section 4.13.
+// TODO: The Client MUST NOT send packets exceeding Maximum Packet Size to the Server.
+//       If a Server receives a packet whose size exceeds this limit, this is a Protocol
+//       Error, the Server uses DISCONNECT with Reason Code 0x95 (Packet too large), as
+//       described in section 4.13.
+// TODO: If the Server receives a SUBSCRIBE packet containing a Wildcard Subscription
+//       and it does not support Wildcard Subscriptions, this is a Protocol Error. The
+//       Server uses DISCONNECT with Reason Code 0xA2 (Wildcard Subscriptions not
+//       supported) as described in section 4.13.
+// TODO: If the Server receives a SUBSCRIBE packet containing Subscription Identifier
+//       and it does not support Subscription Identifiers, this is a Protocol Error.
+//       The Server uses DISCONNECT with Reason Code of 0xA1 (Subscription Identifiers
+//       not supported) as described in section 4.13.
+// TODO: If the Server receives a SUBSCRIBE packet containing Shared Subscriptions and
+//       it does not support Shared Subscriptions, this is a Protocol Error. The Server
+//       uses DISCONNECT with Reason Code 0x9E (Shared Subscriptions not supported) as
+//       described in section 4.13.
+// TODO: If the Client sends a Request Response Information with a value 1, it is
+//       OPTIONAL for the Server to send the Response Information in the CONNACK.
+// TODO: The Server uses a Server Reference in either a CONNACK or DISCONNECT packet
+//       with Reason code of 0x9C (Use another server) or Reason Code 0x9D (Server moved)
+//       as described in section 4.13.
+// TODO: If a Server sends a CONNACK packet containing a Reason code of 128 or greater
+//       it MUST then close the Network Connection
 
 /// All that is MQTT
 #[derive(Debug, Clone, PartialEq)]
@@ -377,7 +410,7 @@ macro_rules! dec_prop {
 
 macro_rules! enc_prop {
     ($data:ident, $varn:ident, $($action:tt)*) => {{
-        $data.extend_from_slice(&(PropertyType::$varn as u8).to_be_bytes());
+        $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
         $data.extend_from_slice($($action)*);
     }};
 }
