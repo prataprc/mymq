@@ -2,17 +2,19 @@
 use arbitrary::Arbitrary;
 
 use crate::util::advance;
-use crate::{Blob, Packetize, Result, UserProperty, VarU32};
+use crate::{Blob, Packetize, Result, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
 mod connack;
 mod connect;
+mod publish;
 
 pub use connack::{ConnAck, ConnAckProperties, ConnackFlags};
 pub use connect::{Connect, ConnectFlags, ConnectProperties, WillProperties};
 
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
+// TODO: Test case to detect fresh packet-identifier.
 // TODO: first socket read for fixed-header can wait indefinitely, but the next read
 //       for remaining_len must timeout within a stipulated period.
 // TODO: If a Server receives a CONNECT packet containing a Will Message with the Will
@@ -375,7 +377,7 @@ pub enum Property {
     PayloadFormatIndicator(u8),
     MessageExpiryInterval(u32),
     ContentType(String),
-    ResponseTopic(String),
+    ResponseTopic(TopicName),
     CorrelationData(Vec<u8>),
     SubscriptionIdentifier(VarU32),
     SessionExpiryInterval(u32),
@@ -408,10 +410,40 @@ macro_rules! dec_prop {
     }};
 }
 
+#[macro_export]
+macro_rules! dec_props {
+    ($type:ty, $stream:expr, $n:expr) => {{
+        match VarU32::decode(advance($stream, $n)?)? {
+            (VarU32(0), m) => Ok((None, m)),
+            (VarU32(p), m) => {
+                let (properties, r) = <$type>::decode(advance($stream, $n)?)?;
+                let p = usize::try_from(p)?;
+                if r == (m + p) {
+                    Ok((Some(properties), r))
+                } else {
+                    err!(
+                        ProtocolError,
+                        code: ProtocolError,
+                        "property len not matching {}",
+                        r
+                    )
+                }
+            }
+        }
+    }};
+}
+
+#[macro_export]
 macro_rules! enc_prop {
-    ($data:ident, $varn:ident, $($action:tt)*) => {{
+    (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
+        if let Some(val) = $($val)* {
+            $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
+            $data.extend_from_slice(val.encode()?.as_ref())
+        }
+    }};
+    ($data:ident, $varn:ident, $($val:tt)*) => {{
         $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
-        $data.extend_from_slice($($action)*);
+        $data.extend_from_slice($($val)*.encode()?.as_ref());
     }};
 }
 
@@ -425,7 +457,10 @@ impl Packetize for Property {
             PayloadFormatIndicator => dec_prop!(PayloadFormatIndicator, u8, stream),
             MessageExpiryInterval => dec_prop!(MessageExpiryInterval, u32, stream),
             ContentType => dec_prop!(ContentType, String, stream),
-            ResponseTopic => dec_prop!(ResponseTopic, String, stream),
+            ResponseTopic => {
+                let (val, n) = String::decode(stream)?;
+                (Property::ResponseTopic(val.try_into()?), n)
+            }
             CorrelationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;
                 (Property::CorrelationData(val), n)
@@ -479,86 +514,44 @@ impl Packetize for Property {
 
         let mut data = Vec::with_capacity(64);
         match self {
-            PayloadFormatIndicator(val) => {
-                enc_prop!(data, PayloadFormatIndicator, &val.to_be_bytes());
-            }
-            MessageExpiryInterval(val) => {
-                enc_prop!(data, MessageExpiryInterval, &val.to_be_bytes());
-            }
-            ContentType(val) => {
-                enc_prop!(data, ContentType, val.encode()?.as_ref());
-            }
-            ResponseTopic(val) => {
-                enc_prop!(data, ResponseTopic, &val.encode()?.as_ref());
-            }
-            CorrelationData(val) => {
-                enc_prop!(data, CorrelationData, &val.encode()?.as_ref());
-            }
-            SubscriptionIdentifier(val) => {
-                enc_prop!(data, SubscriptionIdentifier, &val.encode()?.as_ref());
-            }
-            SessionExpiryInterval(val) => {
-                enc_prop!(data, SessionExpiryInterval, &val.to_be_bytes());
-            }
+            PayloadFormatIndicator(val) => enc_prop!(data, PayloadFormatIndicator, val),
+            MessageExpiryInterval(val) => enc_prop!(data, MessageExpiryInterval, val),
+            ContentType(val) => enc_prop!(data, ContentType, val),
+            ResponseTopic(val) => enc_prop!(data, ResponseTopic, val),
+            CorrelationData(val) => enc_prop!(data, CorrelationData, val),
+            SubscriptionIdentifier(val) => enc_prop!(data, SubscriptionIdentifier, val),
+            SessionExpiryInterval(val) => enc_prop!(data, SessionExpiryInterval, val),
             AssignedClientIdentifier(val) => {
-                enc_prop!(data, AssignedClientIdentifier, &val.encode()?.as_ref());
+                enc_prop!(data, AssignedClientIdentifier, val)
             }
-            ServerKeepAlive(val) => {
-                enc_prop!(data, ServerKeepAlive, &val.to_be_bytes());
-            }
-            AuthenticationMethod(val) => {
-                enc_prop!(data, AuthenticationMethod, &val.encode()?.as_ref());
-            }
-            AuthenticationData(val) => {
-                enc_prop!(data, AuthenticationData, &val.encode()?.as_ref());
-            }
+            ServerKeepAlive(val) => enc_prop!(data, ServerKeepAlive, val),
+            AuthenticationMethod(val) => enc_prop!(data, AuthenticationMethod, val),
+            AuthenticationData(val) => enc_prop!(data, AuthenticationData, val),
             RequestProblemInformation(val) => {
-                enc_prop!(data, RequestProblemInformation, &val.to_be_bytes());
+                enc_prop!(data, RequestProblemInformation, val)
             }
-            WillDelayInterval(val) => {
-                enc_prop!(data, WillDelayInterval, &val.to_be_bytes());
-            }
+            WillDelayInterval(val) => enc_prop!(data, WillDelayInterval, val),
             RequestResponseInformation(val) => {
-                enc_prop!(data, RequestResponseInformation, &val.to_be_bytes());
+                enc_prop!(data, RequestResponseInformation, val)
             }
-            ResponseInformation(val) => {
-                enc_prop!(data, ResponseInformation, val.encode()?.as_ref());
-            }
-            ServerReference(val) => {
-                enc_prop!(data, ServerReference, val.encode()?.as_ref());
-            }
-            ReasonString(val) => {
-                enc_prop!(data, ReasonString, &val.encode()?.as_ref());
-            }
-            ReceiveMaximum(val) => {
-                enc_prop!(data, ReceiveMaximum, &val.to_be_bytes());
-            }
-            TopicAliasMaximum(val) => {
-                enc_prop!(data, TopicAliasMaximum, &val.to_be_bytes());
-            }
-            TopicAlias(val) => {
-                enc_prop!(data, TopicAlias, &val.to_be_bytes());
-            }
-            MaximumQoS(val) => {
-                enc_prop!(data, MaximumQoS, &u8::from(*val).to_be_bytes());
-            }
-            RetainAvailable(val) => {
-                enc_prop!(data, RetainAvailable, &val.to_be_bytes());
-            }
-            UserProp(val) => {
-                enc_prop!(data, UserProp, &val.encode()?.as_ref());
-            }
-            MaximumPacketSize(val) => {
-                enc_prop!(data, MaximumPacketSize, &val.to_be_bytes());
-            }
+            ResponseInformation(val) => enc_prop!(data, ResponseInformation, val),
+            ServerReference(val) => enc_prop!(data, ServerReference, val),
+            ReasonString(val) => enc_prop!(data, ReasonString, val),
+            ReceiveMaximum(val) => enc_prop!(data, ReceiveMaximum, val),
+            TopicAliasMaximum(val) => enc_prop!(data, TopicAliasMaximum, val),
+            TopicAlias(val) => enc_prop!(data, TopicAlias, val),
+            MaximumQoS(val) => enc_prop!(data, MaximumQoS, u8::from(*val)),
+            RetainAvailable(val) => enc_prop!(data, RetainAvailable, val),
+            UserProp(val) => enc_prop!(data, UserProp, val),
+            MaximumPacketSize(val) => enc_prop!(data, MaximumPacketSize, val),
             WildcardSubscriptionAvailable(val) => {
-                enc_prop!(data, WildcardSubscriptionAvailable, &val.to_be_bytes());
+                enc_prop!(data, WildcardSubscriptionAvailable, val)
             }
             SubscriptionIdentifierAvailable(val) => {
-                enc_prop!(data, SubscriptionIdentifierAvailable, &val.to_be_bytes());
+                enc_prop!(data, SubscriptionIdentifierAvailable, val)
             }
             SharedSubscriptionAvailable(val) => {
-                enc_prop!(data, SharedSubscriptionAvailable, &val.to_be_bytes());
+                enc_prop!(data, SharedSubscriptionAvailable, val)
             }
         };
 
@@ -612,7 +605,7 @@ pub enum PayloadFormat {
 
 impl Default for PayloadFormat {
     fn default() -> PayloadFormat {
-        PayloadFormat::Binary
+        PayloadFormat::Binary // default, when missing in CONNECT/PUBLISH messages
     }
 }
 
@@ -638,6 +631,43 @@ impl From<PayloadFormat> for u8 {
         }
     }
 }
+
+impl PayloadFormat {
+    pub fn is_binary(&self) -> bool {
+        self == &PayloadFormat::Binary
+    }
+
+    pub fn is_utf8(&self) -> bool {
+        self == &PayloadFormat::Utf8
+    }
+}
+
+fn insert_fixed_header(fh: FixedHeader, mut data: Vec<u8>) -> Result<Vec<u8>> {
+    let fh_blob = fh.encode()?;
+    let fh_bytes = fh_blob.as_ref();
+    let n = fh_bytes.len();
+
+    data.extend_from_slice(fh_bytes);
+    data.copy_within(.., n);
+    (&mut data[..n]).copy_from_slice(fh_bytes);
+
+    Ok(data)
+}
+
+fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
+    let n = u32::try_from(n)?;
+
+    let blob = VarU32(n).encode()?;
+    let bytes = blob.as_ref();
+    let n = bytes.len();
+
+    data.extend_from_slice(bytes);
+    data.copy_within(.., n);
+    (&mut data[..n]).copy_from_slice(bytes);
+
+    Ok(data)
+}
+
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod mod_test;

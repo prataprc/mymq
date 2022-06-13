@@ -55,7 +55,7 @@ macro_rules! err {
         let e = Error {
             kind,
             description,
-            cause: Box::new($cause),
+            cause: Some(Box::new($cause)),
             ..Error::default()
         };
 
@@ -150,6 +150,13 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<std::num::TryFromIntError> for Error {
+    fn from(val: std::num::TryFromIntError) -> Self {
+        let err: result::Result<(), Error> = err!(TryFromIntError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
 impl Error {
     /// Return the error kind, caller should know how to handle it.
     pub fn kind(&self) -> ErrorKind {
@@ -196,6 +203,7 @@ pub enum ErrorKind {
     IOError,
     InvalidInput,
     PayloadTooLong,
+    TryFromIntError,
 }
 
 impl fmt::Display for ErrorKind {
@@ -211,6 +219,7 @@ impl fmt::Display for ErrorKind {
             IOError => write!(f, "IOError"),
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
+            TryFromIntError => write!(f, "TryFromIntError"),
         }
     }
 }
@@ -251,7 +260,7 @@ pub enum ReasonCode {
     ExceedMessageRate = 0x96,
     QuotaExceeded = 0x97,
     AdminAction = 0x98,
-    InvalidPayloadFormat = 0x99,
+    PayloadFormatInvalid = 0x99,
     RetainNotSupported = 0x9A,
     InvalidQoS = 0x9B,
     UseAnotherServer = 0x9C,
@@ -301,7 +310,7 @@ impl fmt::Display for ReasonCode {
             ExceedMessageRate => "Message rate too high",
             QuotaExceeded => "Quota exceeded",
             AdminAction => "Administrative action",
-            InvalidPayloadFormat => "Payload format invalid",
+            PayloadFormatInvalid => "Payload format invalid",
             RetainNotSupported => "Retain not supported",
             InvalidQoS => "QoS not supported",
             UseAnotherServer => "Use another server",

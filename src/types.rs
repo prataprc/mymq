@@ -60,6 +60,19 @@ impl TryFrom<String> for TopicName {
     }
 }
 
+impl Packetize for TopicName {
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        let (val, n) = String::decode(stream)?;
+        let val: TopicName = val.try_into()?;
+        Ok((val, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        let val: TopicName = self.0.clone().try_into()?;
+        val.encode()
+    }
+}
+
 impl TopicName {
     pub fn as_levels(&self) -> Vec<&str> {
         self.split('/').collect()

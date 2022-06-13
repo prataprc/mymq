@@ -101,6 +101,8 @@ pub struct ConnAck {
 
 impl Packetize for ConnAck {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        use crate::dec_props;
+
         let (_, mut n) = FixedHeader::decode(stream)?;
 
         let (flags, m) = {
@@ -115,13 +117,7 @@ impl Packetize for ConnAck {
         };
         n += m;
 
-        let (properties, m) = match VarU32::decode(advance(stream, n)?)? {
-            (VarU32(0), m) => (None, m),
-            _ => {
-                let (properties, m) = ConnAckProperties::decode(advance(stream, n)?)?;
-                (Some(properties), m)
-            }
-        };
+        let (properties, m) = dec_props!(ConnAckProperties, stream, n)?;
         n += m;
 
         let val = ConnAck { flags, code, properties };
@@ -129,7 +125,10 @@ impl Packetize for ConnAck {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::v5::{insert_fixed_header, PacketType};
+
         let mut data = Vec::with_capacity(64);
+
         data.extend_from_slice((*self.flags).encode()?.as_ref());
         data.extend_from_slice((self.code as u8).encode()?.as_ref());
         if let Some(properties) = &self.properties {
@@ -137,6 +136,9 @@ impl Packetize for ConnAck {
         } else {
             data.extend_from_slice(VarU32(0).encode()?.as_ref());
         }
+
+        let fh = FixedHeader::new(PacketType::ConnAck, VarU32(data.len().try_into()?))?;
+        data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
     }
@@ -152,7 +154,6 @@ pub struct ConnAckProperties {
     pub assigned_client_identifier: Option<String>,
     pub topic_alias_maximum: Option<u16>,
     pub reason_string: Option<String>,
-    pub user_properties: Vec<UserProperty>,
     pub wildcard_subscription_available: Option<bool>,
     pub subscription_identifiers_available: Option<bool>,
     pub shared_subscription_available: Option<bool>,
@@ -161,6 +162,7 @@ pub struct ConnAckProperties {
     pub server_reference: Option<String>,
     pub authentication_method: Option<String>,
     pub authentication_data: Option<Vec<u8>>,
+    pub user_properties: Vec<UserProperty>,
 }
 
 impl Packetize for ConnAckProperties {
@@ -168,9 +170,10 @@ impl Packetize for ConnAckProperties {
         let mut dups = [false; 256];
         let mut props = ConnAckProperties::default();
 
-        let (count, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = VarU32::decode(stream)?;
+        let limit = usize::try_from(*len)? + n;
 
-        for _i in 0..*count {
+        while n < limit {
             let (property, m) = Property::decode(advance(stream, n)?)?;
             n += m;
 
@@ -244,11 +247,11 @@ impl Packetize for ConnAckProperties {
                 Property::AuthenticationData(val) => {
                     props.authentication_data = Some(val);
                 }
-                p => err!(
+                _ => err!(
                     ProtocolError,
                     code: ProtocolError,
                     "{:?} found in connack properties",
-                    p.to_property_type()
+                    pt
                 )?,
             };
         }
@@ -257,105 +260,49 @@ impl Packetize for ConnAckProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::{enc_prop, v5::insert_property_len};
+
         let mut data = Vec::with_capacity(64);
 
-        data.extend_from_slice(self.count().encode()?.as_ref());
-
-        if let Some(val) = &self.session_expiry_interval {
-            data.extend_from_slice(
-                Property::SessionExpiryInterval(*val).encode()?.as_ref(),
-            );
-        }
-        if let Some(val) = &self.receive_maximum {
-            data.extend_from_slice(Property::ReceiveMaximum(*val).encode()?.as_ref());
-        }
+        enc_prop!(opt: data, SessionExpiryInterval, self.session_expiry_interval);
+        enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
         match &self.max_qos {
             Some(QoS::ExactlyOnce) => err!(InvalidInput, desc:"max_qos ExactlyOnce")?,
-            Some(val) => data.extend_from_slice(
-                Property::MaximumQoS((*val).into()).encode()?.as_ref(),
-            ),
+            Some(val) => enc_prop!(data, MaximumQoS, u8::from(*val)),
             None => (),
         }
-        if let Some(val) = &self.retain_available {
-            data.extend_from_slice(
-                Property::RetainAvailable(util::bool_to_u8(*val)).encode()?.as_ref(),
-            );
+        enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
+        if let Some(val) = self.retain_available {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, RetainAvailable, val);
         }
-        if let Some(val) = &self.max_packet_size {
-            data.extend_from_slice(Property::MaximumPacketSize(*val).encode()?.as_ref());
+        enc_prop!(opt: data, MaximumPacketSize, self.max_packet_size);
+        enc_prop!(opt: data, AssignedClientIdentifier, &self.assigned_client_identifier);
+        enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_maximum);
+        enc_prop!(opt: data, ReasonString, &self.reason_string);
+        if let Some(val) = self.wildcard_subscription_available {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, WildcardSubscriptionAvailable, val);
         }
-        if let Some(val) = &self.assigned_client_identifier {
-            data.extend_from_slice(
-                VarU32(PropertyType::AssignedClientIdentifier as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
+        if let Some(val) = self.subscription_identifiers_available {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, SubscriptionIdentifierAvailable, val);
         }
-        if let Some(val) = &self.topic_alias_maximum {
-            data.extend_from_slice(Property::TopicAliasMaximum(*val).encode()?.as_ref());
+        if let Some(val) = self.shared_subscription_available {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, SharedSubscriptionAvailable, val);
         }
-        if let Some(val) = &self.reason_string {
-            data.extend_from_slice(
-                VarU32(PropertyType::ReasonString as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.wildcard_subscription_available {
-            data.extend_from_slice(
-                Property::WildcardSubscriptionAvailable(util::bool_to_u8(*val))
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = &self.subscription_identifiers_available {
-            data.extend_from_slice(
-                Property::SubscriptionIdentifierAvailable(util::bool_to_u8(*val))
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = &self.shared_subscription_available {
-            data.extend_from_slice(
-                Property::SharedSubscriptionAvailable(util::bool_to_u8(*val))
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = &self.server_keep_alive {
-            data.extend_from_slice(Property::ServerKeepAlive(*val).encode()?.as_ref());
-        }
-        if let Some(val) = &self.response_information {
-            data.extend_from_slice(
-                VarU32(PropertyType::ResponseInformation as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.server_reference {
-            data.extend_from_slice(
-                VarU32(PropertyType::ServerReference as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.authentication_method {
-            data.extend_from_slice(
-                VarU32(PropertyType::AuthenticationMethod as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.authentication_data {
-            data.extend_from_slice(
-                VarU32(PropertyType::AuthenticationData as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        for uprop in self.user_properties.iter() {
-            data.extend_from_slice(
-                VarU32(PropertyType::UserProp as u32).encode()?.as_ref(),
-            );
+        enc_prop!(opt: data, ServerKeepAlive, self.server_keep_alive);
+        enc_prop!(opt: data, ResponseInformation, &self.response_information);
+        enc_prop!(opt: data, ServerReference, &self.server_reference);
+        enc_prop!(opt: data, AuthenticationMethod, &self.authentication_method);
+        enc_prop!(opt: data, AuthenticationData, &self.authentication_data);
 
-            let (key, value) = uprop;
-            data.extend_from_slice(key.encode()?.as_ref());
-            data.extend_from_slice(value.encode()?.as_ref());
+        for uprop in self.user_properties.iter() {
+            enc_prop!(data, UserProp, uprop)
         }
+
+        let data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
     }
@@ -388,27 +335,5 @@ impl ConnAckProperties {
 
     pub fn shared_subscription_available(&self) -> bool {
         self.shared_subscription_available.unwrap_or(true)
-    }
-
-    fn count(&self) -> VarU32 {
-        let n = if self.session_expiry_interval.is_some() { 1 } else { 0 }
-            + if self.receive_maximum.is_some() { 0 } else { 1 }
-            + if self.max_qos.is_some() { 1 } else { 0 }
-            + if self.retain_available.is_some() { 1 } else { 0 }
-            + if self.max_packet_size.is_some() { 1 } else { 0 }
-            + if self.assigned_client_identifier.is_some() { 1 } else { 0 }
-            + if self.topic_alias_maximum.is_some() { 1 } else { 0 }
-            + if self.reason_string.is_some() { 1 } else { 0 }
-            + self.user_properties.len() as u32
-            + if self.wildcard_subscription_available.is_some() { 1 } else { 0 }
-            + if self.subscription_identifiers_available.is_some() { 1 } else { 0 }
-            + if self.shared_subscription_available.is_some() { 1 } else { 0 }
-            + if self.server_keep_alive.is_some() { 1 } else { 0 }
-            + if self.response_information.is_some() { 1 } else { 0 }
-            + if self.server_reference.is_some() { 1 } else { 0 }
-            + if self.authentication_method.is_some() { 1 } else { 0 }
-            + if self.authentication_data.is_some() { 1 } else { 0 };
-
-        VarU32(n)
     }
 }

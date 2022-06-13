@@ -21,7 +21,7 @@ pub fn bool_to_u8(val: bool) -> u8 {
 }
 
 pub fn advance(stream: &[u8], n: usize) -> Result<&[u8]> {
-    if n <= stream.len() {
+    if n < stream.len() {
         Ok(&stream[n..])
     } else {
         err!(InsufficientBytes, code: MalformedPacket, "insufficient bytes in packet")

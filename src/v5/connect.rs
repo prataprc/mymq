@@ -109,6 +109,8 @@ pub struct ConnectPayload {
 
 impl Packetize for Connect {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        use crate::dec_props;
+
         let (_, mut n) = FixedHeader::decode(stream)?;
 
         let (protocol_name, m) = String::decode(advance(stream, n)?)?;
@@ -147,13 +149,7 @@ impl Packetize for Connect {
         let (keep_alive, m) = u16::decode(advance(stream, n)?)?;
         n += m;
 
-        let (properties, m) = match VarU32::decode(advance(stream, n)?)? {
-            (VarU32(0), m) => (None, m),
-            _ => {
-                let (properties, m) = ConnectProperties::decode(advance(stream, n)?)?;
-                (Some(properties), m)
-            }
-        };
+        let (properties, m) = dec_props!(ConnectProperties, stream, n)?;
         n += m;
 
         // payload
@@ -162,29 +158,37 @@ impl Packetize for Connect {
         n += m;
 
         let (will_properties, m) = match flags.is_will_flag() {
-            true => {
-                let (val, m) = WillProperties::decode(advance(stream, n)?)?;
-                (Some(val), m)
-            }
+            true => dec_props!(WillProperties, stream, n)?,
             false => (None, 0),
         };
         n += m;
 
         let (will_topic, m) = match flags.is_will_flag() {
             true => {
-                let (val, m) = String::decode(advance(stream, n)?)?;
-                (Some(TopicName::try_from(val)?), m)
+                let (val, m) = TopicName::decode(advance(stream, n)?)?;
+                (Some(val), m)
             }
             false => (None, 0),
         };
         n += m;
 
-        let (will_payload, m) = match flags.is_will_flag() {
-            true => {
+        let (will_payload, m) = match &will_properties {
+            Some(will_properties) => {
                 let (val, m) = Vec::<u8>::decode(advance(stream, n)?)?;
+                if will_properties.payload_format_indicator.is_utf8() {
+                    match std::str::from_utf8(&val) {
+                        Err(err) => err!(
+                            ProtocolError,
+                            code: PayloadFormatInvalid,
+                            cause: err,
+                            "payload format invalid in will message"
+                        )?,
+                        _ => (),
+                    }
+                }
                 (Some(val), m)
             }
-            false => (None, 0),
+            None => (None, 0),
         };
         n += m;
 
@@ -226,6 +230,8 @@ impl Packetize for Connect {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::v5::{insert_fixed_header, PacketType};
+
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(self.protocol_name.encode()?.as_ref());
         data.extend_from_slice(u8::from(self.protocol_version).encode()?.as_ref());
@@ -245,7 +251,7 @@ impl Packetize for Connect {
             data.extend_from_slice(VarU32(0).encode()?.as_ref());
         }
         if let Some(will_topic) = &self.payload.will_topic {
-            data.extend_from_slice((*will_topic).encode()?.as_ref());
+            data.extend_from_slice(will_topic.encode()?.as_ref());
         }
         if let Some(will_payload) = &self.payload.will_payload {
             data.extend_from_slice(will_payload.encode()?.as_ref());
@@ -256,6 +262,9 @@ impl Packetize for Connect {
         if let Some(password) = &self.payload.password {
             data.extend_from_slice(password.encode()?.as_ref());
         }
+
+        let fh = FixedHeader::new(PacketType::Connect, VarU32(data.len().try_into()?))?;
+        data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
     }
@@ -269,9 +278,9 @@ pub struct ConnectProperties {
     pub topic_alias_max: Option<u16>,         // default=0
     pub request_response_info: Option<bool>,
     pub request_problem_info: Option<bool>,
-    pub user_properties: Vec<UserProperty>,
     pub authentication_method: Option<String>,
     pub authentication_data: Option<Vec<u8>>,
+    pub user_properties: Vec<UserProperty>,
 }
 
 impl Packetize for ConnectProperties {
@@ -279,9 +288,10 @@ impl Packetize for ConnectProperties {
         let mut dups = [false; 256];
         let mut props = ConnectProperties::default();
 
-        let (count, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = VarU32::decode(stream)?;
+        let limit = usize::try_from(*len)? + n;
 
-        for _i in 0..*count {
+        while n < limit {
             let (property, m) = Property::decode(advance(stream, n)?)?;
             n += m;
 
@@ -329,11 +339,11 @@ impl Packetize for ConnectProperties {
                 {
                     props.authentication_data = Some(val);
                 }
-                p => err!(
+                _ => err!(
                     ProtocolError,
                     code: ProtocolError,
                     "{:?} found in will properties",
-                    p.to_property_type()
+                    pt
                 )?,
             }
         }
@@ -342,60 +352,30 @@ impl Packetize for ConnectProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::{enc_prop, v5::insert_property_len};
+
         let mut data = Vec::with_capacity(64);
 
-        data.extend_from_slice(self.count().encode()?.as_ref());
-
-        if let Some(val) = &self.session_expiry_interval {
-            data.extend_from_slice(
-                Property::SessionExpiryInterval(*val).encode()?.as_ref(),
-            );
+        enc_prop!(opt: data, SessionExpiryInterval, self.session_expiry_interval);
+        enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
+        enc_prop!(opt: data, MaximumPacketSize, self.max_packet_size);
+        enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_max);
+        if let Some(val) = self.request_response_info {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, RequestResponseInformation, val);
         }
-        if let Some(val) = &self.receive_maximum {
-            data.extend_from_slice(Property::ReceiveMaximum(*val).encode()?.as_ref());
+        if let Some(val) = self.request_problem_info {
+            let val = util::bool_to_u8(val);
+            enc_prop!(data, RequestProblemInformation, val);
         }
-        if let Some(val) = &self.max_packet_size {
-            data.extend_from_slice(Property::MaximumPacketSize(*val).encode()?.as_ref());
-        }
-        if let Some(val) = &self.topic_alias_max {
-            data.extend_from_slice(Property::TopicAliasMaximum(*val).encode()?.as_ref());
-        }
-        if let Some(val) = &self.request_response_info {
-            data.extend_from_slice(
-                Property::RequestResponseInformation(util::bool_to_u8(*val))
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = &self.request_problem_info {
-            data.extend_from_slice(
-                Property::RequestProblemInformation(util::bool_to_u8(*val))
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = &self.authentication_method {
-            data.extend_from_slice(
-                VarU32(PropertyType::AuthenticationMethod as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.authentication_data {
-            data.extend_from_slice(
-                VarU32(PropertyType::AuthenticationData as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
+        enc_prop!(opt: data, AuthenticationMethod, &self.authentication_method);
+        enc_prop!(opt: data, AuthenticationData, &self.authentication_method);
 
         for uprop in self.user_properties.iter() {
-            data.extend_from_slice(
-                VarU32(PropertyType::UserProp as u32).encode()?.as_ref(),
-            );
-
-            let (key, value) = uprop;
-            data.extend_from_slice(key.encode()?.as_ref());
-            data.extend_from_slice(value.encode()?.as_ref());
+            enc_prop!(data, UserProp, uprop)
         }
+
+        data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
     }
@@ -424,20 +404,6 @@ impl ConnectProperties {
     pub fn request_problem_info(&self) -> bool {
         self.request_response_info.unwrap_or(true)
     }
-
-    fn count(&self) -> VarU32 {
-        let n = if self.session_expiry_interval.is_some() { 1 } else { 0 }
-            + if self.receive_maximum.is_some() { 0 } else { 1 }
-            + if self.max_packet_size.is_some() { 1 } else { 0 }
-            + if self.topic_alias_max.is_some() { 1 } else { 0 }
-            + if self.request_response_info.is_some() { 1 } else { 0 }
-            + if self.request_problem_info.is_some() { 1 } else { 0 }
-            + self.user_properties.len() as u32
-            + if self.authentication_method.is_some() { 1 } else { 0 }
-            + if self.authentication_data.is_some() { 1 } else { 0 };
-
-        VarU32(n)
-    }
 }
 
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -446,7 +412,7 @@ pub struct WillProperties {
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary
     pub message_expiry_interval: Option<u32>,
     pub content_type: Option<String>,
-    pub response_topic: Option<String>,
+    pub response_topic: Option<TopicName>,
     pub correlation_data: Option<Vec<u8>>,
     pub user_properties: Vec<UserProperty>,
 }
@@ -456,9 +422,10 @@ impl Packetize for WillProperties {
         let mut dups = [false; 256];
         let mut wps = WillProperties::default();
 
-        let (count, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = VarU32::decode(stream)?;
+        let limit = usize::try_from(*len)? + n;
 
-        for _i in 0..*count {
+        while n < limit {
             let (property, m) = Property::decode(advance(stream, n)?)?;
             n += m;
 
@@ -490,11 +457,11 @@ impl Packetize for WillProperties {
                 Property::UserProp(val) => {
                     wps.user_properties.push(val);
                 }
-                p => err!(
+                _ => err!(
                     ProtocolError,
                     code: ProtocolError,
                     "{:?} found in will properties",
-                    p.to_property_type()
+                    pt
                 )?,
             }
         }
@@ -503,52 +470,25 @@ impl Packetize for WillProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::{enc_prop, v5::insert_property_len};
+
         let mut data = Vec::with_capacity(64);
 
-        data.extend_from_slice(self.count().encode()?.as_ref());
+        enc_prop!(opt: data, WillDelayInterval, self.will_delay_interval);
+        if self.payload_format_indicator.is_utf8() {
+            let val = u8::from(PayloadFormat::Utf8);
+            enc_prop!(data, PayloadFormatIndicator, val);
+        }
+        enc_prop!(opt: data, MessageExpiryInterval, self.message_expiry_interval);
+        enc_prop!(opt: data, ContentType, &self.content_type);
+        enc_prop!(opt: data, ResponseTopic, &self.response_topic);
+        enc_prop!(opt: data, CorrelationData, &self.correlation_data);
 
-        if let Some(val) = &self.will_delay_interval {
-            data.extend_from_slice(Property::WillDelayInterval(*val).encode()?.as_ref());
-        }
-        if let PayloadFormat::Utf8 = self.payload_format_indicator {
-            data.extend_from_slice(
-                Property::PayloadFormatIndicator(PayloadFormat::Utf8.into())
-                    .encode()?
-                    .as_ref(),
-            );
-        }
-        if let Some(val) = self.message_expiry_interval {
-            data.extend_from_slice(
-                Property::MessageExpiryInterval(val).encode()?.as_ref(),
-            );
-        }
-        if let Some(val) = &self.content_type {
-            data.extend_from_slice(
-                VarU32(PropertyType::ContentType as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.response_topic {
-            data.extend_from_slice(
-                VarU32(PropertyType::ResponseTopic as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
-        if let Some(val) = &self.correlation_data {
-            data.extend_from_slice(
-                VarU32(PropertyType::ResponseTopic as u32).encode()?.as_ref(),
-            );
-            data.extend_from_slice(val.encode()?.as_ref());
-        }
         for uprop in self.user_properties.iter() {
-            data.extend_from_slice(
-                VarU32(PropertyType::UserProp as u32).encode()?.as_ref(),
-            );
-
-            let (key, value) = uprop;
-            data.extend_from_slice(key.encode()?.as_ref());
-            data.extend_from_slice(value.encode()?.as_ref());
+            enc_prop!(data, UserProp, uprop);
         }
+
+        let data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
     }
@@ -559,17 +499,5 @@ impl WillProperties {
 
     pub fn will_delay_interval(&self) -> u32 {
         self.will_delay_interval.unwrap_or(Self::WILL_DELAY_INTERVAL)
-    }
-
-    fn count(&self) -> VarU32 {
-        let n = if self.will_delay_interval.is_some() { 1 } else { 0 }
-            + if self.payload_format_indicator == PayloadFormat::Binary { 0 } else { 1 }
-            + if self.message_expiry_interval.is_some() { 1 } else { 0 }
-            + if self.content_type.is_some() { 1 } else { 0 }
-            + if self.response_topic.is_some() { 1 } else { 0 }
-            + if self.correlation_data.is_some() { 1 } else { 0 }
-            + self.user_properties.len() as u32;
-
-        VarU32(n)
     }
 }
