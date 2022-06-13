@@ -103,7 +103,8 @@ impl Packetize for ConnAck {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         use crate::dec_props;
 
-        let (_, mut n) = FixedHeader::decode(stream)?;
+        let (fh, mut n) = FixedHeader::decode(stream)?;
+        fh.validate()?;
 
         let (flags, m) = {
             let (val, m) = u8::decode(advance(stream, n)?)?;

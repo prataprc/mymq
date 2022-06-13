@@ -55,6 +55,7 @@ impl Packetize for Publish {
         use crate::dec_props;
 
         let (fh, mut n) = FixedHeader::decode(stream)?;
+        fh.validate()?;
         let (_, retain, qos, duplicate) = fh.unwrap()?;
 
         let (topic_name, m) = TopicName::decode(advance(stream, n)?)?;

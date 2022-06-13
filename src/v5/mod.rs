@@ -7,6 +7,7 @@ use crate::{Error, ErrorKind, ReasonCode};
 
 mod connack;
 mod connect;
+mod pubaclc;
 mod publish;
 
 pub use connack::{ConnAck, ConnAckProperties, ConnackFlags};
@@ -256,6 +257,47 @@ impl FixedHeader {
         Ok(val)
     }
 
+    pub fn new_pubrel(remaining_len: VarU32) -> Result<FixedHeader> {
+        if remaining_len > VarU32::MAX {
+            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+        }
+
+        let (packet_type, qos) = (u8::from(PacketType::PubRel), QoS::AtLeastOnce);
+        let val = FixedHeader {
+            byte1: fixed_byte!(packet_type, false, qos, false),
+            remaining_len,
+        };
+
+        Ok(val)
+    }
+
+    pub fn new_subscribe(remaining_len: VarU32) -> Result<FixedHeader> {
+        if remaining_len > VarU32::MAX {
+            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+        }
+
+        let (packet_type, qos) = (u8::from(PacketType::Subscribe), QoS::AtLeastOnce);
+        let val = FixedHeader {
+            byte1: fixed_byte!(packet_type, false, qos, false),
+            remaining_len,
+        };
+
+        Ok(val)
+    }
+    pub fn new_unsubscribe(remaining_len: VarU32) -> Result<FixedHeader> {
+        if remaining_len > VarU32::MAX {
+            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+        }
+
+        let (packet_type, qos) = (u8::from(PacketType::Unsubscribe), QoS::AtLeastOnce);
+        let val = FixedHeader {
+            byte1: fixed_byte!(packet_type, false, qos, false),
+            remaining_len,
+        };
+
+        Ok(val)
+    }
+
     /// Unwrap the fixed header into (packet-type, retain, qos, dup).
     pub fn unwrap(self) -> Result<(PacketType, bool, QoS, bool)> {
         let pkt_type: PacketType = (self.byte1 >> 4).try_into()?;
@@ -290,10 +332,19 @@ impl FixedHeader {
         let (pkt_type, retain, qos, dup) = self.unwrap()?;
         match pkt_type {
             PacketType::Publish => Ok(()),
+            PacketType::PubRel if qos == QoS::AtLeastOnce => Ok(()),
+            PacketType::Subscribe if qos == QoS::AtLeastOnce => Ok(()),
+            PacketType::Unsubscribe if qos == QoS::AtLeastOnce => Ok(()),
+            PacketType::PubRel | PacketType::Subscribe | PacketType::Unsubscribe => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "invalid flags found for {:?}",
+                pkt_type
+            ),
             _ if retain || dup || qos != QoS::AtMostOnce => err!(
                 MalformedPacket,
                 code: MalformedPacket,
-                "flags found for {:?}",
+                "invalid flags found for {:?}",
                 pkt_type
             ),
             _ => Ok(()),

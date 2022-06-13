@@ -111,7 +111,8 @@ impl Packetize for Connect {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         use crate::dec_props;
 
-        let (_, mut n) = FixedHeader::decode(stream)?;
+        let (fh, mut n) = FixedHeader::decode(stream)?;
+        fh.validate()?;
 
         let (protocol_name, m) = String::decode(advance(stream, n)?)?;
         n += m;
