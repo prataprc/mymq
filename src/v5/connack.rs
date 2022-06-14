@@ -5,7 +5,7 @@ use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnackFlags(pub u8);
 
 impl Deref for ConnackFlags {
@@ -22,6 +22,23 @@ impl DerefMut for ConnackFlags {
     }
 }
 
+impl Packetize for ConnackFlags {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (flags, n) = dec_field!(u8, stream, 0);
+        let flags = ConnackFlags(flags);
+        flags.unwrap()?;
+
+        Ok((flags, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        self.unwrap()?;
+        self.0.encode()
+    }
+}
+
 impl ConnackFlags {
     pub const SESSION_PRESENT: ConnackFlags = ConnackFlags(0b_0000_0001);
 
@@ -29,8 +46,12 @@ impl ConnackFlags {
         flags.iter().fold(ConnackFlags(0), |acc, flag| ConnackFlags(acc.0 | flag.0))
     }
 
-    pub fn is_session_present_flag(&self) -> bool {
-        (self.0 & Self::SESSION_PRESENT.0) > 0
+    pub fn unwrap(&self) -> Result<bool> {
+        if (self.0 & 0b_1111_1110) > 0 {
+            err!(MalformedPacket, code: MalformedPacket, "connack flags {:?}", self.0)?;
+        }
+
+        Ok(self.0 & (*Self::SESSION_PRESENT) > 0)
     }
 }
 
@@ -100,26 +121,16 @@ pub struct ConnAck {
 }
 
 impl Packetize for ConnAck {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use crate::dec_props;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
 
-        let (fh, mut n) = FixedHeader::decode(stream)?;
+        let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
-        let (flags, m) = {
-            let (val, m) = u8::decode(advance(stream, n)?)?;
-            (ConnackFlags(val), m)
-        };
-        n += m;
-
-        let (code, m) = {
-            let (val, m) = u8::decode(advance(stream, n)?)?;
-            (ConnectReasonCode::try_from(val)?, m)
-        };
-        n += m;
-
-        let (properties, m) = dec_props!(ConnAckProperties, stream, n)?;
-        n += m;
+        let (flags, n) = dec_field!(ConnackFlags, stream, n);
+        let (code, n) = dec_field!(u8, stream, n);
+        let code = ConnectReasonCode::try_from(code)?;
+        let (properties, n) = dec_props!(ConnAckProperties, stream, n);
 
         let val = ConnAck { flags, code, properties };
         Ok((val, n))
@@ -167,16 +178,20 @@ pub struct ConnAckProperties {
 }
 
 impl Packetize for ConnAckProperties {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        use crate::v5::Property::*;
+
+        let stream: &[u8] = stream.as_ref();
+
         let mut dups = [false; 256];
         let mut props = ConnAckProperties::default();
 
-        let (len, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = Property::decode(advance(stream, n)?)?;
-            n += m;
+            let (property, m) = dec_field!(Property, stream, n);
+            n = m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -185,69 +200,45 @@ impl Packetize for ConnAckProperties {
             dups[pt as usize] = true;
 
             match property {
-                Property::SessionExpiryInterval(val) => {
-                    props.session_expiry_interval = Some(val);
+                SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
+                ReceiveMaximum(val) => props.receive_maximum = Some(val),
+                MaximumQoS(QoS::ExactlyOnce) => {
+                    err!(ProtocolError, code: ProtocolError, "max_qos QoS::ExactlyOnce")?;
                 }
-                Property::ReceiveMaximum(val) => {
-                    props.receive_maximum = Some(val);
-                }
-                Property::MaximumQoS(val) if val == QoS::ExactlyOnce => {
-                    err!(ProtocolError, code: ProtocolError, "max_qos {:?}", val)?;
-                }
-                Property::MaximumQoS(val) => {
-                    props.max_qos = Some(val);
-                }
-                Property::RetainAvailable(val) => {
+                MaximumQoS(val) => props.max_qos = Some(val),
+                RetainAvailable(val) => {
                     props.retain_available =
                         Some(util::u8_to_bool(val, "retain_available")?);
                 }
-                Property::MaximumPacketSize(val) if val == 0 => {
+                MaximumPacketSize(0) => {
                     err!(ProtocolError, code: ProtocolError, "max_packet_size is ZERO")?;
                 }
-                Property::MaximumPacketSize(val) => {
-                    props.max_packet_size = Some(val);
-                }
-                Property::AssignedClientIdentifier(val) => {
+                MaximumPacketSize(val) => props.max_packet_size = Some(val),
+                AssignedClientIdentifier(val) => {
                     props.assigned_client_identifier = Some(val);
                 }
-                Property::TopicAliasMaximum(val) => {
-                    props.topic_alias_maximum = Some(val);
-                }
-                Property::ReasonString(val) => {
-                    props.reason_string = Some(val);
-                }
-                Property::UserProp(val) => {
-                    props.user_properties.push(val);
-                }
-                Property::WildcardSubscriptionAvailable(val) => {
+                TopicAliasMaximum(val) => props.topic_alias_maximum = Some(val),
+                ReasonString(val) => props.reason_string = Some(val),
+                UserProp(val) => props.user_properties.push(val),
+                WildcardSubscriptionAvailable(val) => {
                     props.wildcard_subscription_available =
                         Some(util::u8_to_bool(val, "wildcard_subscription_available")?);
                 }
-                Property::SubscriptionIdentifierAvailable(val) => {
+                SubscriptionIdentifierAvailable(val) => {
                     props.subscription_identifiers_available = Some(util::u8_to_bool(
                         val,
                         "subscription_identifiers_available",
                     )?);
                 }
-                Property::SharedSubscriptionAvailable(val) => {
+                SharedSubscriptionAvailable(val) => {
                     props.shared_subscription_available =
                         Some(util::u8_to_bool(val, "shared_subscription_available")?);
                 }
-                Property::ServerKeepAlive(val) => {
-                    props.server_keep_alive = Some(val);
-                }
-                Property::ResponseInformation(val) => {
-                    props.response_information = Some(val);
-                }
-                Property::ServerReference(val) => {
-                    props.server_reference = Some(val);
-                }
-                Property::AuthenticationMethod(val) => {
-                    props.authentication_method = Some(val);
-                }
-                Property::AuthenticationData(val) => {
-                    props.authentication_data = Some(val);
-                }
+                ServerKeepAlive(val) => props.server_keep_alive = Some(val),
+                ResponseInformation(val) => props.response_information = Some(val),
+                ServerReference(val) => props.server_reference = Some(val),
+                AuthenticationMethod(val) => props.authentication_method = Some(val),
+                AuthenticationData(val) => props.authentication_data = Some(val),
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -261,7 +252,7 @@ impl Packetize for ConnAckProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::{enc_prop, v5::insert_property_len};
+        use crate::v5::insert_property_len;
 
         let mut data = Vec::with_capacity(64);
 

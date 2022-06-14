@@ -52,53 +52,37 @@ pub struct Pub {
 }
 
 impl Packetize for Pub {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use crate::dec_props;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
 
         let code: PubReasonCode = PubReasonCode::Success;
         let properties: Option<PubProperties> = None;
 
-        let (fh, mut n) = FixedHeader::decode(stream)?;
+        let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
         let (packet_type, _, _, _) = fh.unwrap()?;
 
-        let (packet_id, m) = u16::decode(advance(stream, n)?)?;
-        n += m;
+        let (packet_id, n) = dec_field!(u16, stream, n);
 
         if *fh.remaining_len == 2 {
             let packet = Pub { packet_type, packet_id, code, properties };
             return Ok((packet, n));
         }
 
-        let (code, m) = {
-            let (val, m) = u8::decode(advance(stream, n)?)?;
-            (PubReasonCode::try_from(val)?, m)
+        let (code, n) = {
+            let (val, n) = dec_field!(u8, stream, n);
+            (PubReasonCode::try_from(val)?, n)
         };
-        let invalid_code = match (packet_type, code) {
-            (PacketType::PubAck, PubReasonCode::PacketIdNotFound) => false,
-            (PacketType::PubRec, PubReasonCode::PacketIdNotFound) => false,
-            (PacketType::PubRel, PubReasonCode::Success) => true,
-            (PacketType::PubRel, PubReasonCode::PacketIdNotFound) => true,
-            (PacketType::PubRel, _) => false,
-            (PacketType::PubComp, PubReasonCode::Success) => true,
-            (PacketType::PubComp, PubReasonCode::PacketIdNotFound) => true,
-            (PacketType::PubComp, _) => false,
-            (_, _) => true,
-        };
-        if invalid_code {
-            err!(MalformedPacket, code: MalformedPacket, "invalid code {:?}", code)?
-        }
-        n += m;
 
         if *fh.remaining_len < 4 {
             let packet = Pub { packet_type, packet_id, code, properties };
             return Ok((packet, n));
         }
 
-        let (properties, m) = dec_props!(PubProperties, stream, n)?;
-        n += m;
+        let (properties, n) = dec_props!(PubProperties, stream, n);
 
         let val = Pub { packet_type, packet_id, code, properties };
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -128,6 +112,27 @@ impl Packetize for Pub {
     }
 }
 
+impl Pub {
+    fn validate(&self) -> Result<()> {
+        let invalid_code = match (self.packet_type, self.code) {
+            (PacketType::PubAck, PubReasonCode::PacketIdNotFound) => true,
+            (PacketType::PubRec, PubReasonCode::PacketIdNotFound) => true,
+            (PacketType::PubRel, PubReasonCode::Success) => false,
+            (PacketType::PubRel, PubReasonCode::PacketIdNotFound) => false,
+            (PacketType::PubRel, _) => true,
+            (PacketType::PubComp, PubReasonCode::Success) => false,
+            (PacketType::PubComp, PubReasonCode::PacketIdNotFound) => false,
+            (PacketType::PubComp, _) => true,
+            (_, _) => false,
+        };
+        if invalid_code {
+            err!(MalformedPacket, code: MalformedPacket, "invalid code {:?}", self.code)?
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PubProperties {
     pub reason_string: Option<String>,
@@ -135,16 +140,18 @@ pub struct PubProperties {
 }
 
 impl Packetize for PubProperties {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         let mut dups = [false; 256];
         let mut props = PubProperties::default();
 
-        let (len, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = Property::decode(advance(stream, n)?)?;
-            n += m;
+            let (property, m) = dec_field!(Property, stream, n);
+            n = m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -153,12 +160,8 @@ impl Packetize for PubProperties {
             dups[pt as usize] = true;
 
             match property {
-                Property::ReasonString(val) => {
-                    props.reason_string = Some(val);
-                }
-                Property::UserProp(val) => {
-                    props.user_properties.push(val);
-                }
+                Property::ReasonString(val) => props.reason_string = Some(val),
+                Property::UserProp(val) => props.user_properties.push(val),
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -172,7 +175,7 @@ impl Packetize for PubProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::{enc_prop, v5::insert_property_len};
+        use crate::v5::insert_property_len;
 
         let mut data = Vec::with_capacity(64);
 

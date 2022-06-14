@@ -5,6 +5,89 @@ use crate::util::advance;
 use crate::{Blob, Packetize, Result, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
+#[macro_export]
+macro_rules! dec_field {
+    ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
+        if $($pred)* {
+            let (val, m) = <$type>::decode(crate::util::advance($stream, $n)?)?;
+            (Some(val), $n + m)
+        } else {
+            (None, $n)
+        }
+    }};
+    ($type:ty, $stream:expr, $n:expr) => {{
+        let (val, m) = <$type>::decode(crate::util::advance($stream, $n)?)?;
+        (val, $n + m)
+    }};
+}
+
+macro_rules! dec_prop {
+    ($varn:ident, $valtype:ty, $stream:expr) => {{
+        let (val, n) = <$valtype>::decode($stream)?;
+        (Property::$varn(val), n)
+    }};
+}
+
+#[macro_export]
+macro_rules! dec_props {
+    ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
+        if $($pred)* {
+            match VarU32::decode(advance($stream, $n)?)? {
+                (VarU32(0), m) => (None, $n + m),
+                (VarU32(p), m) => {
+                    let (properties, r) = <$type>::decode(advance($stream, $n)?)?;
+                    let p = usize::try_from(p)?;
+                    if r == (m + p) {
+                        (Some(properties), $n + r)
+                    } else {
+                        err!(
+                            ProtocolError,
+                            code: ProtocolError,
+                            "property len not matching {}",
+                            r
+                        )?
+                    }
+                }
+            }
+        } else {
+            (None, $n)
+        }
+    }};
+    ($type:ty, $stream:expr, $n:expr) => {{
+        match VarU32::decode(advance($stream, $n)?)? {
+            (VarU32(0), m) => (None, $n + m),
+            (VarU32(p), m) => {
+                let (properties, r) = <$type>::decode(advance($stream, $n)?)?;
+                let p = usize::try_from(p)?;
+                if r == (m + p) {
+                    (Some(properties), $n + r)
+                } else {
+                    err!(
+                        ProtocolError,
+                        code: ProtocolError,
+                        "property len not matching {}",
+                        r
+                    )?
+                }
+            }
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! enc_prop {
+    (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
+        if let Some(val) = $($val)* {
+            $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
+            $data.extend_from_slice(val.encode()?.as_ref())
+        }
+    }};
+    ($data:ident, $varn:ident, $($val:tt)*) => {{
+        $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
+        $data.extend_from_slice($($val)*.encode()?.as_ref());
+    }};
+}
+
 mod connack;
 mod connect;
 mod pubaclc;
@@ -17,61 +100,24 @@ pub use pubaclc::Pub;
 pub use publish::Publish;
 pub use subscribe::Subscribe;
 
-// TODO: FixedHeader.remaining_len must be validated with
-//       ConnectProperties.maximum_pkt_size.
-// TODO: Test case to detect fresh packet-identifier.
-// TODO: first socket read for fixed-header can wait indefinitely, but the next read
-//       for remaining_len must timeout within a stipulated period.
-// TODO: If a Server receives a CONNECT packet containing a Will Message with the Will
-//       Retain set to 1, and it does not support retained messages, the Server MUST
-//       reject the connection request. It SHOULD send CONNACK with Reason Code
-//       0x9A (Retain not supported) and then it MUST close the Network Connection.
-// TODO: A Client receiving Retain Available set to 0 from the Server MUST NOT send a
-//       PUBLISH packet with the RETAIN flag set to 1. If the Server receives such a
-//       packet, this is a Protocol Error. The Server SHOULD send a DISCONNECT with
-//       Reason Code of 0x9A (Retain not supported) as described in section 4.13.
-// TODO: The Client MUST NOT send packets exceeding Maximum Packet Size to the Server.
-//       If a Server receives a packet whose size exceeds this limit, this is a Protocol
-//       Error, the Server uses DISCONNECT with Reason Code 0x95 (Packet too large), as
-//       described in section 4.13.
-// TODO: If the Server receives a SUBSCRIBE packet containing a Wildcard Subscription
-//       and it does not support Wildcard Subscriptions, this is a Protocol Error. The
-//       Server uses DISCONNECT with Reason Code 0xA2 (Wildcard Subscriptions not
-//       supported) as described in section 4.13.
-// TODO: If the Server receives a SUBSCRIBE packet containing Subscription Identifier
-//       and it does not support Subscription Identifiers, this is a Protocol Error.
-//       The Server uses DISCONNECT with Reason Code of 0xA1 (Subscription Identifiers
-//       not supported) as described in section 4.13.
-// TODO: If the Server receives a SUBSCRIBE packet containing Shared Subscriptions and
-//       it does not support Shared Subscriptions, this is a Protocol Error. The Server
-//       uses DISCONNECT with Reason Code 0x9E (Shared Subscriptions not supported) as
-//       described in section 4.13.
-// TODO: If the Client sends a Request Response Information with a value 1, it is
-//       OPTIONAL for the Server to send the Response Information in the CONNACK.
-// TODO: The Server uses a Server Reference in either a CONNACK or DISCONNECT packet
-//       with Reason code of 0x9C (Use another server) or Reason Code 0x9D (Server moved)
-//       as described in section 4.13.
-// TODO: If a Server sends a CONNACK packet containing a Reason code of 128 or greater
-//       it MUST then close the Network Connection
-
-/// All that is MQTT
-#[derive(Debug, Clone, PartialEq)]
-pub enum Packet {
-    //Connect(Connect),
-//ConnAck(ConnAck),
-//Publish(Publish),
-//PubAck(PubAck),
-//PubRec(PubRec),
-//PubRel(PubRel),
-//PubComp(PubComp),
-//Subscribe(Subscribe),
-//SubAck(SubAck),
-//Unsubscribe(Unsubscribe),
-//UnsubAck(UnsubAck),
-//PingReq,
-//PingResp,
-//Disconnect(Disconnect),
-}
+///// All that is MQTT
+//#[derive(Debug, Clone, PartialEq)]
+//pub enum Packet {
+//    //Connect(Connect),
+//    ConnAck(ConnAck),
+//    Publish(Publish),
+//    PubAck(PubAck),
+//    PubRec(PubRec),
+//    PubRel(PubRel),
+//    PubComp(PubComp),
+//    Subscribe(Subscribe),
+//    SubAck(SubAck),
+//    Unsubscribe(Unsubscribe),
+//    UnsubAck(UnsubAck),
+//    PingReq,
+//    PingResp,
+//    Disconnect(Disconnect),
+//}
 
 /// MQTT packet type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,14 +257,16 @@ macro_rules! fixed_byte {
 }
 
 impl Packetize for FixedHeader {
-    fn decode(stream: &[u8]) -> Result<(FixedHeader, usize)> {
-        let (byte1, m) = u8::decode(stream)?;
-        let (remaining_len, n) = VarU32::decode(advance(stream, m)?)?;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(FixedHeader, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (byte1, n) = dec_field!(u8, stream, 0);
+        let (remaining_len, n) = dec_field!(VarU32, stream, n);
 
         let fh = FixedHeader { byte1, remaining_len };
         fh.validate()?;
 
-        Ok((fh, m + n))
+        Ok((fh, n))
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -458,57 +506,16 @@ pub enum Property {
     SharedSubscriptionAvailable(u8),
 }
 
-macro_rules! dec_prop {
-    ($varn:ident, $valtype:ty, $stream:expr) => {{
-        let (val, n) = <$valtype>::decode($stream)?;
-        (Property::$varn(val), n)
-    }};
-}
-
-#[macro_export]
-macro_rules! dec_props {
-    ($type:ty, $stream:expr, $n:expr) => {{
-        match VarU32::decode(advance($stream, $n)?)? {
-            (VarU32(0), m) => Ok((None, m)),
-            (VarU32(p), m) => {
-                let (properties, r) = <$type>::decode(advance($stream, $n)?)?;
-                let p = usize::try_from(p)?;
-                if r == (m + p) {
-                    Ok((Some(properties), r))
-                } else {
-                    err!(
-                        ProtocolError,
-                        code: ProtocolError,
-                        "property len not matching {}",
-                        r
-                    )
-                }
-            }
-        }
-    }};
-}
-
-#[macro_export]
-macro_rules! enc_prop {
-    (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
-        if let Some(val) = $($val)* {
-            $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
-            $data.extend_from_slice(val.encode()?.as_ref())
-        }
-    }};
-    ($data:ident, $varn:ident, $($val:tt)*) => {{
-        $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
-        $data.extend_from_slice($($val)*.encode()?.as_ref());
-    }};
-}
-
 impl Packetize for Property {
-    fn decode(mut stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         use PropertyType::*;
 
-        let (t, m) = VarU32::decode(stream)?;
-        stream = advance(stream, m)?;
-        let (property, n) = match PropertyType::try_from(*t)? {
+        let mut stream: &[u8] = stream.as_ref();
+
+        let (prop_type, mut n) = dec_field!(VarU32, stream, 0);
+        stream = advance(stream, n)?;
+
+        let (property, m) = match PropertyType::try_from(*prop_type)? {
             PayloadFormatIndicator => dec_prop!(PayloadFormatIndicator, u8, stream),
             MessageExpiryInterval => dec_prop!(MessageExpiryInterval, u32, stream),
             ContentType => dec_prop!(ContentType, String, stream),
@@ -560,8 +567,9 @@ impl Packetize for Property {
                 dec_prop!(SharedSubscriptionAvailable, u8, stream)
             }
         };
+        n += m;
 
-        Ok((property, m + n))
+        Ok((property, n))
     }
 
     fn encode(&self) -> Result<Blob> {

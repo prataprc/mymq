@@ -2,61 +2,6 @@ use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-#[derive(Clone, PartialEq, Debug)]
-pub struct SubscriptionOpt(u8);
-
-impl Packetize for SubscriptionOpt {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        let stream: &[u8] = stream.as_ref();
-
-        let (opt, n) = dec_field!(u8, stream, 0);
-        let val = SubscriptionOpt(opt);
-        val.unwrap()?;
-
-        Ok((val, n))
-    }
-
-    fn encode(&self) -> Result<Blob> {
-        self.unwrap()?;
-        self.0.encode()
-    }
-}
-
-impl SubscriptionOpt {
-    pub fn new(rfr: RetainForwardRule, rap: bool, nl: bool, qos: QoS) -> Self {
-        let rfr: u8 = u8::from(rfr) << 4;
-        let rap: u8 = if rap { 0b1000 } else { 0b0000 };
-        let nl: u8 = if nl { 0b0100 } else { 0b0000 };
-        let qos: u8 = qos.into();
-
-        SubscriptionOpt(rfr | rap | nl | qos)
-    }
-
-    fn unwrap(&self) -> Result<(RetainForwardRule, bool, bool, QoS)> {
-        if (self.0 & 0b11000000) > 0 {
-            err!(
-                MalformedPacket,
-                code: MalformedPacket,
-                "subscription option reserved bit is non-ZERO {:?}",
-                self.0
-            )?
-        }
-
-        let qos: QoS = (self.0 & 0b0011).try_into()?;
-        let nl: bool = (self.0 & 0b0100) > 0;
-        let rap: bool = (self.0 & 0b1000) > 0;
-        let rfr: RetainForwardRule = ((self.0 >> 4) & 0b0011).try_into()?;
-        Ok((rfr, rap, nl, qos))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RetainForwardRule {
-    OnEverySubscribe = 0,
-    OnNewSubscribe = 1,
-    Never = 2,
-}
-
 impl TryFrom<u8> for RetainForwardRule {
     type Error = Error;
 
@@ -90,25 +35,32 @@ pub struct Subscribe {
 }
 
 impl Packetize for Subscribe {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        let stream: &[u8] = stream.as_ref();
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        use crate::dec_props;
 
-        let (fh, fh_len) = dec_field!(FixedHeader, stream, 0);
+        let (fh, fh_len) = FixedHeader::decode(stream)?;
         fh.validate()?;
 
-        let (packet_id, n) = dec_field!(u16, stream, fh_len);
-        let (properties, n) = dec_props!(SubscribeProperties, stream, n);
-        let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
+        let mut n = fh_len;
+
+        let (packet_id, m) = u16::decode(advance(stream, n)?)?;
+        n += m;
+
+        let (properties, m) = dec_props!(SubscribeProperties, stream, n)?;
+        n += m;
+
+        let (payload, m) = match fh_len + usize::try_from(*fh.remaining_len)? {
             m if m == n => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
-            m if m <= stream.len() => (&stream[n..m], m),
+            m if m <= stream.len() => (&stream[n..m], m - n),
             m => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
         };
+        n += m;
 
         let mut filters = vec![];
         let mut t = 0;
         while t < payload.len() {
-            let (filter, m) = dec_field!(SubscribeFilter, stream, t);
-            t = m;
+            let (filter, m) = SubscribeFilter::decode(advance(payload, t)?)?;
+            t += m;
             filters.push(filter);
         }
 
@@ -147,20 +99,16 @@ pub struct SubscribeProperties {
 }
 
 impl Packetize for SubscribeProperties {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        use crate::v5::Property::*;
-
-        let stream: &[u8] = stream.as_ref();
-
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         let mut dups = [false; 256];
         let mut props = SubscribeProperties::default();
 
-        let (len, mut n) = dec_field!(VarU32, stream, 0);
+        let (len, mut n) = VarU32::decode(stream)?;
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = dec_field!(Property, stream, n);
-            n = m;
+            let (property, m) = Property::decode(advance(stream, n)?)?;
+            n += m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -169,8 +117,12 @@ impl Packetize for SubscribeProperties {
             dups[pt as usize] = true;
 
             match property {
-                SubscriptionIdentifier(val) => props.subscription_id = Some(val),
-                UserProp(val) => props.user_properties.push(val),
+                Property::SubscriptionIdentifier(val) => {
+                    props.subscription_id = Some(val);
+                }
+                Property::UserProp(val) => {
+                    props.user_properties.push(val);
+                }
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -184,7 +136,7 @@ impl Packetize for SubscribeProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::v5::insert_property_len;
+        use crate::{enc_prop, v5::insert_property_len};
 
         let mut data = Vec::with_capacity(64);
 
@@ -207,11 +159,11 @@ pub struct SubscribeFilter {
 }
 
 impl Packetize for SubscribeFilter {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        let stream: &[u8] = stream.as_ref();
+    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+        let (topic_filter, mut n) = TopicFilter::decode(stream)?;
 
-        let (topic_filter, n) = dec_field!(TopicFilter, stream, 0);
-        let (opt, n) = dec_field!(SubscriptionOpt, stream, n);
+        let (opt, m) = SubscriptionOpt::decode(advance(stream, n)?)?;
+        n += m;
 
         let val = SubscribeFilter { topic_filter, opt };
         Ok((val, n))

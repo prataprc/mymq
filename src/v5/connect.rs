@@ -1,27 +1,3 @@
-// TODO: After a network connection is established CONNECT must be the first packet.
-// TODO: The Server MUST process a second CONNECT packet sent from a Client as a
-//       Protocol Error and close the Network Connection
-// TODO: Payload with missing client identifier.
-// TODO: Test case for server unavailable.
-// TODO: Test case for server busy.
-// TODO: The Server MUST validate that the reserved flag in the CONNECT packet is set to 0
-// TODO: The Server MAY validate that the Will Message is of the format indicated,
-//       and if it is not send a CONNACK with the Reason Code of
-//       0x99 (Payload format invalid) as described in section 4.13
-// TODO: The Server MUST NOT send packets exceeding Maximum Packet Size in CONNECT msg.
-//    ** Where a Packet is too large to send, the Server MUST discard it without sending
-//       it and then behave as if it had completed sending that Application Message.
-//    ** In the case of a Shared Subscription where the message is too large to send
-//       to one or more of the Clients but other Clients can receive it, the Server
-//       can choose either discard the message without sending the message to any of
-//       the Clients, or to send the message to one of the Clients that can receive it.
-// TODO: Protocol confirmance for Request Response Information.
-// TODO: Protocol confirmance for Request Problem Information.
-// TODO: Extended authentication Section 4.12
-// TODO: If a Client sets an Authentication Method in the CONNECT, the Client MUST NOT
-//       send any packets other than AUTH or DISCONNECT packets until it has received
-//       a CONNACK packet
-
 use std::ops::{Deref, DerefMut};
 
 use crate::util::{self, advance};
@@ -29,7 +5,7 @@ use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserPro
 use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnectFlags(pub u8);
 
 impl Deref for ConnectFlags {
@@ -46,6 +22,23 @@ impl DerefMut for ConnectFlags {
     }
 }
 
+impl Packetize for ConnectFlags {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (flags, n) = dec_field!(u8, stream, 0);
+        let flags = ConnectFlags(flags);
+        flags.unwrap()?;
+
+        Ok((flags, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        self.unwrap()?;
+        self.0.encode()
+    }
+}
+
 impl ConnectFlags {
     pub const CLEAN_START: ConnectFlags = ConnectFlags(0b_0000_0010);
     pub const WILL_FLAG: ConnectFlags = ConnectFlags(0b_0000_0100);
@@ -56,26 +49,28 @@ impl ConnectFlags {
     pub const USERNAME: ConnectFlags = ConnectFlags(0b_0100_0000);
     pub const PASSWORD: ConnectFlags = ConnectFlags(0b_1000_0000);
 
-    const QOS_MASK: u8 = 0b_0001_1000;
+    const WILL_QOS_MASK: u8 = 0b_0001_1000;
 
     pub fn new(flags: &[ConnectFlags]) -> ConnectFlags {
         flags.iter().fold(ConnectFlags(0), |acc, flag| ConnectFlags(acc.0 | flag.0))
     }
 
-    pub fn is_clean_start(&self) -> bool {
-        (self.0 & Self::CLEAN_START.0) > 0
+    // return (clean_start, will_flag, will_qos, will_retain)
+    pub fn unwrap(&self) -> Result<(bool, bool, QoS, bool)> {
+        let clean_start: bool = (self.0 & Self::CLEAN_START.0) > 0;
+        let will_flag: bool = (self.0 & Self::WILL_FLAG.0) > 0;
+        let will_qos: QoS = (self.0 & Self::WILL_QOS_MASK >> 3).try_into()?;
+        let will_retain: bool = (self.0 & Self::WILL_RETAIN.0) > 0;
+
+        if (self.0 & 0b_0000_0001) > 0 {
+            err!(MalformedPacket, code: MalformedPacket, "conn-flags {:0x?}", self.0)?;
+        }
+
+        Ok((clean_start, will_flag, will_qos, will_retain))
     }
 
     pub fn is_will_flag(&self) -> bool {
         (self.0 & Self::WILL_FLAG.0) > 0
-    }
-
-    pub fn qos(&self) -> Result<QoS> {
-        (self.0 & Self::QOS_MASK >> 3).try_into()
-    }
-
-    pub fn is_retain(&self) -> bool {
-        (self.0 & Self::WILL_RETAIN.0) > 0
     }
 
     pub fn is_username(&self) -> bool {
@@ -108,108 +103,29 @@ pub struct ConnectPayload {
 }
 
 impl Packetize for Connect {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use crate::dec_props;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
 
-        let (fh, mut n) = FixedHeader::decode(stream)?;
+        let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
-        let (protocol_name, m) = String::decode(advance(stream, n)?)?;
-        n += m;
-        if protocol_name != "MQTT" {
-            err!(
-                UnsupportedProtocolVersion,
-                code: UnsupportedProtocolVersion,
-                "invalid protocol name {:?}",
-                protocol_name
-            )?;
-        }
-
-        let (val, m) = u8::decode(advance(stream, n)?)?;
-        let protocol_version = match MqttProtocol::try_from(val)? {
-            MqttProtocol::V5 => MqttProtocol::V5,
-            protocol_version => err!(
-                UnsupportedProtocolVersion,
-                code: UnsupportedProtocolVersion,
-                "can't support {:?}",
-                protocol_version
-            )?,
+        let (protocol_name, n) = dec_field!(String, stream, n);
+        let (protocol_version, n) = {
+            let (val, n) = dec_field!(u8, stream, n);
+            (MqttProtocol::try_from(val)?, n)
         };
-        n += m;
-
-        let (flags, m) = {
-            let (val, m) = u8::decode(advance(stream, n)?)?;
-            (ConnectFlags(val), m)
-        };
-        n += m;
-        if (*flags & 1) > 0 {
-            err!(MalformedPacket, code: MalformedPacket, "connect-flags has reserved")?;
-        }
-        flags.qos()?; // validate qos
-
-        let (keep_alive, m) = u16::decode(advance(stream, n)?)?;
-        n += m;
-
-        let (properties, m) = dec_props!(ConnectProperties, stream, n)?;
-        n += m;
+        let (flags, n) = dec_field!(ConnectFlags, stream, n);
+        let (keep_alive, n) = dec_field!(u16, stream, n);
+        let (properties, n) = dec_props!(ConnectProperties, stream, n);
+        let will_flag = flags.is_will_flag();
 
         // payload
-
-        let (client_id, m) = String::decode(advance(stream, n)?)?;
-        n += m;
-
-        let (will_properties, m) = match flags.is_will_flag() {
-            true => dec_props!(WillProperties, stream, n)?,
-            false => (None, 0),
-        };
-        n += m;
-
-        let (will_topic, m) = match flags.is_will_flag() {
-            true => {
-                let (val, m) = TopicName::decode(advance(stream, n)?)?;
-                (Some(val), m)
-            }
-            false => (None, 0),
-        };
-        n += m;
-
-        let (will_payload, m) = match &will_properties {
-            Some(will_properties) => {
-                let (val, m) = Vec::<u8>::decode(advance(stream, n)?)?;
-                if will_properties.payload_format_indicator.is_utf8() {
-                    match std::str::from_utf8(&val) {
-                        Err(err) => err!(
-                            ProtocolError,
-                            code: PayloadFormatInvalid,
-                            cause: err,
-                            "payload format invalid in will message"
-                        )?,
-                        _ => (),
-                    }
-                }
-                (Some(val), m)
-            }
-            None => (None, 0),
-        };
-        n += m;
-
-        let (user_name, m) = match flags.is_username() {
-            true => {
-                let (val, m) = String::decode(advance(stream, n)?)?;
-                (Some(val), m)
-            }
-            false => (None, 0),
-        };
-        n += m;
-
-        let (password, m) = match flags.is_username() {
-            true => {
-                let (val, m) = String::decode(advance(stream, n)?)?;
-                (Some(val), m)
-            }
-            false => (None, 0),
-        };
-        n += m;
+        let (client_id, n) = dec_field!(String, stream, n);
+        let (will_properties, n) = dec_props!(WillProperties, stream, n; will_flag);
+        let (will_topic, n) = dec_field!(TopicName, stream, n; will_flag);
+        let (will_payload, n) = dec_field!(Vec<u8>, stream, n; will_flag);
+        let (user_name, n) = dec_field!(String, stream, n; flags.is_username());
+        let (password, n) = dec_field!(String, stream, n; flags.is_password());
 
         let val = Connect {
             protocol_name,
@@ -226,6 +142,7 @@ impl Packetize for Connect {
                 password,
             },
         };
+        val.validate()?;
 
         Ok((val, n))
     }
@@ -271,6 +188,40 @@ impl Packetize for Connect {
     }
 }
 
+impl Connect {
+    fn validate(&self) -> Result<()> {
+        if self.protocol_name != "MQTT" {
+            err!(
+                UnsupportedProtocolVersion,
+                code: UnsupportedProtocolVersion,
+                "invalid protocol name {:?}",
+                self.protocol_name
+            )?;
+        }
+        if self.protocol_version != MqttProtocol::V5 {
+            err!(
+                UnsupportedProtocolVersion,
+                code: UnsupportedProtocolVersion,
+                "can't support {:?}",
+                self.protocol_version
+            )?;
+        };
+        let pld = &self.payload;
+        if let Some(true) = pld.will_properties.as_ref().map(|p| p.is_utf8()) {
+            if let Err(err) = std::str::from_utf8(pld.will_payload.as_ref().unwrap()) {
+                err!(
+                    ProtocolError,
+                    code: PayloadFormatInvalid,
+                    cause: err,
+                    "payload format invalid in will message"
+                )?
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnectProperties {
     pub session_expiry_interval: Option<u32>, // 0=disable, 0xFFFFFFFF=indefinite
@@ -285,16 +236,20 @@ pub struct ConnectProperties {
 }
 
 impl Packetize for ConnectProperties {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        use crate::v5::Property::*;
+
+        let stream: &[u8] = stream.as_ref();
+
         let mut dups = [false; 256];
         let mut props = ConnectProperties::default();
 
-        let (len, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = Property::decode(advance(stream, n)?)?;
-            n += m;
+            let (property, m) = dec_field!(Property, stream, n);
+            n = m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -303,43 +258,27 @@ impl Packetize for ConnectProperties {
             dups[pt as usize] = true;
 
             match property {
-                Property::SessionExpiryInterval(val) => {
-                    props.session_expiry_interval = Some(val);
-                }
-                Property::ReceiveMaximum(val) if val == 0 => {
+                SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
+                ReceiveMaximum(0) => {
                     err!(ProtocolError, code: ProtocolError, "receive_maximum is ZERO")?;
                 }
-                Property::ReceiveMaximum(val) => {
-                    props.receive_maximum = Some(val);
-                }
-                Property::MaximumPacketSize(val) if val == 0 => {
+                ReceiveMaximum(val) => props.receive_maximum = Some(val),
+                MaximumPacketSize(0) => {
                     err!(ProtocolError, code: ProtocolError, "max_packet_size is ZERO")?;
                 }
-                Property::MaximumPacketSize(val) => {
-                    props.max_packet_size = Some(val);
-                }
-                Property::TopicAliasMaximum(val) => {
-                    props.topic_alias_max = Some(val);
-                }
-                Property::RequestResponseInformation(val) => {
+                MaximumPacketSize(val) => props.max_packet_size = Some(val),
+                TopicAliasMaximum(val) => props.topic_alias_max = Some(val),
+                RequestResponseInformation(val) => {
                     props.request_response_info =
                         Some(util::u8_to_bool(val, "request_response_info")?);
                 }
-                Property::RequestProblemInformation(val) => {
+                RequestProblemInformation(val) => {
                     props.request_problem_info =
                         Some(util::u8_to_bool(val, "request_problem_info")?);
                 }
-                Property::UserProp(val) => {
-                    props.user_properties.push(val);
-                }
-                Property::AuthenticationMethod(val) => {
-                    props.authentication_method = Some(val);
-                }
-                Property::AuthenticationData(val)
-                    if props.authentication_method.is_some() =>
-                {
-                    props.authentication_data = Some(val);
-                }
+                UserProp(val) => props.user_properties.push(val),
+                AuthenticationMethod(val) => props.authentication_method = Some(val),
+                AuthenticationData(val) => props.authentication_data = Some(val),
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -353,7 +292,7 @@ impl Packetize for ConnectProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::{enc_prop, v5::insert_property_len};
+        use crate::v5::insert_property_len;
 
         let mut data = Vec::with_capacity(64);
 
@@ -419,16 +358,20 @@ pub struct WillProperties {
 }
 
 impl Packetize for WillProperties {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        use crate::v5::Property::*;
+
+        let stream: &[u8] = stream.as_ref();
+
         let mut dups = [false; 256];
         let mut wps = WillProperties::default();
 
-        let (len, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = Property::decode(advance(stream, n)?)?;
-            n += m;
+            let (property, m) = dec_field!(Property, stream, n);
+            n = m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -437,27 +380,15 @@ impl Packetize for WillProperties {
             dups[pt as usize] = true;
 
             match property {
-                Property::WillDelayInterval(val) => {
-                    wps.will_delay_interval = Some(val);
-                }
-                Property::PayloadFormatIndicator(val) => {
+                WillDelayInterval(val) => wps.will_delay_interval = Some(val),
+                PayloadFormatIndicator(val) => {
                     wps.payload_format_indicator = val.try_into()?;
                 }
-                Property::MessageExpiryInterval(val) => {
-                    wps.message_expiry_interval = Some(val);
-                }
-                Property::ContentType(val) => {
-                    wps.content_type = Some(val);
-                }
-                Property::ResponseTopic(val) => {
-                    wps.response_topic = Some(val);
-                }
-                Property::CorrelationData(val) => {
-                    wps.correlation_data = Some(val);
-                }
-                Property::UserProp(val) => {
-                    wps.user_properties.push(val);
-                }
+                MessageExpiryInterval(val) => wps.message_expiry_interval = Some(val),
+                ContentType(val) => wps.content_type = Some(val),
+                ResponseTopic(val) => wps.response_topic = Some(val),
+                CorrelationData(val) => wps.correlation_data = Some(val),
+                UserProp(val) => wps.user_properties.push(val),
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -471,7 +402,7 @@ impl Packetize for WillProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::{enc_prop, v5::insert_property_len};
+        use crate::v5::insert_property_len;
 
         let mut data = Vec::with_capacity(64);
 
@@ -500,5 +431,9 @@ impl WillProperties {
 
     pub fn will_delay_interval(&self) -> u32 {
         self.will_delay_interval.unwrap_or(Self::WILL_DELAY_INTERVAL)
+    }
+
+    pub fn is_utf8(&self) -> bool {
+        self.payload_format_indicator == PayloadFormat::Utf8
     }
 }

@@ -61,7 +61,9 @@ impl TryFrom<String> for TopicName {
 }
 
 impl Packetize for TopicName {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         let (val, n) = String::decode(stream)?;
         let val: TopicName = val.try_into()?;
         Ok((val, n))
@@ -101,10 +103,25 @@ impl TryFrom<String> for TopicFilter {
 
     fn try_from(val: String) -> Result<TopicFilter> {
         if val.len() == 0 {
-            err!(ProtocolError, code: InvalidTopicName, "empty topic-name {:?}", val)
+            err!(ProtocolError, code: InvalidTopicName, "empty topic-filter {:?}", val)
         } else {
             Ok(TopicFilter(val))
         }
+    }
+}
+
+impl Packetize for TopicFilter {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (val, n) = String::decode(stream)?;
+        let val: TopicFilter = val.try_into()?;
+        Ok((val, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        let val: TopicFilter = self.0.clone().try_into()?;
+        val.encode()
     }
 }
 
@@ -147,8 +164,10 @@ impl Deref for VarU32 {
 }
 
 impl Packetize for VarU32 {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         use std::{cmp, mem};
+
+        let stream: &[u8] = stream.as_ref();
 
         let n = cmp::min(stream.len(), mem::size_of::<u32>());
         let mut out = 0_u32;
@@ -202,7 +221,9 @@ impl VarU32 {
 pub type UserProperty = (String, String);
 
 impl Packetize for UserProperty {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         let (key, m) = String::decode(stream)?;
         let (val, n) = String::decode(advance(stream, m)?)?;
         Ok(((key, val), (m + n)))
@@ -229,7 +250,9 @@ impl Packetize for UserProperty {
 }
 
 impl Packetize for u8 {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         match stream.len() {
             n if n >= 1 => Ok((stream[0], 1)),
             _ => err!(InsufficientBytes, code: MalformedPacket, "u8::decode()"),
@@ -248,7 +271,9 @@ impl Packetize for u8 {
 }
 
 impl Packetize for u16 {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         match stream.len() {
             n if n >= 2 => Ok((u16::from_be_bytes(stream[..2].try_into().unwrap()), 2)),
             _ => err!(InsufficientBytes, code: MalformedPacket, "u16::decode()"),
@@ -267,7 +292,9 @@ impl Packetize for u16 {
 }
 
 impl Packetize for u32 {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         match stream.len() {
             n if n >= 4 => Ok((u32::from_be_bytes(stream[..4].try_into().unwrap()), 4)),
             _ => err!(InsufficientBytes, code: MalformedPacket, "u32::decode()"),
@@ -286,8 +313,8 @@ impl Packetize for u32 {
 }
 
 impl Packetize for String {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use std::str::from_utf8;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
 
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
@@ -295,7 +322,7 @@ impl Packetize for String {
             return err!(InsufficientBytes, code: MalformedPacket, "String::decode");
         }
 
-        match from_utf8(&stream[2..2 + len]) {
+        match std::str::from_utf8(&stream[2..2 + len]) {
             Ok(s) if s.chars().any(util::is_invalid_utf8_code_point) => {
                 err!(MalformedPacket, code: MalformedPacket, "invalid utf8 string")
             }
@@ -332,7 +359,9 @@ impl Packetize for String {
 }
 
 impl Packetize for Vec<u8> {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
         if len + 2 > stream.len() {

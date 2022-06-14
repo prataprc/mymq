@@ -1,39 +1,3 @@
-// TODO: The DUP flag MUST be set to 0 for all QoS 0 messages
-// TODO: Test case to detect validity of duplicate message, that there should be
-//       no duplicate message for QoS0. Duplicate message for QoS1 is allowed but not
-//       after sender has received PUBACK. Duplicate message of QoS2 is allowed but not
-//       after PUBREL.
-// TODO: The receiver of an MQTT Control Packet that contains the DUP flag set to 1
-//       cannot assume that it has seen an earlier copy of this packet.
-// TODO: A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set
-//       to 0.
-// TODO: If the Server included a Maximum QoS in its CONNACK response to a Client and
-//       it receives a PUBLISH packet with a QoS greater than this, then it uses
-//       DISCONNECT with Reason Code 0x9B (QoS not supported).
-// TODO: If the Payload contains zero bytes it is processed normally by the Server but
-//       any retained message with the same topic name MUST be removed and any future
-//       subscribers for the topic will not receive a retained message.
-// TODO: A retained message with a Payload containing zero bytes MUST NOT be stored
-//       as a retained message on the Server.
-// TODO: If the Server included Retain Available in its CONNACK response to a Client
-//       with its value set to 0 and it receives a PUBLISH packet with the RETAIN flag
-//       is set to 1, then it uses the DISCONNECT Reason Code of 0x9A (Retain not
-//       supported).
-// TODO: what should be RETAIN flag when broker forwards a PUBLISH message.
-// TODO: what should be RETAIN flag when broker forwards a retain message for matching
-//       new subscriptions.
-// TODO: The Topic Name in a PUBLISH packet sent by a Server to a subscribing Client
-//       MUST match the Subscription’s Topic Filter according to the matching process
-//       defined in section 4.7 [MQTT-3.3.2-3]. However, as the Server is permitted
-//       to map the Topic Name to another name, it might not be the same as the
-//       Topic Name in the original PUBLISH packet.
-// TODO: It is a Protocol Error if the Topic Name is zero length and there is no
-//       Topic Alias.
-// TODO: Test cases to include packet-identifier for QoS0 messages.
-// TODO: If the Message Expiry Interval has passed and the Server has not managed to
-//       start onward delivery to a matching subscriber, then it MUST delete the copy
-//       of the message for that subscriber
-
 use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, TopicName, UserProperty, VarU32};
@@ -51,49 +15,26 @@ pub struct Publish {
 }
 
 impl Packetize for Publish {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
-        use crate::dec_props;
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
 
-        let (fh, fh_len) = FixedHeader::decode(stream)?;
+        let (fh, fh_len) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
         let (_, retain, qos, duplicate) = fh.unwrap()?;
 
-        let mut n = fh_len;
+        let (topic_name, n) = dec_field!(TopicName, stream, fh_len);
+        let (packet_id, n) = dec_field!(
+            u16,
+            stream,
+            n;
+            matches!(qos, QoS::AtLeastOnce | QoS::ExactlyOnce)
+        );
+        let (properties, n) = dec_props!(PublishProperties, stream, n);
 
-        let (topic_name, m) = TopicName::decode(advance(stream, n)?)?;
-        n += m;
-
-        let (packet_id, m) = match qos {
-            QoS::AtLeastOnce | QoS::ExactlyOnce => {
-                let (packet_id, m) = u16::decode(advance(stream, n)?)?;
-                (Some(packet_id), m)
-            }
-            _ => (None, 0),
-        };
-        n += m;
-
-        let (properties, m) = dec_props!(PublishProperties, stream, n)?;
-        n += m;
-
-        let (payload, m) = match fh_len + usize::try_from(*fh.remaining_len)? {
-            m if m == n => (None, 0),
-            m if m <= stream.len() => (Some(stream[n..m].to_vec()), m - n),
+        let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
+            m if m == n => (None, n),
+            m if m <= stream.len() => (Some(stream[n..m].to_vec()), m),
             m => err!(InsufficientBytes, code: MalformedPacket, "in payload {}", m)?,
-        };
-        n += m;
-
-        match (payload.as_ref(), properties.as_ref().map(|p| p.is_utf8())) {
-            (Some(payload), Some(true)) => {
-                if let Err(err) = std::str::from_utf8(&payload) {
-                    err!(
-                        ProtocolError,
-                        code: PayloadFormatInvalid,
-                        cause: err,
-                        "payload format invalid in publish"
-                    )?;
-                }
-            }
-            (_, _) => (),
         };
 
         let val = Publish {
@@ -105,6 +46,7 @@ impl Packetize for Publish {
             properties,
             payload,
         };
+        val.validate()?;
 
         Ok((val, n))
     }
@@ -139,6 +81,26 @@ impl Packetize for Publish {
     }
 }
 
+impl Publish {
+    fn validate(&self) -> Result<()> {
+        match (self.payload.as_ref(), self.properties.as_ref().map(|p| p.is_utf8())) {
+            (Some(payload), Some(true)) => {
+                if let Err(err) = std::str::from_utf8(&payload) {
+                    err!(
+                        ProtocolError,
+                        code: PayloadFormatInvalid,
+                        cause: err,
+                        "payload format invalid in publish"
+                    )?;
+                }
+            }
+            (_, _) => (),
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PublishProperties {
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary
@@ -152,16 +114,20 @@ pub struct PublishProperties {
 }
 
 impl Packetize for PublishProperties {
-    fn decode(stream: &[u8]) -> Result<(Self, usize)> {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        use crate::v5::Property::*;
+
+        let stream: &[u8] = stream.as_ref();
+
         let mut dups = [false; 256];
         let mut props = PublishProperties::default();
 
-        let (len, mut n) = VarU32::decode(stream)?;
+        let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
 
         while n < limit {
-            let (property, m) = Property::decode(advance(stream, n)?)?;
-            n += m;
+            let (property, m) = dec_field!(Property, stream, n);
+            n = m;
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
@@ -170,33 +136,19 @@ impl Packetize for PublishProperties {
             dups[pt as usize] = true;
 
             match property {
-                Property::PayloadFormatIndicator(val) => {
+                PayloadFormatIndicator(val) => {
                     props.payload_format_indicator = val.try_into()?;
                 }
-                Property::MessageExpiryInterval(val) => {
-                    props.message_expiry_interval = Some(val);
-                }
-                Property::TopicAlias(0) => {
+                MessageExpiryInterval(val) => props.message_expiry_interval = Some(val),
+                TopicAlias(0) => {
                     err!(ProtocolError, code: ProtocolError, "topic-alias is ZERO")?
                 }
-                Property::TopicAlias(val) => {
-                    props.topic_alias = Some(val);
-                }
-                Property::ResponseTopic(val) => {
-                    props.response_topic = Some(val);
-                }
-                Property::CorrelationData(val) => {
-                    props.correlation_data = Some(val);
-                }
-                Property::SubscriptionIdentifier(val) => {
-                    props.subscribtion_identifier = Some(val);
-                }
-                Property::ContentType(val) => {
-                    props.content_type = Some(val);
-                }
-                Property::UserProp(val) => {
-                    props.user_properties.push(val);
-                }
+                TopicAlias(val) => props.topic_alias = Some(val),
+                ResponseTopic(val) => props.response_topic = Some(val),
+                CorrelationData(val) => props.correlation_data = Some(val),
+                SubscriptionIdentifier(val) => props.subscribtion_identifier = Some(val),
+                ContentType(val) => props.content_type = Some(val),
+                UserProp(val) => props.user_properties.push(val),
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
@@ -210,7 +162,7 @@ impl Packetize for PublishProperties {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::{enc_prop, v5::insert_property_len};
+        use crate::v5::insert_property_len;
 
         let mut data = Vec::with_capacity(64);
 

@@ -1,5 +1,7 @@
 //! Package implement MQTT protocol-framing for both client and server.
 
+// TODO: review all err!() calls and tally them with MQTT spec.
+
 #![feature(backtrace)]
 #![feature(error_iter)]
 
@@ -30,10 +32,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Trait for protocol framing, data-encoding and decoding.
 pub trait Packetize: Sized {
-    /// Deserialize bytes and construct a packet or packet's field.
-    /// Upon error, it is expected that the stream is left at meaningful
-    /// boundry to re-detect the error.
-    fn decode(stream: &[u8]) -> Result<(Self, usize)>;
+    /// Deserialize bytes and construct a packet or packet's field. Upon error, it is
+    /// expected that the stream is left at meaningful boundry to re-detect the error.
+    ///
+    /// Also, the stream should alteast be as long as `remaining_len` in fixed-header
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)>;
 
     /// Serialize value into bytes, for small frames.
     fn encode(&self) -> Result<Blob>;
