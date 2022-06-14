@@ -4,7 +4,7 @@ use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ReasCode {
+pub enum PubReasonCode {
     Success = 0x00,
     NoMatchingSubscribers = 0x10,
     UnspecifiedError = 0x80,
@@ -17,46 +17,46 @@ pub enum ReasCode {
     PayloadFormatInvalid = 0x99,
 }
 
-impl TryFrom<u8> for ReasCode {
+impl TryFrom<u8> for PubReasonCode {
     type Error = Error;
 
-    fn try_from(val: u8) -> Result<ReasCode> {
+    fn try_from(val: u8) -> Result<PubReasonCode> {
         match val {
-            0x00 => Ok(ReasCode::Success),
-            0x10 => Ok(ReasCode::NoMatchingSubscribers),
-            0x80 => Ok(ReasCode::UnspecifiedError),
-            0x83 => Ok(ReasCode::ImplementationSpecificError),
-            0x87 => Ok(ReasCode::NotAuthorized),
-            0x90 => Ok(ReasCode::TopicNameInvalid),
-            0x91 => Ok(ReasCode::PacketIdentifierInUse),
-            0x92 => Ok(ReasCode::PacketIdNotFound),
-            0x97 => Ok(ReasCode::QuotaExceeded),
-            0x99 => Ok(ReasCode::PayloadFormatInvalid),
+            0x00 => Ok(PubReasonCode::Success),
+            0x10 => Ok(PubReasonCode::NoMatchingSubscribers),
+            0x80 => Ok(PubReasonCode::UnspecifiedError),
+            0x83 => Ok(PubReasonCode::ImplementationSpecificError),
+            0x87 => Ok(PubReasonCode::NotAuthorized),
+            0x90 => Ok(PubReasonCode::TopicNameInvalid),
+            0x91 => Ok(PubReasonCode::PacketIdentifierInUse),
+            0x92 => Ok(PubReasonCode::PacketIdNotFound),
+            0x97 => Ok(PubReasonCode::QuotaExceeded),
+            0x99 => Ok(PubReasonCode::PayloadFormatInvalid),
             val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val),
         }
     }
 }
 
-impl Default for ReasCode {
-    fn default() -> ReasCode {
-        ReasCode::Success
+impl Default for PubReasonCode {
+    fn default() -> PubReasonCode {
+        PubReasonCode::Success
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PubARLC {
+pub struct Pub {
     pub packet_type: PacketType,
     pub packet_id: u16,
-    pub code: ReasCode,
-    pub properties: Option<Properties>,
+    pub code: PubReasonCode,
+    pub properties: Option<PubProperties>,
 }
 
-impl Packetize for PubARLC {
+impl Packetize for Pub {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         use crate::dec_props;
 
-        let code: ReasCode = ReasCode::Success;
-        let properties: Option<Properties> = None;
+        let code: PubReasonCode = PubReasonCode::Success;
+        let properties: Option<PubProperties> = None;
 
         let (fh, mut n) = FixedHeader::decode(stream)?;
         fh.validate()?;
@@ -66,22 +66,22 @@ impl Packetize for PubARLC {
         n += m;
 
         if *fh.remaining_len == 2 {
-            let packet = PubARLC { packet_type, packet_id, code, properties };
+            let packet = Pub { packet_type, packet_id, code, properties };
             return Ok((packet, n));
         }
 
         let (code, m) = {
             let (val, m) = u8::decode(advance(stream, n)?)?;
-            (ReasCode::try_from(val)?, m)
+            (PubReasonCode::try_from(val)?, m)
         };
         let invalid_code = match (packet_type, code) {
-            (PacketType::PubAck, ReasCode::PacketIdNotFound) => false,
-            (PacketType::PubRec, ReasCode::PacketIdNotFound) => false,
-            (PacketType::PubRel, ReasCode::Success) => true,
-            (PacketType::PubRel, ReasCode::PacketIdNotFound) => true,
+            (PacketType::PubAck, PubReasonCode::PacketIdNotFound) => false,
+            (PacketType::PubRec, PubReasonCode::PacketIdNotFound) => false,
+            (PacketType::PubRel, PubReasonCode::Success) => true,
+            (PacketType::PubRel, PubReasonCode::PacketIdNotFound) => true,
             (PacketType::PubRel, _) => false,
-            (PacketType::PubComp, ReasCode::Success) => true,
-            (PacketType::PubComp, ReasCode::PacketIdNotFound) => true,
+            (PacketType::PubComp, PubReasonCode::Success) => true,
+            (PacketType::PubComp, PubReasonCode::PacketIdNotFound) => true,
             (PacketType::PubComp, _) => false,
             (_, _) => true,
         };
@@ -91,14 +91,14 @@ impl Packetize for PubARLC {
         n += m;
 
         if *fh.remaining_len < 4 {
-            let packet = PubARLC { packet_type, packet_id, code, properties };
+            let packet = Pub { packet_type, packet_id, code, properties };
             return Ok((packet, n));
         }
 
-        let (properties, m) = dec_props!(Properties, stream, n)?;
+        let (properties, m) = dec_props!(PubProperties, stream, n)?;
         n += m;
 
-        let val = PubARLC { packet_type, packet_id, code, properties };
+        let val = Pub { packet_type, packet_id, code, properties };
         Ok((val, n))
     }
 
@@ -129,15 +129,15 @@ impl Packetize for PubARLC {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct Properties {
+pub struct PubProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,
 }
 
-impl Packetize for Properties {
+impl Packetize for PubProperties {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         let mut dups = [false; 256];
-        let mut props = Properties::default();
+        let mut props = PubProperties::default();
 
         let (len, mut n) = VarU32::decode(stream)?;
         let limit = usize::try_from(*len)? + n;

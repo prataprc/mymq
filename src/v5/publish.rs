@@ -54,9 +54,11 @@ impl Packetize for Publish {
     fn decode(stream: &[u8]) -> Result<(Self, usize)> {
         use crate::dec_props;
 
-        let (fh, mut n) = FixedHeader::decode(stream)?;
+        let (fh, fh_len) = FixedHeader::decode(stream)?;
         fh.validate()?;
         let (_, retain, qos, duplicate) = fh.unwrap()?;
+
+        let mut n = fh_len;
 
         let (topic_name, m) = TopicName::decode(advance(stream, n)?)?;
         n += m;
@@ -73,25 +75,26 @@ impl Packetize for Publish {
         let (properties, m) = dec_props!(PublishProperties, stream, n)?;
         n += m;
 
-        let (payload, m) = match advance(stream, n)? {
-            stream if stream.len() == 0 => (None, 0),
-            stream => {
-                let (payload, n) = (stream.to_vec(), stream.len());
-                match properties.as_ref().map(|p| p.payload_format_indicator.is_utf8()) {
-                    Some(false) | None => (Some(payload), n),
-                    Some(true) => match std::str::from_utf8(&payload) {
-                        Ok(_) => (Some(payload), n),
-                        Err(err) => err!(
-                            ProtocolError,
-                            code: PayloadFormatInvalid,
-                            cause: err,
-                            "payload format invalid in publish"
-                        )?,
-                    },
-                }
-            }
+        let (payload, m) = match fh_len + usize::try_from(*fh.remaining_len)? {
+            m if m == n => (None, 0),
+            m if m <= stream.len() => (Some(stream[n..m].to_vec()), m - n),
+            m => err!(InsufficientBytes, code: MalformedPacket, "in payload {}", m)?,
         };
         n += m;
+
+        match (payload.as_ref(), properties.as_ref().map(|p| p.is_utf8())) {
+            (Some(payload), Some(true)) => {
+                if let Err(err) = std::str::from_utf8(&payload) {
+                    err!(
+                        ProtocolError,
+                        code: PayloadFormatInvalid,
+                        cause: err,
+                        "payload format invalid in publish"
+                    )?;
+                }
+            }
+            (_, _) => (),
+        };
 
         let val = Publish {
             retain,
@@ -110,6 +113,7 @@ impl Packetize for Publish {
         use crate::v5::insert_fixed_header;
 
         let mut data = Vec::with_capacity(64);
+
         data.extend_from_slice(self.topic_name.encode()?.as_ref());
         if let Some(packet_id) = self.packet_id {
             data.extend_from_slice(packet_id.encode()?.as_ref());
@@ -228,5 +232,11 @@ impl Packetize for PublishProperties {
         data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl PublishProperties {
+    fn is_utf8(&self) -> bool {
+        self.payload_format_indicator.is_utf8()
     }
 }

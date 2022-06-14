@@ -9,9 +9,13 @@ mod connack;
 mod connect;
 mod pubaclc;
 mod publish;
+mod subscribe;
 
-pub use connack::{ConnAck, ConnAckProperties, ConnackFlags};
-pub use connect::{Connect, ConnectFlags, ConnectProperties, WillProperties};
+pub use connack::ConnAck;
+pub use connect::Connect;
+pub use pubaclc::Pub;
+pub use publish::Publish;
+pub use subscribe::Subscribe;
 
 // TODO: FixedHeader.remaining_len must be validated with
 //       ConnectProperties.maximum_pkt_size.
