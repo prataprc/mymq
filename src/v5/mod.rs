@@ -90,15 +90,23 @@ macro_rules! enc_prop {
 
 mod connack;
 mod connect;
+mod ping;
 mod pubaclc;
 mod publish;
-mod subscribe;
+mod sub;
+mod suback;
+mod unsub;
+mod unsuback;
 
 pub use connack::ConnAck;
 pub use connect::Connect;
+pub use ping::{PingReq, PingResp};
 pub use pubaclc::Pub;
 pub use publish::Publish;
-pub use subscribe::Subscribe;
+pub use sub::Subscribe;
+pub use suback::SubAck;
+pub use unsub::UnSubscribe;
+pub use unsuback::UnsubAck;
 
 ///// All that is MQTT
 //#[derive(Debug, Clone, PartialEq)]

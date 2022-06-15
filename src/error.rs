@@ -231,11 +231,11 @@ pub enum ReasonCode {
     QoS1 = 0x1,
     QoS2 = 0x02,
     DiconnectWillMessage = 0x04,
-    NoSubscribers = 0x10,
-    NoSubscription = 0x11,
+    NoMatchingSubscribers = 0x10,
+    NoSubscriptionExisted = 0x11,
     ContinueAuthentication = 0x18,
     ReAuthenticate = 0x19,
-    Error = 0x80,
+    UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
     ProtocolError = 0x82,
     ImplementationError = 0x83,
@@ -268,8 +268,8 @@ pub enum ReasonCode {
     UnsupportedSharedSubscription = 0x9E,
     ExceedConnectionRate = 0x9F,
     ExceedMaximumConnectTime = 0xA0,
-    UnsupportedSubscriptionId = 0xA1,
-    UnsupportedWildcardSubscription = 0xA2,
+    SubscriptionIdNotSupported = 0xA1,
+    WildcardSubscriptionsNotSupported = 0xA2,
 }
 
 impl fmt::Display for ReasonCode {
@@ -281,11 +281,11 @@ impl fmt::Display for ReasonCode {
             QoS1 => "Granted QoS 1",
             QoS2 => "Granted QoS 2",
             DiconnectWillMessage => "Disconnect with Will Message",
-            NoSubscribers => "No matching subscribers",
-            NoSubscription => "No subscription existed",
+            NoMatchingSubscribers => "No matching subscribers",
+            NoSubscriptionExisted => "No subscription existed",
             ContinueAuthentication => "Continue authentication",
             ReAuthenticate => "Re-authenticate",
-            Error => "Unspecified error",
+            UnspecifiedError => "Unspecified error",
             MalformedPacket => "Malformed Packet",
             ProtocolError => "Protocol Error",
             ImplementationError => "Implementation specific error",
@@ -318,8 +318,8 @@ impl fmt::Display for ReasonCode {
             UnsupportedSharedSubscription => "Shared Subscriptions not supported",
             ExceedConnectionRate => "Connection rate exceeded",
             ExceedMaximumConnectTime => "Maximum connect time",
-            UnsupportedSubscriptionId => "Subscription Identifiers not supported",
-            UnsupportedWildcardSubscription => "Wildcard Subscriptions not supported",
+            SubscriptionIdNotSupported => "Subscription Identifiers not supported",
+            WildcardSubscriptionsNotSupported => "Wildcard Subscriptions not supported",
         };
 
         write!(f, "{}", s)

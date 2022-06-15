@@ -4,38 +4,28 @@ use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubAckReasonCode {
+pub enum UnsubAckReasonCode {
     QoS0 = 0x0,
-    QoS1 = 0x1,
-    QoS2 = 0x2,
+    NoSubscriptionExisted = 0x11,
     UnspecifiedError = 0x80,
     ImplementationError = 0x83,
     NotAuthorized = 0x87,
     InvalidTopicFilter = 0x8f,
     PacketIdInuse = 0x91,
-    QuotaExceeded = 0x97,
-    SharedSubscriptionsNotSupported = 0x9e,
-    SubscriptionIdNotSupported = 0xa1,
-    WildcardSubscriptionsNotSupported = 0xa2,
 }
 
-impl TryFrom<u8> for SubAckReasonCode {
+impl TryFrom<u8> for UnsubAckReasonCode {
     type Error = Error;
 
     fn try_from(value: u8) -> Result<Self> {
         let v = match value {
-            0x00 => SubAckReasonCode::QoS0,
-            0x01 => SubAckReasonCode::QoS1,
-            0x02 => SubAckReasonCode::QoS2,
-            0x80 => SubAckReasonCode::UnspecifiedError,
-            0x83 => SubAckReasonCode::ImplementationError,
-            0x87 => SubAckReasonCode::NotAuthorized,
-            0x8f => SubAckReasonCode::InvalidTopicFilter,
-            0x91 => SubAckReasonCode::PacketIdInuse,
-            0x97 => SubAckReasonCode::QuotaExceeded,
-            0x9e => SubAckReasonCode::SharedSubscriptionsNotSupported,
-            0xa1 => SubAckReasonCode::SubscriptionIdNotSupported,
-            0xa2 => SubAckReasonCode::WildcardSubscriptionsNotSupported,
+            0x00 => UnsubAckReasonCode::QoS0,
+            0x11 => UnsubAckReasonCode::NoSubscriptionExisted,
+            0x80 => UnsubAckReasonCode::UnspecifiedError,
+            0x83 => UnsubAckReasonCode::ImplementationError,
+            0x87 => UnsubAckReasonCode::NotAuthorized,
+            0x8f => UnsubAckReasonCode::InvalidTopicFilter,
+            0x91 => UnsubAckReasonCode::PacketIdInuse,
             val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val)?,
         };
 
@@ -43,34 +33,29 @@ impl TryFrom<u8> for SubAckReasonCode {
     }
 }
 
-impl From<SubAckReasonCode> for u8 {
-    fn from(val: SubAckReasonCode) -> u8 {
+impl From<UnsubAckReasonCode> for u8 {
+    fn from(val: UnsubAckReasonCode) -> u8 {
         match val {
-            SubAckReasonCode::QoS0 => 0x00,
-            SubAckReasonCode::QoS1 => 0x01,
-            SubAckReasonCode::QoS2 => 0x02,
-            SubAckReasonCode::UnspecifiedError => 0x80,
-            SubAckReasonCode::ImplementationError => 0x83,
-            SubAckReasonCode::NotAuthorized => 0x87,
-            SubAckReasonCode::InvalidTopicFilter => 0x8f,
-            SubAckReasonCode::PacketIdInuse => 0x91,
-            SubAckReasonCode::QuotaExceeded => 0x97,
-            SubAckReasonCode::SharedSubscriptionsNotSupported => 0x9e,
-            SubAckReasonCode::SubscriptionIdNotSupported => 0xa1,
-            SubAckReasonCode::WildcardSubscriptionsNotSupported => 0xa2,
+            UnsubAckReasonCode::QoS0 => 0x0,
+            UnsubAckReasonCode::NoSubscriptionExisted => 0x11,
+            UnsubAckReasonCode::UnspecifiedError => 0x80,
+            UnsubAckReasonCode::ImplementationError => 0x83,
+            UnsubAckReasonCode::NotAuthorized => 0x87,
+            UnsubAckReasonCode::InvalidTopicFilter => 0x8f,
+            UnsubAckReasonCode::PacketIdInuse => 0x91,
         }
     }
 }
 
 /// Acknowledgement to subscribe
 #[derive(Debug, Clone, PartialEq)]
-pub struct SubAck {
+pub struct UnsubAck {
     pub packet_id: u16,
-    pub properties: Option<SubAckProperties>,
-    pub return_codes: Vec<SubAckReasonCode>,
+    pub properties: Option<UnsubAckProperties>,
+    pub return_codes: Vec<UnsubAckReasonCode>,
 }
 
-impl Packetize for SubAck {
+impl Packetize for UnsubAck {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
 
@@ -78,7 +63,7 @@ impl Packetize for SubAck {
         fh.validate()?;
 
         let (packet_id, n) = dec_field!(u16, stream, fh_len);
-        let (properties, n) = dec_props!(SubAckProperties, stream, n);
+        let (properties, n) = dec_props!(UnsubAckProperties, stream, n);
 
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
             m if m == n => err!(MalformedPacket, code: MalformedPacket, "no payload")?,
@@ -86,12 +71,12 @@ impl Packetize for SubAck {
             m => err!(InsufficientBytes, code: MalformedPacket, "in payload {}", m)?,
         };
 
-        let mut return_codes: Vec<SubAckReasonCode> = vec![];
+        let mut return_codes: Vec<UnsubAckReasonCode> = vec![];
         for code in payload.into_iter() {
             return_codes.push(code.try_into()?);
         }
 
-        let val = SubAck { packet_id, properties, return_codes };
+        let val = UnsubAck { packet_id, properties, return_codes };
         Ok((val, n))
     }
 
@@ -118,17 +103,17 @@ impl Packetize for SubAck {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct SubAckProperties {
+pub struct UnsubAckProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,
 }
 
-impl Packetize for SubAckProperties {
+impl Packetize for UnsubAckProperties {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
 
         let mut dups = [false; 256];
-        let mut props = SubAckProperties::default();
+        let mut props = UnsubAckProperties::default();
 
         let (len, mut n) = dec_field!(VarU32, stream, 0);
         let limit = usize::try_from(*len)? + n;
@@ -149,7 +134,7 @@ impl Packetize for SubAckProperties {
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
-                    "{:?} found in suback properties",
+                    "{:?} found in UnsubAck properties",
                     pt
                 )?,
             };
