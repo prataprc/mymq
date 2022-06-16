@@ -5,11 +5,13 @@
 #![feature(backtrace)]
 #![feature(error_iter)]
 
-#[cfg(any(feature = "fuzzy", test))]
-use arbitrary::Arbitrary;
-
 #[macro_use]
 mod error;
+mod chash;
+mod cluster;
+mod session;
+mod shard;
+mod thread;
 mod types;
 mod util;
 
@@ -19,10 +21,20 @@ pub mod v5;
 #[cfg(any(feature = "fuzzy", test))]
 pub mod fuzzy;
 
+pub use chash::ConsistentHash;
+pub use cluster::{Cluster, Node, Rebalancer};
 pub use error::{Error, ErrorKind, ReasonCode};
-pub use types::{Blob, VarU32};
-pub use types::{ClientID, MqttProtocol, UserProperty};
+pub use session::Session;
+pub use shard::Shard;
+pub use thread::{Thread, Threadable};
+pub use types::{Blob, ClientID, MqttProtocol, UserProperty, VarU32};
 pub use types::{TopicFilter, TopicName};
+
+pub const MAX_NODES: usize = 1024;
+pub const MAX_SHARDS: u32 = 0x8000;
+pub const MAX_SESSIONS: usize = 1024 * 8;
+
+pub const DEFAULT_SHARDS: usize = 1024 * 8;
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation
@@ -40,6 +52,16 @@ pub trait Packetize: Sized {
 
     /// Serialize value into bytes, for small frames.
     fn encode(&self) -> Result<Blob>;
+}
+
+pub trait Hostable {
+    fn uuid(&self) -> uuid::Uuid;
+
+    fn weight(&self) -> u16;
+}
+
+pub trait Shardable {
+    fn uuid(&self) -> uuid::Uuid;
 }
 
 #[cfg(test)]

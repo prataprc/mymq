@@ -27,3 +27,8 @@ pub fn advance(stream: &[u8], n: usize) -> Result<&[u8]> {
         err!(InsufficientBytes, code: MalformedPacket, "insufficient bytes in packet")
     }
 }
+
+#[inline]
+pub fn is_power_of_2(n: usize) -> bool {
+    n != 0 && (n & (n - 1)) == 0
+}

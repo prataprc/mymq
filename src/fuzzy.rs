@@ -141,7 +141,7 @@ impl Fuzzy for String {
     }
 
     fn valid_value(rng: &mut StdRng, _: &mut Context) -> Self {
-        use crate::is_invalid_utf8_code_point;
+        use crate::util::is_invalid_utf8_code_point;
 
         loop {
             let s: String = {
@@ -157,7 +157,7 @@ impl Fuzzy for String {
     }
 
     fn invalid_value(rng: &mut StdRng, _: &mut Context) -> Option<(Self, Error)> {
-        use crate::is_invalid_utf8_code_point;
+        use crate::util::is_invalid_utf8_code_point;
 
         loop {
             let s: String = {
@@ -257,7 +257,7 @@ where
             let stream: Blob = val.encode().unwrap();
             assert_eq!(
                 (val.clone(), stream.as_ref().len()),
-                T::decode(stream.as_bytes()).unwrap()
+                T::decode(stream.as_ref()).unwrap()
             );
         }
         FuzzyValue::Bad { val, err } if err.kind() == ErrorKind::NoError => {

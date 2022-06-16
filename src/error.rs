@@ -204,6 +204,8 @@ pub enum ErrorKind {
     InvalidInput,
     PayloadTooLong,
     TryFromIntError,
+    ThreadFail,
+    IPCFail,
 }
 
 impl fmt::Display for ErrorKind {
@@ -220,6 +222,8 @@ impl fmt::Display for ErrorKind {
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
             TryFromIntError => write!(f, "TryFromIntError"),
+            ThreadFail => write!(f, "ThreadFail"),
+            IPCFail => write!(f, "IPCFail"),
         }
     }
 }

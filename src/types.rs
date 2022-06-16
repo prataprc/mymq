@@ -1,3 +1,6 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::Arbitrary;
+
 use std::ops::{Deref, DerefMut};
 
 use crate::util::{self, advance};
@@ -19,13 +22,6 @@ impl AsRef<[u8]> for Blob {
             Blob::Small { data, size } => &data[..*size],
             Blob::Large { data } => &data,
         }
-    }
-}
-
-impl Blob {
-    #[cfg(test)]
-    fn as_bytes(&self) -> &[u8] {
-        self.as_ref()
     }
 }
 

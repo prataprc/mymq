@@ -12,7 +12,7 @@ fn test_packetize_u8() {
         let val: u8 = rng.gen();
 
         let stream: Blob = val.encode().unwrap();
-        assert_eq!((val, 1), u8::decode(stream.as_bytes()).unwrap());
+        assert_eq!((val, 1), u8::decode(stream.as_ref()).unwrap());
     }
 }
 
@@ -26,7 +26,7 @@ fn test_packetize_u16() {
         let val: u16 = rng.gen();
 
         let stream: Blob = val.encode().unwrap();
-        assert_eq!((val, 2), u16::decode(stream.as_bytes()).unwrap());
+        assert_eq!((val, 2), u16::decode(stream.as_ref()).unwrap());
     }
 }
 
@@ -40,7 +40,7 @@ fn test_packetize_u32() {
         let val: u32 = rng.gen();
 
         let stream: Blob = val.encode().unwrap();
-        assert_eq!((val, 4), u32::decode(stream.as_bytes()).unwrap());
+        assert_eq!((val, 4), u32::decode(stream.as_ref()).unwrap());
     }
 }
 
