@@ -88,8 +88,10 @@ macro_rules! enc_prop {
     }};
 }
 
+mod auth;
 mod connack;
 mod connect;
+mod disconnect;
 mod ping;
 mod pubaclc;
 mod publish;
@@ -98,8 +100,10 @@ mod suback;
 mod unsub;
 mod unsuback;
 
+pub use auth::Auth;
 pub use connack::ConnAck;
 pub use connect::Connect;
+pub use disconnect::Disconnect;
 pub use ping::{PingReq, PingResp};
 pub use pubaclc::Pub;
 pub use publish::Publish;
@@ -108,24 +112,25 @@ pub use suback::SubAck;
 pub use unsub::UnSubscribe;
 pub use unsuback::UnsubAck;
 
-///// All that is MQTT
-//#[derive(Debug, Clone, PartialEq)]
-//pub enum Packet {
-//    //Connect(Connect),
-//    ConnAck(ConnAck),
-//    Publish(Publish),
-//    PubAck(PubAck),
-//    PubRec(PubRec),
-//    PubRel(PubRel),
-//    PubComp(PubComp),
-//    Subscribe(Subscribe),
-//    SubAck(SubAck),
-//    Unsubscribe(Unsubscribe),
-//    UnsubAck(UnsubAck),
-//    PingReq,
-//    PingResp,
-//    Disconnect(Disconnect),
-//}
+/// All that is MQTT
+#[derive(Debug, Clone, PartialEq)]
+pub enum Packet {
+    Connect(Connect),
+    ConnAck(ConnAck),
+    Publish(Publish),
+    PubAck(Pub),
+    PubRec(Pub),
+    PubRel(Pub),
+    PubComp(Pub),
+    Subscribe(Subscribe),
+    SubAck(SubAck),
+    Unsubscribe(UnSubscribe),
+    UnsubAck(UnsubAck),
+    PingReq,
+    PingResp,
+    //Disconnect(Disconnect),
+    //Auth(Auth),
+}
 
 /// MQTT packet type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,18 +394,24 @@ impl FixedHeader {
     }
 
     fn validate(&self) -> Result<()> {
+        use PacketType::*;
+        use QoS::{AtLeastOnce, AtMostOnce};
+
         let (pkt_type, retain, qos, dup) = self.unwrap()?;
         match pkt_type {
-            PacketType::Publish => Ok(()),
-            PacketType::PubRel if qos == QoS::AtLeastOnce => Ok(()),
-            PacketType::Subscribe if qos == QoS::AtLeastOnce => Ok(()),
-            PacketType::Unsubscribe if qos == QoS::AtLeastOnce => Ok(()),
-            PacketType::PubRel | PacketType::Subscribe | PacketType::Unsubscribe => err!(
-                MalformedPacket,
-                code: MalformedPacket,
-                "invalid flags found for {:?}",
-                pkt_type
-            ),
+            Connect if qos == AtMostOnce && !retain && !dup => Ok(()),
+            ConnAck if qos == AtMostOnce && !retain && !dup => Ok(()),
+            Publish => Ok(()),
+            PubAck if qos == AtMostOnce && !retain && !dup => Ok(()),
+            PubRec if qos == AtMostOnce && !retain && !dup => Ok(()),
+            PubRel if qos == AtLeastOnce && !retain && !dup => Ok(()),
+            PubComp if qos == AtMostOnce && !retain && !dup => Ok(()),
+            Subscribe if qos == AtLeastOnce && !retain && !dup => Ok(()),
+            SubAck if qos == AtMostOnce && !retain && !dup => Ok(()),
+            Unsubscribe if qos == AtLeastOnce && !retain && !dup => Ok(()),
+            UnsubAck if qos == AtMostOnce && !retain && !dup => Ok(()),
+            Disconnect if qos == AtMostOnce && !retain && !dup => Ok(()),
+            Auth if qos == AtMostOnce && !retain && !dup => Ok(()),
             _ if retain || dup || qos != QoS::AtMostOnce => err!(
                 MalformedPacket,
                 code: MalformedPacket,
