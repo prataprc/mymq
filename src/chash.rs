@@ -2,8 +2,8 @@ use uuid::Uuid;
 
 use std::{fmt, result};
 
+use crate::Hostable;
 use crate::{Error, ErrorKind, Result};
-use crate::{Hostable, Shardable};
 
 // Challenges in having consistent hashing.
 // TODO: How random is the uuid ? Because we intend to use uuid to generate hash.
@@ -72,9 +72,9 @@ impl ConsistentHash {
 }
 
 impl ConsistentHash {
-    pub fn shard_to_node<T: Shardable>(&self, shard: &T) -> Uuid {
-        let hash = hash(shard.uuid());
-        println!("shard 0x{:8x}", hash);
+    /// take shard's uuid and return the node's uuid in which the shard is hosted.
+    pub fn shard_to_node(&self, uuid: Uuid) -> Uuid {
+        let hash = hash(uuid);
         let off = match self.conodes.binary_search_by_key(&hash, |a| a.1) {
             Ok(0) | Err(0) => self.conodes.len() - 1,
             Ok(off) | Err(off) => off - 1,

@@ -36,6 +36,20 @@ macro_rules! err {
         log_error!(e);
         Err(e)
     }};
+    ($v:ident, tryy: $($res:expr),+) => {{
+        match $($res),+ {
+            Ok(val) => Ok(val),
+            Err(err) => {
+                let e = Error {
+                    kind: ErrorKind::$v,
+                    description: err.to_string(),
+                    ..Error::default()
+                };
+                log_error!(e);
+                Err(e)
+            }
+        }
+    }};
     ($v:ident, code: $code:ident, $($arg:expr),+) => {{
         let kind = ErrorKind::$v;
         let description = format!($($arg),+);
@@ -100,7 +114,7 @@ pub struct Error {
     pub(crate) kind: ErrorKind,
     pub(crate) description: String,
     pub(crate) code: Option<ReasonCode>,
-    pub(crate) cause: Option<Box<dyn std::error::Error>>,
+    pub(crate) cause: Option<Box<dyn std::error::Error + Send + Sync>>,
     #[cfg(feature = "backtrace")]
     pub(crate) backtrace: Option<backtrace::Backtrace>,
 }
@@ -133,15 +147,21 @@ impl fmt::Debug for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.cause.as_ref().map(|b| b.as_ref())
+        match &self.cause {
+            Some(cause) => Some(cause.as_ref()),
+            None => None,
+        }
     }
 
     fn description(&self) -> &str {
         self.description.as_str()
     }
 
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        self.cause.as_ref().map(|b| b.as_ref())
+    fn cause(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            Some(cause) => Some(cause.as_ref()),
+            None => None,
+        }
     }
 
     #[cfg(feature = "backtrace")]
@@ -196,6 +216,7 @@ impl Error {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
     NoError,
+    Fatal,
     UnsupportedProtocolVersion,
     InsufficientBytes,
     MalformedPacket,
@@ -206,6 +227,7 @@ pub enum ErrorKind {
     TryFromIntError,
     ThreadFail,
     IPCFail,
+    Disconnected,
 }
 
 impl fmt::Display for ErrorKind {
@@ -214,6 +236,7 @@ impl fmt::Display for ErrorKind {
 
         match self {
             NoError => write!(f, "NoError"),
+            Fatal => write!(f, "Fatal"),
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
@@ -224,6 +247,7 @@ impl fmt::Display for ErrorKind {
             TryFromIntError => write!(f, "TryFromIntError"),
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
+            Disconnected => write!(f, "Disconnected"),
         }
     }
 }

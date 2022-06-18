@@ -30,11 +30,14 @@ pub use thread::{Thread, Threadable};
 pub use types::{Blob, ClientID, MqttProtocol, UserProperty, VarU32};
 pub use types::{TopicFilter, TopicName};
 
+use std::net::SocketAddr;
+
 pub const MAX_NODES: usize = 1024;
 pub const MAX_SHARDS: u32 = 0x8000;
 pub const MAX_SESSIONS: usize = 1024 * 8;
 
 pub const DEFAULT_SHARDS: usize = 1024 * 8;
+pub const MQTT_PORT: u16 = 1883;
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation
@@ -62,6 +65,14 @@ pub trait Hostable {
 
 pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
+}
+
+/// Default listen address for MQTT packets: `0.0.0.0:1883`
+pub fn default_listen_address4(port: Option<u16>) -> SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let port = port.unwrap_or(MQTT_PORT);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }
 
 #[cfg(test)]

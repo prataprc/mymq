@@ -1,22 +1,15 @@
 use uuid::Uuid;
 
-use crate::{Result, Session, Shardable};
+use crate::{Session, Shardable};
 
 pub struct Shard {
-    uuid: Uuid,
+    pub uuid: Uuid,
     sessions: Vec<Session>,
 }
 
-impl Shard {
-    pub fn new() -> Result<Shard> {
-        let uuid = Uuid::new_v4();
-
-        let val = Shard { uuid, sessions: Vec::default() };
-        Ok(val)
-    }
-
-    pub fn uuid(&self) -> Uuid {
-        self.uuid
+impl Default for Shard {
+    fn default() -> Shard {
+        Shard { uuid: Uuid::new_v4(), sessions: Vec::default() }
     }
 }
 

@@ -1,141 +1,274 @@
 use log::warn;
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, net};
+use std::{collections::BTreeMap, net, thread};
 
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{ConsistentHash, Hostable, Shard, MAX_NODES};
+use crate::{ConsistentHash, Hostable, Shard, Shardable, MAX_NODES};
 use crate::{Error, ErrorKind, Result};
 
+/// Cluster is the global configuration state for multi-node MQTT cluster.
+///
+/// TODO: at some point in time this shall be integrated with consensus protocol for
+/// lossless replication and fault-tolerance.
 pub struct Cluster {
+    /// human readable name of the cluster.
+    pub name: String,
+    /// Maximum nodes that can exist in this cluster. If not provided [MAX_NODES]
+    /// shall be used. Immutable once created.
     pub max_nodes: usize,
+    /// Fixed number of shards, of session/connections, that can exist in this cluster.
+    /// Shards are assigned to nodes. If not provided [DEFAULT_SHARDS] shards shall be
+    /// used. Immutable once created.
+    pub num_shards: usize,
+    /// Network listen address for `this` node. If not provided
+    /// [default_listen_address4] shall be used. Immutable once created.
+    pub address: net::SocketAddr, // listen address
+    /// Initial set of nodes that are going to be part of this cluster. If not provided
+    /// a default node shall be created from `address` and created as single-node
+    /// cluster. Can mutate via [Cluster::add_nodes] and [Cluster::remove_nodes]
+    /// methods.
+    pub nodes: Vec<Node>,
+    inner: Inner,
+}
 
+enum Inner {
+    Init,
+    Handle(Thread<Cluster, Request, Response>),
+    Main(Main),
+}
+
+struct Main {
     rebalancer: Rebalancer,
     nodes: BTreeMap<Uuid, Node>,
     shards: BTreeMap<Uuid, Shard>,
 }
 
+impl Default for Cluster {
+    fn default() -> Cluster {
+        use crate::{default_listen_address4, DEFAULT_SHARDS};
+
+        let node = Node {
+            address: default_listen_address4(None),
+            ..Node::default()
+        };
+        Cluster {
+            name: "my-cluster".to_string(), // TODO: no magic
+            max_nodes: MAX_NODES,
+            num_shards: DEFAULT_SHARDS,
+            address: default_listen_address4(None),
+            nodes: vec![node],
+            inner: Inner::Init,
+        }
+    }
+}
+
+// Handle cluster
 impl Cluster {
-    pub fn new(max_nodes: usize, shards: Vec<Shard>, node: Node) -> Result<Cluster> {
+    fn spawn(mut self) -> Result<Cluster> {
         use crate::{util, MAX_SHARDS};
 
-        let n = shards.len();
-        if n > (MAX_SHARDS as usize) {
-            err!(InvalidInput, desc: "num. of shards too large {}", n)?;
+        if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
+            err!(InvalidInput, desc: "cluster can be spawned only in init-state ")?;
         }
-        if max_nodes > MAX_NODES {
-            err!(InvalidInput, desc: "num. of nodes too large {}", max_nodes)?;
+        if self.num_shards > (MAX_SHARDS as usize) {
+            err!(InvalidInput, desc: "num. of shards too large {}", self.num_shards)?;
         }
-        if !util::is_power_of_2(n) {
-            err!(InvalidInput, desc: "num. of shards must be power of 2 {}", n)?;
+        if !util::is_power_of_2(self.num_shards) {
+            err!(
+                InvalidInput,
+                desc: "num. of shards must be power of 2 {}",
+                self.num_shards
+            )?;
+        }
+        if self.max_nodes > MAX_NODES {
+            err!(InvalidInput, desc: "num. of nodes too large {}", self.max_nodes)?;
         }
 
-        let nodes = vec![node];
+        let nodes: Vec<Node> = self.nodes.drain(..).collect();
         let val = Cluster {
-            max_nodes,
+            name: self.name.clone(),
+            max_nodes: self.max_nodes,
+            num_shards: self.num_shards,
+            address: self.address,
+            nodes: Vec::default(),
+            inner: Inner::Main(Main {
+                rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
+                nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid, n))),
+                shards: BTreeMap::from_iter(
+                    (0..self.num_shards).map(|_| Shard::default()).map(|s| (s.uuid, s)),
+                ),
+            }),
+        };
 
-            rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
-            nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid(), n))),
-            shards: BTreeMap::from_iter(shards.into_iter().map(|s| (s.uuid(), s))),
+        let handle = Thread::spawn_sync(&self.name, 16, val);
+
+        let val = Cluster {
+            name: self.name.clone(),
+            max_nodes: self.max_nodes,
+            num_shards: self.num_shards,
+            address: self.address,
+            nodes: Vec::default(),
+            inner: Inner::Handle(handle),
         };
 
         Ok(val)
     }
-
-    pub fn add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<&mut Self> {
-        let n = nodes.len() + self.nodes.len();
-        if n > self.max_nodes {
-            err!(InvalidInput, desc: "num. of nodes too large {}", n)?;
-        }
-        // validate whether nodes are already present.
-        for node in nodes.iter() {
-            let uuid = node.uuid();
-            match self.nodes.get(&uuid) {
-                Some(_) => err!(InvalidInput, desc: "node {} already present", uuid)?,
-                None => (),
-            }
-        }
-
-        self.rebalancer.add_nodes(&nodes)?;
-
-        nodes.drain(..).for_each(|n| {
-            self.nodes.insert(n.uuid(), n);
-        });
-
-        Ok(self)
-    }
-
-    pub fn remove_nodes(&mut self, nodes: &[Node]) -> Result<&mut Self> {
-        if nodes.len() >= self.nodes.len() {
-            err!(InvalidInput, desc: "cannot remove all the nodes {}", nodes.len())?;
-        }
-        // validate whether nodes are already missing.
-        for node in nodes.iter() {
-            let uuid = node.uuid();
-            match self.nodes.get(&uuid) {
-                Some(_) => (),
-                None => warn!("node {} is missing", uuid),
-            }
-        }
-
-        self.rebalancer.remove_nodes(nodes)?;
-
-        nodes.iter().for_each(|n| {
-            self.nodes.remove(&n.uuid());
-        });
-
-        Ok(self)
-    }
-}
-
-impl Cluster {
-    pub fn shard_to_node(&self, shard: &Shard) -> &Node {
-        let node_uuid = self.rebalancer.shard_to_node(shard);
-        self.get_node(node_uuid).unwrap()
-    }
-
-    pub fn get_node(&self, uuid: Uuid) -> Option<&Node> {
-        self.nodes.get(&uuid)
-    }
-
-    pub fn get_shard(&self, uuid: Uuid) -> Option<&Shard> {
-        self.shards.get(&uuid)
-    }
 }
 
 pub enum Request {
-    Todo,
+    AddNodes { nodes: Vec<Node> },
+    RemoveNodes { nodes: Vec<Uuid> },
+    ShardMap { uuid: Uuid },
+}
+
+// Handle Cluster
+impl Cluster {
+    pub fn add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(handle) => {
+                handle.request(Request::AddNodes { nodes })?;
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_nodes(&mut self, nodes: Vec<Uuid>) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(handle) => {
+                handle.request(Request::RemoveNodes { nodes })?;
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    pub fn shard_to_node<T: Shardable>(&mut self, shard: T) -> Result<Uuid> {
+        let uuid = shard.uuid();
+        let node_uuid = match &self.inner {
+            Inner::Handle(handle) => handle.request(Request::ShardMap { uuid })?,
+            _ => unreachable!(),
+        };
+        match node_uuid {
+            Response::NodeUuid(uuid) => Ok(uuid),
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub enum Response {
-    Todo,
+    Ok,
+    NodeUuid(Uuid),
 }
 
 impl Threadable for Cluster {
     type Req = Request;
     type Resp = Response;
 
-    fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Self {
-        todo!()
+    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
+        use crate::thread::pending_msg;
+        use Request::*;
+
+        let qs = pending_msg(&rx, 1024)?; // TODO: avoid magic nums.
+
+        //for q in qs.into_iter() {
+        //    match q {
+        //        (AddNodes { nodes }, Some(tx)) => {
+        //            tx.send(self.add_nodes(nodes))
+        //        }
+        //        RemoveNodes { nodes } => { }
+        //        Request::ShardMap { uuid } => {
+        //            let node_uuid = self.rebalancer.shard_to_node(uuid);
+        //            match main.nodes.get(node_uuid) {
+        //                Some(_) => Ok(Response::NodeUuid(node_uuid)),
+        //                None => err!(Fatal, desc: "node {} not in cluster", node_uuid)
+        //            }
+        //        }
+        //    }
+        //}
+
+        Ok(self)
     }
 }
 
+// Main loop
+impl Cluster {
+    //pub fn add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<Response> {
+    //    let run_loop = match &mut self.inner {
+    //        Inner::Main(run_loop) => run_loop,
+    //        _ => unreachable!(),
+    //    };
+
+    //    let n = nodes.len() + run_loop.nodes.len();
+    //    if n > self.max_nodes {
+    //        err!(InvalidInput, desc: "num. of nodes too large {}", n)?;
+    //    }
+    //    // validate whether nodes are already present.
+    //    for node in nodes.iter() {
+    //        let uuid = node.uuid;
+    //        match run_loop.nodes.get(&uuid) {
+    //            Some(_) => err!(InvalidInput, desc: "node {} already present", uuid)?,
+    //            None => (),
+    //        }
+    //    }
+
+    //    run_loop.rebalancer.add_nodes(&nodes)?;
+
+    //    nodes.drain(..).for_each(|n| {
+    //        run_loop.nodes.insert(n.uuid, n);
+    //    });
+
+    //    Ok(Response::Ok)
+    //}
+
+    //pub fn remove_nodes(&mut self, nodes: &[Node]) -> Result<Response> {
+    //    let run_loop = match &mut self.inner {
+    //        Inner::Main(run_loop) => run_loop,
+    //        _ => unreachable!(),
+    //    }
+
+    //    if nodes.len() >= run_loop.nodes.len() {
+    //        err!(InvalidInput, desc: "cannot remove all the nodes {}", nodes.len())?;
+    //    }
+    //    // validate whether nodes are already missing.
+    //    for node in nodes.iter() {
+    //        match run_loop.nodes.get(&node.uuid) {
+    //            Some(_) => (),
+    //            None => warn!("node {} is missing", node.uuid),
+    //        }
+    //    }
+
+    //    run_loop.rebalancer.remove_nodes(nodes)?;
+
+    //    nodes.iter().for_each(|n| {
+    //        run_loop.nodes.remove(&n.uuid);
+    //    });
+
+    //    Ok(Response::Ok)
+    //}
+}
+
+/// Represents a Node in the cluster. `address` is the socket-address in which the
+/// Node is listening for MQTT. Application must provide a valid address, other fields
+/// like `weight` and `uuid` shall be assigned a meaningful default.
 pub struct Node {
     pub weight: u16,
-
-    uuid: Uuid,
-    address: net::SocketAddr,
+    pub uuid: Uuid,
+    pub address: net::SocketAddr, // listen address
 }
 
-impl Node {
-    pub fn new(address: net::SocketAddr, weight: u16) -> Result<Node> {
-        let val = Node { weight, uuid: Uuid::new_v4(), address };
+impl Default for Node {
+    fn default() -> Node {
+        use crate::default_listen_address4;
 
-        Ok(val)
-    }
-
-    pub fn uuid(&self) -> Uuid {
-        self.uuid
+        Node {
+            weight: u16::try_from(num_cpus::get()).unwrap(),
+            address: default_listen_address4(None),
+            uuid: Uuid::new_v4(),
+        }
     }
 }
 
@@ -192,9 +325,9 @@ impl Rebalancer {
         Ok(())
     }
 
-    pub fn shard_to_node(&self, shard: &Shard) -> Uuid {
+    pub fn shard_to_node(&self, uuid: Uuid) -> Uuid {
         match self {
-            Rebalancer::CHash(val) => val.shard_to_node(shard),
+            Rebalancer::CHash(val) => val.shard_to_node(uuid),
         }
     }
 }

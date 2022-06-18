@@ -14,7 +14,7 @@ pub trait Threadable: Sized {
     type Req;
     type Resp;
 
-    fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Self;
+    fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self>;
 }
 
 /// IPC type, that enumerates as either [mpsc::Sender] or, [mpsc::SyncSender] channel.
@@ -42,14 +42,8 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => match tx.send((msg, None)) {
-                Ok(_) => Ok(()),
-                Err(err) => err!(IPCFail, cause: err, "post fail"),
-            },
-            Tx::S(tx) => match tx.send((msg, None)) {
-                Ok(_) => Ok(()),
-                Err(err) => err!(IPCFail, cause: err, "post fail"),
-            },
+            Tx::N(tx) => err!(IPCFail, tryy: tx.send((msg, None))),
+            Tx::S(tx) => err!(IPCFail, tryy: tx.send((msg, None))),
         }
     }
 
@@ -61,14 +55,8 @@ impl<Q, R> Tx<Q, R> {
     {
         let (stx, srx) = mpsc::channel();
         match self {
-            Tx::N(tx) => match tx.send((request, Some(stx))) {
-                Ok(_) => (),
-                Err(err) => err!(IPCFail, cause: err, "request fail")?,
-            },
-            Tx::S(tx) => match tx.send((request, Some(stx))) {
-                Ok(_) => (),
-                Err(err) => err!(IPCFail, cause: err, "request fail")?,
-            },
+            Tx::N(tx) => err!(IPCFail, tryy: tx.send((request, Some(stx))))?,
+            Tx::S(tx) => err!(IPCFail, tryy: tx.send((request, Some(stx))))?,
         }
 
         match srx.recv() {
@@ -85,14 +73,8 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => match tx.send((request, Some(resp_tx))) {
-                Ok(_) => Ok(()),
-                Err(err) => err!(IPCFail, cause: err, "request_tx fail"),
-            },
-            Tx::S(tx) => match tx.send((request, Some(resp_tx))) {
-                Ok(_) => Ok(()),
-                Err(err) => err!(IPCFail, cause: err, "request_tx fail"),
-            },
+            Tx::N(tx) => err!(IPCFail, tryy: tx.send((request, Some(resp_tx)))),
+            Tx::S(tx) => err!(IPCFail, tryy: tx.send((request, Some(resp_tx)))),
         }
     }
 }
@@ -119,7 +101,7 @@ where
     R: 'static + Send,
 {
     name: String,
-    handle: Option<thread::JoinHandle<T>>,
+    handle: Option<thread::JoinHandle<Result<T>>>,
     tx: Option<Tx<Q, R>>,
 }
 
@@ -199,8 +181,60 @@ where
         mem::drop(self.tx.take());
 
         match self.handle.take().unwrap().join() {
-            Ok(val) => Ok(val),
+            Ok(val) => val,
             Err(err) => panic::resume_unwind(err),
+        }
+    }
+}
+
+impl<T, Q, R> Thread<T, Q, R>
+where
+    T: 'static + Send + Threadable<Req = Q, Resp = R>,
+    Q: 'static + Send,
+    R: 'static + Send,
+{
+    /// Post a message to thread and don't wait for response.
+    pub fn post(&self, msg: Q) -> Result<()> {
+        match &self.tx {
+            Some(tx) => tx.post(msg),
+            None => unreachable!(),
+        }
+    }
+
+    /// Send a request message to thread and wait for a response.
+    pub fn request(&self, request: Q) -> Result<R> {
+        match &self.tx {
+            Some(tx) => tx.request(request),
+            None => unreachable!(),
+        }
+    }
+
+    /// Send a request message to thread and caller can receive on other end of
+    /// `resp_tx`.
+    pub fn request_tx(&self, request: Q, resp_tx: mpsc::Sender<R>) -> Result<()> {
+        match &self.tx {
+            Some(tx) => tx.request_tx(request, resp_tx),
+            None => unreachable!(),
+        }
+    }
+}
+
+pub fn pending_msg<Q, R>(
+    rx: &Rx<Q, R>,
+    max: usize,
+) -> Result<Vec<(Q, Option<mpsc::Sender<R>>)>> {
+    let mut reqs = vec![];
+    loop {
+        match rx.try_recv() {
+            Ok(req) if reqs.len() < max => reqs.push(req),
+            Ok(req) => {
+                reqs.push(req);
+                break Ok(reqs);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                err!(Disconnected, desc: "rx closed")?
+            }
+            Err(mpsc::TryRecvError::Empty) => break Ok(reqs),
         }
     }
 }
