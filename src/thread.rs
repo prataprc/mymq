@@ -42,8 +42,8 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => err!(IPCFail, tryy: tx.send((msg, None))),
-            Tx::S(tx) => err!(IPCFail, tryy: tx.send((msg, None))),
+            Tx::N(tx) => err!(IPCFail, try: tx.send((msg, None))),
+            Tx::S(tx) => err!(IPCFail, try: tx.send((msg, None))),
         }
     }
 
@@ -55,14 +55,11 @@ impl<Q, R> Tx<Q, R> {
     {
         let (stx, srx) = mpsc::channel();
         match self {
-            Tx::N(tx) => err!(IPCFail, tryy: tx.send((request, Some(stx))))?,
-            Tx::S(tx) => err!(IPCFail, tryy: tx.send((request, Some(stx))))?,
+            Tx::N(tx) => err!(IPCFail, try: tx.send((request, Some(stx))))?,
+            Tx::S(tx) => err!(IPCFail, try: tx.send((request, Some(stx))))?,
         }
 
-        match srx.recv() {
-            Ok(resp) => Ok(resp),
-            Err(err) => err!(IPCFail, cause: err, "request recv fail"),
-        }
+        err!(IPCFail, try: srx.recv())
     }
 
     /// Send a request message to thread and caller can receive on other end of
@@ -73,8 +70,8 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => err!(IPCFail, tryy: tx.send((request, Some(resp_tx)))),
-            Tx::S(tx) => err!(IPCFail, tryy: tx.send((request, Some(resp_tx)))),
+            Tx::N(tx) => err!(IPCFail, try: tx.send((request, Some(resp_tx)))),
+            Tx::S(tx) => err!(IPCFail, try: tx.send((request, Some(resp_tx)))),
         }
     }
 }
@@ -175,7 +172,7 @@ where
     ///
     /// Even otherwise, when Thread value goes out of scope its drop implementation
     /// shall call this method to exit the thread, except that any errors are ignored.
-    pub fn close_wait(mut self) -> Result<T> {
+    pub fn close_wait(&mut self) -> Result<T> {
         use std::{mem, panic};
 
         mem::drop(self.tx.take());
@@ -222,19 +219,17 @@ where
 pub fn pending_msg<Q, R>(
     rx: &Rx<Q, R>,
     max: usize,
-) -> Result<Vec<(Q, Option<mpsc::Sender<R>>)>> {
+) -> (Vec<(Q, Option<mpsc::Sender<R>>)>, bool) {
     let mut reqs = vec![];
     loop {
         match rx.try_recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),
             Ok(req) => {
                 reqs.push(req);
-                break Ok(reqs);
+                break (reqs, false);
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                err!(Disconnected, desc: "rx closed")?
-            }
-            Err(mpsc::TryRecvError::Empty) => break Ok(reqs),
+            Err(mpsc::TryRecvError::Disconnected) => break (reqs, true),
+            Err(mpsc::TryRecvError::Empty) => break (reqs, false),
         }
     }
 }

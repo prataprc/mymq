@@ -36,7 +36,7 @@ macro_rules! err {
         log_error!(e);
         Err(e)
     }};
-    ($v:ident, tryy: $($res:expr),+) => {{
+    ($v:ident, try: $($res:expr),+) => {{
         match $($res),+ {
             Ok(val) => Ok(val),
             Err(err) => {

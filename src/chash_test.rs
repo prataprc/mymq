@@ -1,6 +1,7 @@
 use rand::{prelude::random, rngs::StdRng, SeedableRng};
 
 use super::*;
+use crate::Shardable;
 
 struct Nd(Uuid, u16);
 
@@ -42,7 +43,7 @@ fn test_consistent_hash() {
 
     let mut shards_on_node = BTreeMap::new();
     for s in shards.iter() {
-        let node_uuid = ch.shard_to_node(s);
+        let node_uuid = ch.shard_to_node(s.uuid());
         match shards_on_node.get_mut(&node_uuid) {
             Some(value) => *value += 1,
             None => {

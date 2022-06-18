@@ -1,7 +1,7 @@
-use log::warn;
+use log::{error, info, warn};
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, net, thread};
+use std::{collections::BTreeMap, net};
 
 use crate::thread::{Rx, Thread, Threadable};
 use crate::{ConsistentHash, Hostable, Shard, Shardable, MAX_NODES};
@@ -34,7 +34,7 @@ pub struct Cluster {
 
 enum Inner {
     Init,
-    Handle(Thread<Cluster, Request, Response>),
+    Handle(Thread<Cluster, Request, Result<Response>>),
     Main(Main),
 }
 
@@ -63,9 +63,34 @@ impl Default for Cluster {
     }
 }
 
+impl Drop for Cluster {
+    fn drop(&mut self) {
+        if self.nodes.len() > 0 {
+            error!("Cluster::drop, unexpected cluster state {{nodes}}");
+        }
+
+        match &mut self.inner {
+            Inner::Init => error!("Cluster::drop, invalid state Inner::Init"),
+            Inner::Handle(handle) => match handle.close_wait() {
+                Ok(_cluster) => (),
+                Err(err) => error!("Cluster::drop, thread result: {}", err),
+            },
+            Inner::Main(run_loop) => {
+                info!(
+                    "Cluster::drop, there are {} nodes and {} shards",
+                    run_loop.nodes.len(),
+                    run_loop.shards.len()
+                );
+            }
+        }
+    }
+}
+
 // Handle cluster
 impl Cluster {
-    fn spawn(mut self) -> Result<Cluster> {
+    pub const CHANNEL_SIZE: usize = 16; // TODO: is this enough ?
+
+    pub fn spawn(mut self) -> Result<Cluster> {
         use crate::{util, MAX_SHARDS};
 
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
@@ -86,7 +111,16 @@ impl Cluster {
         }
 
         let nodes: Vec<Node> = self.nodes.drain(..).collect();
-        let val = Cluster {
+        let shards = {
+            let mut shards = BTreeMap::new();
+            for i in 0..self.num_shards {
+                let mut shard = Shard::default();
+                shard.name = format!("{}-shard-{}", self.name, i);
+                shards.insert(shard.uuid, shard.spawn()?);
+            }
+            shards
+        };
+        let run_loop = Cluster {
             name: self.name.clone(),
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
@@ -95,13 +129,11 @@ impl Cluster {
             inner: Inner::Main(Main {
                 rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
                 nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid, n))),
-                shards: BTreeMap::from_iter(
-                    (0..self.num_shards).map(|_| Shard::default()).map(|s| (s.uuid, s)),
-                ),
+                shards,
             }),
         };
 
-        let handle = Thread::spawn_sync(&self.name, 16, val);
+        let handle = Thread::spawn_sync(&self.name, Self::CHANNEL_SIZE, run_loop);
 
         let val = Cluster {
             name: self.name.clone(),
@@ -124,10 +156,10 @@ pub enum Request {
 
 // Handle Cluster
 impl Cluster {
-    pub fn add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<()> {
+    pub fn add_nodes(&mut self, nodes: Vec<Node>) -> Result<()> {
         match &self.inner {
             Inner::Handle(handle) => {
-                handle.request(Request::AddNodes { nodes })?;
+                handle.request(Request::AddNodes { nodes })??;
             }
             _ => unreachable!(),
         }
@@ -138,7 +170,7 @@ impl Cluster {
     pub fn remove_nodes(&mut self, nodes: Vec<Uuid>) -> Result<()> {
         match &self.inner {
             Inner::Handle(handle) => {
-                handle.request(Request::RemoveNodes { nodes })?;
+                handle.request(Request::RemoveNodes { nodes })??;
             }
             _ => unreachable!(),
         }
@@ -149,7 +181,7 @@ impl Cluster {
     pub fn shard_to_node<T: Shardable>(&mut self, shard: T) -> Result<Uuid> {
         let uuid = shard.uuid();
         let node_uuid = match &self.inner {
-            Inner::Handle(handle) => handle.request(Request::ShardMap { uuid })?,
+            Inner::Handle(handle) => handle.request(Request::ShardMap { uuid })??,
             _ => unreachable!(),
         };
         match node_uuid {
@@ -166,29 +198,34 @@ pub enum Response {
 
 impl Threadable for Cluster {
     type Req = Request;
-    type Resp = Response;
+    type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
         use crate::thread::pending_msg;
         use Request::*;
 
-        let qs = pending_msg(&rx, 1024)?; // TODO: avoid magic nums.
+        loop {
+            let (qs, disconnected) = pending_msg(&rx, 16);
+            for q in qs.into_iter() {
+                match q {
+                    (AddNodes { nodes }, Some(tx)) => {
+                        err!(IPCFail, try: tx.send(self.handle_add_nodes(nodes)))?
+                    }
+                    (RemoveNodes { nodes }, Some(tx)) => err!(
+                        IPCFail,
+                        try: tx.send(self.handle_remove_nodes(nodes.as_slice()))
+                    )?,
+                    (ShardMap { uuid }, Some(tx)) => {
+                        err!(IPCFail, try: tx.send(self.handle_shard_map(uuid)))?
+                    }
+                    (_, _) => unreachable!(),
+                }
+            }
 
-        //for q in qs.into_iter() {
-        //    match q {
-        //        (AddNodes { nodes }, Some(tx)) => {
-        //            tx.send(self.add_nodes(nodes))
-        //        }
-        //        RemoveNodes { nodes } => { }
-        //        Request::ShardMap { uuid } => {
-        //            let node_uuid = self.rebalancer.shard_to_node(uuid);
-        //            match main.nodes.get(node_uuid) {
-        //                Some(_) => Ok(Response::NodeUuid(node_uuid)),
-        //                None => err!(Fatal, desc: "node {} not in cluster", node_uuid)
-        //            }
-        //        }
-        //    }
-        //}
+            if disconnected {
+                break;
+            }
+        }
 
         Ok(self)
     }
@@ -196,59 +233,72 @@ impl Threadable for Cluster {
 
 // Main loop
 impl Cluster {
-    //pub fn add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<Response> {
-    //    let run_loop = match &mut self.inner {
-    //        Inner::Main(run_loop) => run_loop,
-    //        _ => unreachable!(),
-    //    };
+    pub fn handle_add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<Response> {
+        let run_loop = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
 
-    //    let n = nodes.len() + run_loop.nodes.len();
-    //    if n > self.max_nodes {
-    //        err!(InvalidInput, desc: "num. of nodes too large {}", n)?;
-    //    }
-    //    // validate whether nodes are already present.
-    //    for node in nodes.iter() {
-    //        let uuid = node.uuid;
-    //        match run_loop.nodes.get(&uuid) {
-    //            Some(_) => err!(InvalidInput, desc: "node {} already present", uuid)?,
-    //            None => (),
-    //        }
-    //    }
+        let n = nodes.len() + run_loop.nodes.len();
+        if n > self.max_nodes {
+            err!(InvalidInput, desc: "num. of nodes too large {}", n)?;
+        }
+        // validate whether nodes are already present.
+        for node in nodes.iter() {
+            let uuid = node.uuid;
+            match run_loop.nodes.get(&uuid) {
+                Some(_) => err!(InvalidInput, desc: "node {} already present", uuid)?,
+                None => (),
+            }
+        }
 
-    //    run_loop.rebalancer.add_nodes(&nodes)?;
+        run_loop.rebalancer.add_nodes(&nodes)?;
 
-    //    nodes.drain(..).for_each(|n| {
-    //        run_loop.nodes.insert(n.uuid, n);
-    //    });
+        nodes.drain(..).for_each(|n| {
+            run_loop.nodes.insert(n.uuid, n);
+        });
 
-    //    Ok(Response::Ok)
-    //}
+        Ok(Response::Ok)
+    }
 
-    //pub fn remove_nodes(&mut self, nodes: &[Node]) -> Result<Response> {
-    //    let run_loop = match &mut self.inner {
-    //        Inner::Main(run_loop) => run_loop,
-    //        _ => unreachable!(),
-    //    }
+    pub fn handle_remove_nodes(&mut self, uuids: &[Uuid]) -> Result<Response> {
+        let run_loop = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
 
-    //    if nodes.len() >= run_loop.nodes.len() {
-    //        err!(InvalidInput, desc: "cannot remove all the nodes {}", nodes.len())?;
-    //    }
-    //    // validate whether nodes are already missing.
-    //    for node in nodes.iter() {
-    //        match run_loop.nodes.get(&node.uuid) {
-    //            Some(_) => (),
-    //            None => warn!("node {} is missing", node.uuid),
-    //        }
-    //    }
+        if uuids.len() >= run_loop.nodes.len() {
+            err!(InvalidInput, desc: "cannot remove all the nodes {}", uuids.len())?;
+        }
+        // validate whether nodes are already missing.
+        for uuid in uuids.iter() {
+            match run_loop.nodes.get(uuid) {
+                Some(_) => (),
+                None => warn!("node {} is missing", uuid),
+            }
+        }
 
-    //    run_loop.rebalancer.remove_nodes(nodes)?;
+        run_loop.rebalancer.remove_nodes(&uuids)?;
 
-    //    nodes.iter().for_each(|n| {
-    //        run_loop.nodes.remove(&n.uuid);
-    //    });
+        uuids.iter().for_each(|uuid| {
+            run_loop.nodes.remove(uuid);
+        });
 
-    //    Ok(Response::Ok)
-    //}
+        Ok(Response::Ok)
+    }
+
+    pub fn handle_shard_map(&self, uuid: Uuid) -> Result<Response> {
+        let run_loop = match &self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        let node_uuid = run_loop.rebalancer.shard_to_node(uuid);
+        match run_loop.nodes.get(&node_uuid) {
+            Some(_) => Ok(Response::NodeUuid(node_uuid)),
+            None => err!(InvalidInput, desc: "node {} not in cluster", node_uuid),
+        }
+    }
 }
 
 /// Represents a Node in the cluster. `address` is the socket-address in which the
@@ -317,9 +367,11 @@ impl Rebalancer {
         Ok(())
     }
 
-    pub fn remove_nodes(&mut self, nodes: &[Node]) -> Result<()> {
+    pub fn remove_nodes(&mut self, uuids: &[Uuid]) -> Result<()> {
+        let nodes: Vec<Node> =
+            uuids.iter().map(|uuid| Node { uuid: *uuid, ..Node::default() }).collect();
         match self {
-            Rebalancer::CHash(val) => val.remove_nodes(nodes)?,
+            Rebalancer::CHash(val) => val.remove_nodes(&nodes)?,
         };
 
         Ok(())
