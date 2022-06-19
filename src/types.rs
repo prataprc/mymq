@@ -127,7 +127,7 @@ impl TopicFilter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct ClientID(pub String);
 
 impl Deref for ClientID {

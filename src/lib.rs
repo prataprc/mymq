@@ -9,6 +9,7 @@
 mod error;
 mod chash;
 mod cluster;
+mod miot;
 mod session;
 mod shard;
 mod thread;
@@ -24,6 +25,7 @@ pub mod fuzzy;
 pub use chash::ConsistentHash;
 pub use cluster::{Cluster, Node, Rebalancer};
 pub use error::{Error, ErrorKind, ReasonCode};
+pub use miot::Miot;
 pub use session::Session;
 pub use shard::Shard;
 pub use thread::{Thread, Threadable};

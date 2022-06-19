@@ -1,9 +1,9 @@
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use uuid::Uuid;
 
 use std::{collections::BTreeMap, net};
 
-use crate::thread::{Rx, Thread, Threadable};
+use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{ConsistentHash, Hostable, Shard, Shardable, MAX_NODES};
 use crate::{Error, ErrorKind, Result};
 
@@ -35,10 +35,11 @@ pub struct Cluster {
 enum Inner {
     Init,
     Handle(Thread<Cluster, Request, Result<Response>>),
-    Main(Main),
+    Tx(Tx<Request, Result<Response>>),
+    Main(RunLoop),
 }
 
-struct Main {
+struct RunLoop {
     rebalancer: Rebalancer,
     nodes: BTreeMap<Uuid, Node>,
     shards: BTreeMap<Uuid, Shard>,
@@ -65,23 +66,22 @@ impl Default for Cluster {
 
 impl Drop for Cluster {
     fn drop(&mut self) {
+        use std::mem;
+
         if self.nodes.len() > 0 {
             error!("Cluster::drop, unexpected cluster state {{nodes}}");
         }
 
-        match &mut self.inner {
-            Inner::Init => error!("Cluster::drop, invalid state Inner::Init"),
-            Inner::Handle(handle) => match handle.close_wait() {
-                Ok(_cluster) => (),
-                Err(err) => error!("Cluster::drop, thread result: {}", err),
-            },
-            Inner::Main(run_loop) => {
-                info!(
-                    "Cluster::drop, there are {} nodes and {} shards",
-                    run_loop.nodes.len(),
-                    run_loop.shards.len()
-                );
+        let inner = mem::replace(&mut self.inner, Inner::Init);
+
+        match inner {
+            Inner::Init => debug!("Cluster::Init, {:?} drop ...", self.name),
+            Inner::Handle(_) => {
+                error!("Cluster::Handle, {:?} invalid drop ...", self.name);
+                panic!("Cluster::Handle, {:?} invalid drop ...", self.name);
             }
+            Inner::Tx(_tx) => info!("Cluster::Tx {:?} drop ...", self.name),
+            Inner::Main(_run_loop) => info!("Cluster::Main {:?} drop ...", self.name),
         }
     }
 }
@@ -111,55 +111,91 @@ impl Cluster {
         }
 
         let nodes: Vec<Node> = self.nodes.drain(..).collect();
-        let shards = {
-            let mut shards = BTreeMap::new();
+        let cluster = Cluster {
+            name: self.name.clone(),
+            max_nodes: self.max_nodes,
+            num_shards: self.num_shards,
+            address: self.address,
+            nodes: Vec::default(),
+            inner: Inner::Main(RunLoop {
+                rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
+                nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid, n))),
+                shards: BTreeMap::default(),
+            }),
+        };
+        let thrd = Thread::spawn_sync(&self.name, Self::CHANNEL_SIZE, cluster);
+
+        let cluster = Cluster {
+            name: self.name.clone(),
+            max_nodes: self.max_nodes,
+            num_shards: self.num_shards,
+            address: self.address,
+            nodes: Vec::default(),
+            inner: Inner::Handle(thrd),
+        };
+        {
+            let mut shards = BTreeMap::default();
             for i in 0..self.num_shards {
                 let mut shard = Shard::default();
                 shard.name = format!("{}-shard-{}", self.name, i);
-                shards.insert(shard.uuid, shard.spawn()?);
+
+                let cluster_tx = cluster.to_tx();
+                let shard = shard.spawn(cluster_tx)?;
+                shards.insert(shard.uuid, shard);
             }
-            shards
-        };
-        let run_loop = Cluster {
-            name: self.name.clone(),
-            max_nodes: self.max_nodes,
-            num_shards: self.num_shards,
-            address: self.address,
-            nodes: Vec::default(),
-            inner: Inner::Main(Main {
-                rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
-                nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid, n))),
-                shards,
-            }),
-        };
+            match &cluster.inner {
+                Inner::Handle(thrd) => {
+                    thrd.request(Request::SetShards(shards))??;
+                }
+                _ => unreachable!(),
+            }
+        }
 
-        let handle = Thread::spawn_sync(&self.name, Self::CHANNEL_SIZE, run_loop);
+        Ok(cluster)
+    }
 
-        let val = Cluster {
-            name: self.name.clone(),
-            max_nodes: self.max_nodes,
-            num_shards: self.num_shards,
-            address: self.address,
-            nodes: Vec::default(),
-            inner: Inner::Handle(handle),
-        };
+    pub fn to_tx(&self) -> Self {
+        match &self.inner {
+            Inner::Handle(thrd) => Cluster {
+                name: self.name.clone(),
+                max_nodes: self.max_nodes,
+                num_shards: self.num_shards,
+                address: self.address,
+                nodes: Vec::default(),
+                inner: Inner::Tx(thrd.to_tx()),
+            },
+            _ => unreachable!(),
+        }
+    }
 
-        Ok(val)
+    pub fn close_wait(mut self) -> Result<Cluster> {
+        use std::mem;
+
+        let inner = mem::replace(&mut self.inner, Inner::Init);
+        match inner {
+            Inner::Handle(thrd) => {
+                thrd.request(Request::Close)??;
+                thrd.close_wait()
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
 pub enum Request {
+    SetShards(BTreeMap<Uuid, Shard>),
     AddNodes { nodes: Vec<Node> },
     RemoveNodes { nodes: Vec<Uuid> },
     ShardMap { uuid: Uuid },
+    Close,
 }
 
 // Handle Cluster
 impl Cluster {
     pub fn add_nodes(&mut self, nodes: Vec<Node>) -> Result<()> {
         match &self.inner {
-            Inner::Handle(handle) => {
-                handle.request(Request::AddNodes { nodes })??;
+            Inner::Handle(thrd) => {
+                thrd.request(Request::AddNodes { nodes })??;
             }
             _ => unreachable!(),
         }
@@ -169,8 +205,8 @@ impl Cluster {
 
     pub fn remove_nodes(&mut self, nodes: Vec<Uuid>) -> Result<()> {
         match &self.inner {
-            Inner::Handle(handle) => {
-                handle.request(Request::RemoveNodes { nodes })??;
+            Inner::Handle(thrd) => {
+                thrd.request(Request::RemoveNodes { nodes })??;
             }
             _ => unreachable!(),
         }
@@ -181,7 +217,7 @@ impl Cluster {
     pub fn shard_to_node<T: Shardable>(&mut self, shard: T) -> Result<Uuid> {
         let uuid = shard.uuid();
         let node_uuid = match &self.inner {
-            Inner::Handle(handle) => handle.request(Request::ShardMap { uuid })??,
+            Inner::Handle(thrd) => thrd.request(Request::ShardMap { uuid })??,
             _ => unreachable!(),
         };
         match node_uuid {
@@ -208,6 +244,9 @@ impl Threadable for Cluster {
             let (qs, disconnected) = pending_msg(&rx, 16);
             for q in qs.into_iter() {
                 match q {
+                    (SetShards(shards_handle), Some(tx)) => {
+                        err!(IPCFail, try: tx.send(self.handle_set_shards(shards_handle)))?
+                    }
                     (AddNodes { nodes }, Some(tx)) => {
                         err!(IPCFail, try: tx.send(self.handle_add_nodes(nodes)))?
                     }
@@ -217,6 +256,9 @@ impl Threadable for Cluster {
                     )?,
                     (ShardMap { uuid }, Some(tx)) => {
                         err!(IPCFail, try: tx.send(self.handle_shard_map(uuid)))?
+                    }
+                    (Close, Some(tx)) => {
+                        err!(IPCFail, try: tx.send(self.handle_close()))?
                     }
                     (_, _) => unreachable!(),
                 }
@@ -233,7 +275,17 @@ impl Threadable for Cluster {
 
 // Main loop
 impl Cluster {
-    pub fn handle_add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<Response> {
+    fn handle_set_shards(&mut self, shards: BTreeMap<Uuid, Shard>) -> Result<Response> {
+        let run_loop = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        run_loop.shards = shards;
+        Ok(Response::Ok)
+    }
+
+    fn handle_add_nodes(&mut self, mut nodes: Vec<Node>) -> Result<Response> {
         let run_loop = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -261,7 +313,7 @@ impl Cluster {
         Ok(Response::Ok)
     }
 
-    pub fn handle_remove_nodes(&mut self, uuids: &[Uuid]) -> Result<Response> {
+    fn handle_remove_nodes(&mut self, uuids: &[Uuid]) -> Result<Response> {
         let run_loop = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -287,7 +339,7 @@ impl Cluster {
         Ok(Response::Ok)
     }
 
-    pub fn handle_shard_map(&self, uuid: Uuid) -> Result<Response> {
+    fn handle_shard_map(&self, uuid: Uuid) -> Result<Response> {
         let run_loop = match &self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -298,6 +350,28 @@ impl Cluster {
             Some(_) => Ok(Response::NodeUuid(node_uuid)),
             None => err!(InvalidInput, desc: "node {} not in cluster", node_uuid),
         }
+    }
+
+    fn handle_close(&mut self) -> Result<Response> {
+        use std::mem;
+
+        let RunLoop { nodes, shards, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        // TODO: is there any explicit clean up to be done for Node ?
+        let hshards = mem::replace(shards, BTreeMap::default());
+        let (n, m) = (nodes.len(), hshards.len());
+        info!("Cluster::close, there are {} nodes and {} shards", n, m);
+
+        for (uuid, shard) in hshards.into_iter() {
+            let shard = shard.close_wait()?;
+            shards.insert(uuid, shard);
+            info!("Cluster::close, {:?} shard {:?} closed ...", self.name, uuid);
+        }
+
+        Ok(Response::Ok)
     }
 }
 

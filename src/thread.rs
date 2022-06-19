@@ -4,7 +4,7 @@
 //! expected to hold onto its own state, and handle all inter-thread communication
 //! via channels and message queues.
 
-use log::error;
+use log::{error, info};
 
 use std::{sync::mpsc, thread};
 
@@ -109,21 +109,10 @@ where
     R: 'static + Send,
 {
     fn drop(&mut self) {
-        use std::{mem, panic};
+        use std::panic;
 
-        match self.tx.take() {
-            Some(tx) => {
-                mem::drop(tx); // must drop tx
-
-                match self.handle.take() {
-                    Some(handle) => match handle.join() {
-                        Ok(_) => (),
-                        Err(err) => panic::resume_unwind(err),
-                    },
-                    None => (),
-                }
-            }
-            None => (),
+        if self.handle.is_some() || self.tx.is_some() {
+            panic!("call close_wait() before dropping thread {:?}", self.name);
         }
     }
 }
@@ -138,6 +127,8 @@ where
     ///
     /// `T` Threads context, when thread is spawned take ownership and calls `main_loop`
     pub fn spawn(name: &str, thrd: T) -> Thread<T, Q, R> {
+        info!("spawning thread {:?} ...", name);
+
         let (tx, rx) = mpsc::channel();
         Thread {
             name: name.to_string(),
@@ -148,6 +139,8 @@ where
 
     /// Create a new Thread instance, using synchronous channel with finite buffer.
     pub fn spawn_sync(name: &str, chan_size: usize, thrd: T) -> Thread<T, Q, R> {
+        info!("spawning thread {:?}, in sync mode {} ...", name, chan_size);
+
         let (tx, rx) = mpsc::sync_channel(chan_size);
 
         Thread {
@@ -157,14 +150,15 @@ where
         }
     }
 
+    /// Return a clone of tx channel.
+    pub fn to_tx(&self) -> Tx<Q, R> {
+        info!("cloning tx for thread {:?}", self.name);
+        self.tx.clone().unwrap()
+    }
+
     /// Return name of this thread.
     pub fn to_name(&self) -> String {
         self.name.to_string()
-    }
-
-    /// Return a clone of tx channel.
-    pub fn to_tx(&self) -> Tx<Q, R> {
-        self.tx.clone().unwrap()
     }
 
     /// Must way to exit/shutdown the thread. Note that all [Tx] clones of this
@@ -172,13 +166,18 @@ where
     ///
     /// Even otherwise, when Thread value goes out of scope its drop implementation
     /// shall call this method to exit the thread, except that any errors are ignored.
-    pub fn close_wait(&mut self) -> Result<T> {
+    pub fn close_wait(mut self) -> Result<T> {
         use std::{mem, panic};
 
         mem::drop(self.tx.take());
 
-        match self.handle.take().unwrap().join() {
-            Ok(val) => val,
+        let handle = self.handle.take().unwrap();
+        match handle.join() {
+            Ok(Ok(thread_val)) => {
+                info!("closing thread {:?} ...", self.name);
+                Ok(thread_val)
+            }
+            Ok(Err(err)) => Err(err),
             Err(err) => panic::resume_unwind(err),
         }
     }

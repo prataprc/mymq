@@ -177,6 +177,13 @@ impl From<std::num::TryFromIntError> for Error {
     }
 }
 
+impl From<std::io::Error> for Error {
+    fn from(val: std::io::Error) -> Self {
+        let err: result::Result<(), Error> = err!(IOError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
 impl Error {
     /// Return the error kind, caller should know how to handle it.
     pub fn kind(&self) -> ErrorKind {
@@ -221,13 +228,13 @@ pub enum ErrorKind {
     InsufficientBytes,
     MalformedPacket,
     ProtocolError,
-    IOError,
     InvalidInput,
     PayloadTooLong,
-    TryFromIntError,
     ThreadFail,
     IPCFail,
     Disconnected,
+    TryFromIntError,
+    IOError,
 }
 
 impl fmt::Display for ErrorKind {
@@ -241,13 +248,13 @@ impl fmt::Display for ErrorKind {
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
             ProtocolError => write!(f, "ProtocolError"),
-            IOError => write!(f, "IOError"),
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
-            TryFromIntError => write!(f, "TryFromIntError"),
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
             Disconnected => write!(f, "Disconnected"),
+            TryFromIntError => write!(f, "TryFromIntError"),
+            IOError => write!(f, "IOError"),
         }
     }
 }
