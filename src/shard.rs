@@ -108,14 +108,17 @@ impl Shard {
     }
 
     pub fn to_tx(&self) -> Self {
-        match &self.inner {
-            Inner::Handle(thrd) => Shard {
-                name: self.name.clone(),
-                uuid: self.uuid,
-                chan_size: self.chan_size,
-                inner: Inner::Tx(thrd.to_tx()),
-            },
+        let inner = match &self.inner {
+            Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
+            Inner::Tx(tx) => Inner::Tx(tx.clone()),
             _ => unreachable!(),
+        };
+
+        Shard {
+            name: self.name.clone(),
+            uuid: self.uuid,
+            chan_size: self.chan_size,
+            inner,
         }
     }
 

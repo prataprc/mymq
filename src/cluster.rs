@@ -155,16 +155,18 @@ impl Cluster {
     }
 
     pub fn to_tx(&self) -> Self {
-        match &self.inner {
-            Inner::Handle(thrd) => Cluster {
-                name: self.name.clone(),
-                max_nodes: self.max_nodes,
-                num_shards: self.num_shards,
-                address: self.address,
-                nodes: Vec::default(),
-                inner: Inner::Tx(thrd.to_tx()),
-            },
+        let inner = match &self.inner {
+            Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
+            Inner::Tx(tx) => Inner::Tx(tx.clone()),
             _ => unreachable!(),
+        };
+        Cluster {
+            name: self.name.clone(),
+            max_nodes: self.max_nodes,
+            num_shards: self.num_shards,
+            address: self.address,
+            nodes: Vec::default(),
+            inner,
         }
     }
 
