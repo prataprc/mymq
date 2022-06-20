@@ -3,14 +3,15 @@ use log::{debug, error, info};
 use std::{collections::BTreeMap, net};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{ClientID, Shard};
+use crate::{ClientID, Config, Shard};
 use crate::{Error, ErrorKind, Result};
 
 pub struct Miot {
-    /// Human readable name for this mio thread.
+    /// Human readable name for this miot thread.
     pub name: String,
-    /// Input channel size for the mio thread.
+    /// Input channel size for the miot thread.
     pub chan_size: usize,
+    config: Config,
     inner: Inner,
 }
 
@@ -29,9 +30,11 @@ pub struct RunLoop {
 
 impl Default for Miot {
     fn default() -> Miot {
+        let config = Config::default();
         Miot {
-            name: String::default(),
-            chan_size: Self::CHANNEL_SIZE,
+            name: format!("{}-miot", config.name),
+            chan_size: config.miot_chan_size.unwrap(),
+            config,
             inner: Inner::Init,
         }
     }
@@ -55,9 +58,23 @@ impl Drop for Miot {
 }
 
 impl Miot {
-    pub const CHANNEL_SIZE: usize = 1024; // TODO: is this enough?
+    /// Create a miot thread from configuration. Miot shall be in `Init` state, to start
+    /// the miot thread call [Miot::spawn].
+    pub fn from_config(config: Config) -> Result<Miot> {
+        let m = Miot::default();
+        let val = Miot {
+            name: format!("{}-miot", config.name),
+            chan_size: config.miot_chan_size.unwrap_or(m.chan_size),
+            config: config.clone(),
+            inner: Inner::Init,
+        };
+
+        Ok(val)
+    }
 
     pub fn spawn(self, shard: Shard) -> Result<Miot> {
+        info!("Starting miot {:?} chan_size:{} ...", self.name, self.chan_size);
+
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "miot can be spawned only in init-state ")?;
         }
@@ -65,6 +82,7 @@ impl Miot {
         let miot = Miot {
             name: self.name.clone(),
             chan_size: self.chan_size,
+            config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 shard: Box::new(shard),
                 rsocks: BTreeMap::default(),
@@ -76,6 +94,7 @@ impl Miot {
         let val = Miot {
             name: self.name.clone(),
             chan_size: self.chan_size,
+            config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
 
@@ -83,6 +102,8 @@ impl Miot {
     }
 
     pub fn to_tx(&self) -> Self {
+        info!("Miot::to_tx {:?} cloning tx ...", self.name);
+
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
             Inner::Tx(tx) => Inner::Tx(tx.clone()),
@@ -92,6 +113,7 @@ impl Miot {
         Miot {
             name: self.name.clone(),
             chan_size: self.chan_size,
+            config: self.config.clone(),
             inner,
         }
     }
@@ -157,9 +179,14 @@ impl Miot {
         let shard = mem::replace(shard, Box::new(Shard::default()));
         let rsocks = mem::replace(rsocks, BTreeMap::default());
         let wsocks = mem::replace(wsocks, BTreeMap::default());
+        info!(
+            "Miot::close, {:?} rconns:{:?} wconns:{:?}",
+            self.name,
+            rsocks.len(),
+            wsocks.len(),
+        );
 
         assert_eq!(rsocks.len(), wsocks.len()); // TODO: feature gate this
-        let n = rsocks.len();
         for (id, s) in rsocks.into_iter() {
             info!(
                 "Miot::close, {:?} read-connection {:?} for client-id {:?}",
@@ -176,9 +203,7 @@ impl Miot {
                 id
             );
         }
-        info!("Miot::close, {:?} closed {} connections", self.name, n);
 
-        info!("Miot::close, {:?} dropping shard {:?}", self.name, shard.name);
         mem::drop(shard);
 
         Ok(Response::Ok)

@@ -1,14 +1,17 @@
 use log::{debug, error, info};
 
-use std::net;
-
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::Cluster;
+use crate::{Cluster, Config};
 use crate::{Error, ErrorKind, Result};
 
 pub struct Listener {
-    /// Address:Port to listen for new incoming connections.
-    pub address: net::SocketAddr,
+    /// Human readable name for this mio thread.
+    pub name: String,
+    /// Port to listen to.
+    pub port: u16,
+    /// Input channel size for this thread.
+    pub chan_size: usize,
+    config: Config,
     inner: Inner,
 }
 
@@ -20,15 +23,18 @@ pub enum Inner {
 }
 
 pub struct RunLoop {
+    /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
 }
 
 impl Default for Listener {
     fn default() -> Listener {
-        use crate::default_listen_address4;
-
+        let config = Config::default();
         Listener {
-            address: default_listen_address4(None),
+            name: "--listener--".to_string(),
+            port: config.port.unwrap(),
+            chan_size: config.listener_chan_size.unwrap(),
+            config,
             inner: Inner::Init,
         }
     }
@@ -40,45 +46,79 @@ impl Drop for Listener {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("Listener::Init, {:?} drop ...", self.address),
+            Inner::Init => debug!("Listener::Init, {:?} drop ...", self.name),
             Inner::Handle(_) => {
-                error!("Listener::Handle, {:?} invalid drop ...", self.address);
-                panic!("Listener::Handle, {:?} invalid drop ...", self.address);
+                error!("Listener::Handle, {:?} invalid drop ...", self.name);
+                panic!("Listener::Handle, {:?} invalid drop ...", self.name);
             }
-            Inner::Tx(_tx) => info!("Listener::Tx {:?} drop ...", self.address),
-            Inner::Main(_run_loop) => info!("Listener::Main {:?} drop ...", self.address),
+            Inner::Tx(_tx) => info!("Listener::Tx {:?} drop ...", self.name),
+            Inner::Main(_run_loop) => info!("Listener::Main {:?} drop ...", self.name),
         }
     }
 }
 
 impl Listener {
-    pub fn spawn(self, address: net::SocketAddr, cluster: Cluster) -> Result<Listener> {
+    /// Create a listener from configuration. Listener shall be in `Init` state, to start
+    /// the listener thread call [Listener::spawn].
+    pub fn from_config(config: Config) -> Result<Listener> {
+        let l = Listener::default();
+        let val = Listener {
+            name: format!("{}-listener", config.name),
+            port: config.port.unwrap_or(l.port),
+            chan_size: config.listener_chan_size.unwrap_or(l.chan_size),
+            config: config.clone(),
+            inner: Inner::Init,
+        };
+
+        Ok(val)
+    }
+
+    pub fn spawn(self, cluster: Cluster) -> Result<Listener> {
+        info!(
+            "Starting listener {:?} port:{} chan_size:{} ...",
+            self.name, self.port, self.chan_size
+        );
+
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "listener can be spawned only in init-state ")?;
         }
 
         let listener = Listener {
-            address: self.address,
+            name: self.name.clone(),
+            port: self.port,
+            chan_size: self.chan_size,
+            config: self.config.clone(),
             inner: Inner::Main(RunLoop { cluster: Box::new(cluster) }),
         };
-        let thrd = {
-            let name = self.address.to_string();
-            Thread::spawn_sync(&name, 16, listener) // TODO: no magic number
-        };
+        let thrd = Thread::spawn_sync(&self.name, self.chan_size, listener);
 
-        let listener = Listener { address, inner: Inner::Handle(thrd) };
+        let listener = Listener {
+            name: self.name.clone(),
+            port: self.port,
+            chan_size: self.chan_size,
+            config: self.config.clone(),
+            inner: Inner::Handle(thrd),
+        };
 
         Ok(listener)
     }
 
     pub fn to_tx(&self) -> Self {
+        info!("Listener::to_tx {:?} cloning tx ...", self.name);
+
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
             Inner::Tx(tx) => Inner::Tx(tx.clone()),
             _ => unreachable!(),
         };
 
-        Listener { address: self.address, inner }
+        Listener {
+            name: self.name.to_string(),
+            port: self.port,
+            chan_size: self.chan_size,
+            config: self.config.clone(),
+            inner,
+        }
     }
 
     pub fn close_wait(mut self) -> Result<Listener> {
@@ -135,13 +175,14 @@ impl Listener {
     fn handle_close(&mut self) -> Result<Response> {
         use std::mem;
 
+        info!("Listener::close, {:?}", self.name);
+
         let RunLoop { cluster } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
         let cluster = mem::replace(cluster, Box::new(Cluster::default()));
 
-        info!("Listener::close, {:?} dropping cluster {:?}", self.address, cluster.name);
         mem::drop(cluster);
 
         Ok(Response::Ok)

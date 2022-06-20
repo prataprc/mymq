@@ -4,7 +4,7 @@
 //! expected to hold onto its own state, and handle all inter-thread communication
 //! via channels and message queues.
 
-use log::{error, info};
+use log::info;
 
 use std::{sync::mpsc, thread};
 
@@ -127,8 +127,6 @@ where
     ///
     /// `T` Threads context, when thread is spawned take ownership and calls `main_loop`
     pub fn spawn(name: &str, thrd: T) -> Thread<T, Q, R> {
-        info!("spawning thread {:?} ...", name);
-
         let (tx, rx) = mpsc::channel();
         Thread {
             name: name.to_string(),
@@ -139,8 +137,6 @@ where
 
     /// Create a new Thread instance, using synchronous channel with finite buffer.
     pub fn spawn_sync(name: &str, chan_size: usize, thrd: T) -> Thread<T, Q, R> {
-        info!("spawning thread {:?}, in sync mode {} ...", name, chan_size);
-
         let (tx, rx) = mpsc::sync_channel(chan_size);
 
         Thread {
@@ -152,7 +148,6 @@ where
 
     /// Return a clone of tx channel.
     pub fn to_tx(&self) -> Tx<Q, R> {
-        info!("cloning tx for thread {:?}", self.name);
         self.tx.clone().unwrap()
     }
 

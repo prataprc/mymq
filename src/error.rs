@@ -22,12 +22,11 @@ use std::{self, fmt, result};
 ///
 #[macro_export]
 macro_rules! err {
-    ($v:ident, code: $code:ident, cause: $cause:expr, $($arg:expr),+) => {{
+    ($v:ident, code: $code:ident, cause: $cause:expr, $($args:expr),+) => {{
         let kind = ErrorKind::$v;
-        let description = format!($($arg),+);
         let e = Error {
             kind,
-            description,
+            description: format!($($args),+),
             code: Some(ReasonCode::$code),
             cause: Some(Box::new($cause)),
             ..Error::default()
@@ -36,13 +35,14 @@ macro_rules! err {
         log_error!(e);
         Err(e)
     }};
-    ($v:ident, try: $($res:expr),+) => {{
-        match $($res),+ {
+    ($v:ident, try: $res:expr, $($args:expr),+) => {{
+        match $res {
             Ok(val) => Ok(val),
             Err(err) => {
                 let e = Error {
                     kind: ErrorKind::$v,
-                    description: err.to_string(),
+                    description: format!($($args),+),
+                    cause: Some(Box::new(err)),
                     ..Error::default()
                 };
                 log_error!(e);
@@ -50,9 +50,24 @@ macro_rules! err {
             }
         }
     }};
-    ($v:ident, code: $code:ident, $($arg:expr),+) => {{
+    ($v:ident, try: $res:expr) => {{
+        match $res {
+            Ok(val) => Ok(val),
+            Err(err) => {
+                let e = Error {
+                    kind: ErrorKind::$v,
+                    description: err.to_string(),
+                    cause: Some(Box::new(err)),
+                    ..Error::default()
+                };
+                log_error!(e);
+                Err(e)
+            }
+        }
+    }};
+    ($v:ident, code: $code:ident, $($args:expr),+) => {{
         let kind = ErrorKind::$v;
-        let description = format!($($arg),+);
+        let description = format!($($args),+);
         let e = Error {
             kind,
             description,
@@ -63,9 +78,9 @@ macro_rules! err {
         log_error!(e);
         Err(e)
     }};
-    ($v:ident, cause: $cause:expr, $($arg:expr),+) => {{
+    ($v:ident, cause: $cause:expr, $($args:expr),+) => {{
         let kind = ErrorKind::$v;
-        let description = format!($($arg),+);
+        let description = format!($($args),+);
         let e = Error {
             kind,
             description,
@@ -76,9 +91,9 @@ macro_rules! err {
         log_error!(e);
         Err(e)
     }};
-    ($v:ident, desc: $($arg:expr),+) => {{
+    ($v:ident, desc: $($args:expr),+) => {{
         let kind = ErrorKind::$v;
-        let description = format!($($arg),+);
+        let description = format!($($args),+);
         let e = Error {
             kind,
             description,
@@ -114,7 +129,7 @@ pub struct Error {
     pub(crate) kind: ErrorKind,
     pub(crate) description: String,
     pub(crate) code: Option<ReasonCode>,
-    pub(crate) cause: Option<Box<dyn std::error::Error + Send + Sync>>,
+    pub(crate) cause: Option<Box<dyn std::error::Error + Send>>,
     #[cfg(feature = "backtrace")]
     pub(crate) backtrace: Option<backtrace::Backtrace>,
 }
@@ -230,6 +245,7 @@ pub enum ErrorKind {
     ProtocolError,
     InvalidInput,
     PayloadTooLong,
+    FailConvert,
     ThreadFail,
     IPCFail,
     Disconnected,
@@ -250,6 +266,7 @@ impl fmt::Display for ErrorKind {
             ProtocolError => write!(f, "ProtocolError"),
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
+            FailConvert => write!(f, "FailConvert"),
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
             Disconnected => write!(f, "Disconnected"),

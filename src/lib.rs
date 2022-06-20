@@ -9,6 +9,7 @@
 mod error;
 mod chash;
 mod cluster;
+mod config;
 mod listener;
 mod miot;
 mod session;
@@ -25,6 +26,7 @@ pub mod fuzzy;
 
 pub use chash::ConsistentHash;
 pub use cluster::{Cluster, Node, Rebalancer};
+pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use listener::Listener;
 pub use miot::Miot;
@@ -39,9 +41,11 @@ use std::net::SocketAddr;
 pub const MAX_NODES: usize = 1024;
 pub const MAX_SHARDS: u32 = 0x8000;
 pub const MAX_SESSIONS: usize = 1024 * 8;
-
-pub const DEFAULT_SHARDS: usize = 1024 * 8;
 pub const MQTT_PORT: u16 = 1883;
+pub const CLUSTER_CHAN_SIZE: usize = 16;
+pub const LISTENER_CHAN_SIZE: usize = 16;
+pub const SHARD_CHAN_SIZE: usize = 1024;
+pub const MIOT_CHAN_SIZE: usize = 1024;
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation

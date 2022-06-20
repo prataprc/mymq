@@ -4,7 +4,7 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{ConsistentHash, Hostable, Shard, Shardable, MAX_NODES};
+use crate::{Config, ConfigNode, ConsistentHash, Hostable, Shard, Shardable};
 use crate::{Error, ErrorKind, Result};
 
 /// Cluster is the global configuration state for multi-node MQTT cluster.
@@ -12,23 +12,19 @@ use crate::{Error, ErrorKind, Result};
 /// TODO: at some point in time this shall be integrated with consensus protocol for
 /// lossless replication and fault-tolerance.
 pub struct Cluster {
-    /// human readable name of the cluster.
+    /// Refer [Config::name]
     pub name: String,
-    /// Maximum nodes that can exist in this cluster. If not provided [MAX_NODES]
-    /// shall be used. Immutable once created.
+    /// Refer [Config::max_nodes]
     pub max_nodes: usize,
-    /// Fixed number of shards, of session/connections, that can exist in this cluster.
-    /// Shards are assigned to nodes. If not provided [DEFAULT_SHARDS] shards shall be
-    /// used. Immutable once created.
+    /// Refer [Config::num_shards]
     pub num_shards: usize,
-    /// Network listen address for `this` node. If not provided
-    /// [default_listen_address4] shall be used. Immutable once created.
-    pub address: net::SocketAddr, // listen address
-    /// Initial set of nodes that are going to be part of this cluster. If not provided
-    /// a default node shall be created from `address` and created as single-node
-    /// cluster. Can mutate via [Cluster::add_nodes] and [Cluster::remove_nodes]
-    /// methods.
+    /// Refer [Config::port]
+    pub port: u16,
+    /// Refer [Config::nodes]
     pub nodes: Vec<Node>,
+    /// Input channel size for the cluster thread.
+    pub chan_size: usize,
+    config: Config,
     inner: Inner,
 }
 
@@ -47,18 +43,21 @@ struct RunLoop {
 
 impl Default for Cluster {
     fn default() -> Cluster {
-        use crate::{default_listen_address4, DEFAULT_SHARDS};
+        use crate::default_listen_address4;
 
+        let config = Config::default();
         let node = Node {
             address: default_listen_address4(None),
             ..Node::default()
         };
         Cluster {
-            name: "my-cluster".to_string(), // TODO: no magic
-            max_nodes: MAX_NODES,
-            num_shards: DEFAULT_SHARDS,
-            address: default_listen_address4(None),
+            name: config.name.to_string(),
+            max_nodes: config.max_nodes.unwrap(),
+            num_shards: config.num_shards.unwrap(),
+            port: config.port.unwrap(),
             nodes: vec![node],
+            chan_size: config.cluster_chan_size.unwrap(),
+            config,
             inner: Inner::Init,
         }
     }
@@ -68,12 +67,7 @@ impl Drop for Cluster {
     fn drop(&mut self) {
         use std::mem;
 
-        if self.nodes.len() > 0 {
-            error!("Cluster::drop, unexpected cluster state {{nodes}}");
-        }
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
-
         match inner {
             Inner::Init => debug!("Cluster::Init, {:?} drop ...", self.name),
             Inner::Handle(_) => {
@@ -88,10 +82,53 @@ impl Drop for Cluster {
 
 // Handle cluster
 impl Cluster {
-    pub const CHANNEL_SIZE: usize = 16; // TODO: is this enough ?
+    /// Create a cluster from configuration. Cluster shall be in `Init` state, to start
+    /// the cluster call [Cluster::spawn]
+    pub fn from_config(config: Config) -> Result<Cluster> {
+        let c = Cluster::default();
+
+        let val = Cluster {
+            name: config.name.clone(),
+            max_nodes: config.max_nodes.unwrap_or(c.max_nodes),
+            num_shards: config.num_shards.unwrap_or(c.num_shards),
+            port: config.port.unwrap_or(c.port),
+            chan_size: config.cluster_chan_size.unwrap_or(c.chan_size),
+            nodes: if config.nodes.len() == 0 {
+                c.nodes.clone()
+            } else {
+                let mut nodes = vec![];
+                for n in config.nodes.clone().into_iter() {
+                    nodes.push(TryFrom::try_from(n)?)
+                }
+                nodes
+            },
+            config,
+            inner: Inner::Init,
+        };
+
+        Ok(val)
+    }
+
+    // should supply a restart location from disk.
+    pub fn restart() -> Result<Cluster> {
+        todo!()
+    }
 
     pub fn spawn(mut self) -> Result<Cluster> {
-        use crate::{util, MAX_SHARDS};
+        use crate::{util, MAX_NODES, MAX_SHARDS};
+
+        info!(
+            concat!(
+                "starting cluster {:?} max_nodes:{} num_shards:{} ",
+                "port:{} nodes:{} chan_size:{} ..."
+            ),
+            self.name,
+            self.max_nodes,
+            self.num_shards,
+            self.port,
+            self.nodes.len(),
+            self.chan_size
+        );
 
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "cluster can be spawned only in init-state ")?;
@@ -115,32 +152,33 @@ impl Cluster {
             name: self.name.clone(),
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
-            address: self.address,
+            port: self.port,
             nodes: Vec::default(),
+            chan_size: self.chan_size,
+            config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 rebalancer: ConsistentHash::from_nodes(&nodes)?.into(),
                 nodes: BTreeMap::from_iter(nodes.into_iter().map(|n| (n.uuid, n))),
                 shards: BTreeMap::default(),
             }),
         };
-        let thrd = Thread::spawn_sync(&self.name, Self::CHANNEL_SIZE, cluster);
+        let thrd = Thread::spawn_sync(&self.name, self.chan_size, cluster);
 
         let cluster = Cluster {
             name: self.name.clone(),
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
-            address: self.address,
+            port: self.port,
             nodes: Vec::default(),
+            chan_size: self.chan_size,
+            config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
         {
             let mut shards = BTreeMap::default();
-            for i in 0..self.num_shards {
-                let mut shard = Shard::default();
-                shard.name = format!("{}-shard-{}", self.name, i);
-
-                let cluster_tx = cluster.to_tx();
-                let shard = shard.spawn(cluster_tx)?;
+            for _ in 0..self.num_shards {
+                let shard =
+                    Shard::from_config(self.config.clone())?.spawn(cluster.to_tx())?;
                 shards.insert(shard.uuid, shard);
             }
             match &cluster.inner {
@@ -155,6 +193,8 @@ impl Cluster {
     }
 
     pub fn to_tx(&self) -> Self {
+        info!("Cluster::to_tx {:?} cloning tx ...", self.name);
+
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
             Inner::Tx(tx) => Inner::Tx(tx.clone()),
@@ -164,8 +204,10 @@ impl Cluster {
             name: self.name.clone(),
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
-            address: self.address,
+            port: self.port,
             nodes: Vec::default(),
+            chan_size: self.chan_size,
+            config: self.config.clone(),
             inner,
         }
     }
@@ -370,7 +412,6 @@ impl Cluster {
         for (uuid, shard) in hshards.into_iter() {
             let shard = shard.close_wait()?;
             shards.insert(uuid, shard);
-            info!("Cluster::close, {:?} shard {:?} closed ...", self.name, uuid);
         }
 
         Ok(Response::Ok)
@@ -380,10 +421,11 @@ impl Cluster {
 /// Represents a Node in the cluster. `address` is the socket-address in which the
 /// Node is listening for MQTT. Application must provide a valid address, other fields
 /// like `weight` and `uuid` shall be assigned a meaningful default.
+#[derive(Clone)]
 pub struct Node {
+    pub address: net::SocketAddr, // listen address
     pub weight: u16,
     pub uuid: Uuid,
-    pub address: net::SocketAddr, // listen address
 }
 
 impl Default for Node {
@@ -395,6 +437,26 @@ impl Default for Node {
             address: default_listen_address4(None),
             uuid: Uuid::new_v4(),
         }
+    }
+}
+
+impl TryFrom<ConfigNode> for Node {
+    type Error = Error;
+
+    fn try_from(c: ConfigNode) -> Result<Node> {
+        let node = Node::default();
+        let uuid = match c.uuid.clone() {
+            Some(uuid) => err!(InvalidInput, try: uuid.parse::<Uuid>())?,
+            None => node.uuid,
+        };
+
+        let val = Node {
+            address: c.address,
+            weight: c.weight.unwrap_or(node.weight),
+            uuid,
+        };
+
+        Ok(val)
     }
 }
 
