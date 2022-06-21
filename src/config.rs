@@ -4,10 +4,7 @@ use serde::Deserialize;
 use std::{fs, net, path};
 
 use crate::{Error, ErrorKind, Result};
-use crate::{
-    CLUSTER_CHAN_SIZE, LISTENER_CHAN_SIZE, MAX_NODES, MIOT_CHAN_SIZE, MQTT_PORT,
-    SHARD_CHAN_SIZE,
-};
+use crate::{MAX_NODES, MQTT_PORT};
 
 /// Cluster configuration.
 #[derive(Clone, Deserialize)]
@@ -16,7 +13,8 @@ pub struct Config {
     /// * **Default**: None, must be supplied
     /// * **Mutable**: No
     pub name: String,
-    /// Maximum nodes that can exist in this cluster.
+    /// Maximum nodes that can exist in this cluster, this is the limitation on
+    /// federated nodes.
     /// * **Default**: [MAX_NODES].
     /// * **Mutable**: No
     pub max_nodes: Option<usize>,
@@ -30,28 +28,11 @@ pub struct Config {
     /// * **Default**: "0.0.0.0:1883", Refer to [MQTT_PORT]
     /// * **Mutable**: No
     pub port: Option<u16>,
-    /// Initial set of nodes that are going to be part of this cluster. If not provided
-    /// a default node shall be created from `local_address:port`` and created as
-    /// single-node cluster.
-    /// * **Default**: ["127.0.0.1:1883"]
+    /// Initial set of nodes that are going control this cluster. If not provided,
+    /// will start a single node cluster.
+    /// * **Default**: [],
     /// * **Mutable**: No
-    pub nodes: Vec<ConfigNode>,
-    /// Input channel size for cluster thread.
-    /// * **Default**: [CLUSTER_CHAN_SIZE]
-    /// * **Mutable**: No
-    pub cluster_chan_size: Option<usize>,
-    /// Input channel size for listener thread.
-    /// * **Default**: [LISTENER_CHAN_SIZE]
-    /// * **Mutable**: No
-    pub listener_chan_size: Option<usize>,
-    /// Input channel size for shard thread.
-    /// * **Default**: [SHARD_CHAN_SIZE]
-    /// * **Mutable**: No
-    pub shard_chan_size: Option<usize>,
-    /// Input channel size for miot thread.
-    /// * **Default**: [MIOT_CHAN_SIZE]
-    /// * **Mutable**: No
-    pub miot_chan_size: Option<usize>,
+    pub gods: Vec<ConfigNode>,
 }
 
 impl Default for Config {
@@ -61,11 +42,7 @@ impl Default for Config {
             max_nodes: Some(MAX_NODES),
             num_shards: Some(1), // TODO: Some(usize::try_from(num_cpus::get()).unwrap()),
             port: Some(MQTT_PORT),
-            nodes: vec![ConfigNode::default()],
-            cluster_chan_size: Some(CLUSTER_CHAN_SIZE),
-            listener_chan_size: Some(LISTENER_CHAN_SIZE),
-            shard_chan_size: Some(SHARD_CHAN_SIZE),
-            miot_chan_size: Some(MIOT_CHAN_SIZE),
+            gods: Vec::default(),
         }
     }
 }
@@ -83,8 +60,11 @@ impl Config {
 /// Node configuration
 #[derive(Clone, Deserialize)]
 pub struct ConfigNode {
-    /// Address of the node to which clients can connect to.
-    pub address: net::SocketAddr,
+    /// MQTT address on which nodes listen, and clients can connect.
+    pub mqtt_address: net::SocketAddr,
+    /// Hierarchical path to nodes. Will be useful in selecting replica, and selecting
+    /// `bridge-nodes` across the cluster.
+    pub path: path::PathBuf,
     /// Weight to be given for each nodes, typically based on the number of cores,
     /// RAM-capacity, network-bandwidth and disk-size.
     /// * **Default**: <number of cores in the node>
@@ -103,7 +83,8 @@ impl Default for ConfigNode {
         use uuid::Uuid;
 
         ConfigNode {
-            address: "127.0.0.1:1883".parse().unwrap(),
+            mqtt_address: "127.0.0.1:1883".parse().unwrap(),
+            path: "/".into(),
             weight: Some(u16::try_from(num_cpus::get()).unwrap()),
             uuid: Some(Uuid::new_v4().to_string()),
         }

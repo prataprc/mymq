@@ -105,7 +105,6 @@ macro_rules! err {
     }};
 }
 
-#[macro_export]
 macro_rules! log_error {
     ($e:ident) => {{
         use log::error;
@@ -246,6 +245,7 @@ pub enum ErrorKind {
     InvalidInput,
     PayloadTooLong,
     FailConvert,
+    WouldBlock,
     ThreadFail,
     IPCFail,
     Disconnected,
@@ -267,6 +267,7 @@ impl fmt::Display for ErrorKind {
             InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
             FailConvert => write!(f, "FailConvert"),
+            WouldBlock => write!(f, "WouldBlock"),
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
             Disconnected => write!(f, "Disconnected"),

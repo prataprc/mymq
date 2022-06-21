@@ -30,10 +30,12 @@ pub struct RunLoop {
 
 impl Default for Miot {
     fn default() -> Miot {
+        use crate::CHANNEL_SIZE;
+
         let config = Config::default();
         Miot {
             name: format!("{}-miot", config.name),
-            chan_size: config.miot_chan_size.unwrap(),
+            chan_size: CHANNEL_SIZE,
             config,
             inner: Inner::Init,
         }
@@ -64,7 +66,7 @@ impl Miot {
         let m = Miot::default();
         let val = Miot {
             name: format!("{}-miot", config.name),
-            chan_size: config.miot_chan_size.unwrap_or(m.chan_size),
+            chan_size: m.chan_size,
             config: config.clone(),
             inner: Inner::Init,
         };
@@ -145,11 +147,11 @@ impl Threadable for Miot {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
-        use crate::thread::pending_msg;
+        use crate::thread::pending_requests;
         use Request::*;
 
         loop {
-            let (qs, disconnected) = pending_msg(&rx, self.chan_size);
+            let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
             for q in qs.into_iter() {
                 match q {
                     (Close, Some(tx)) => {

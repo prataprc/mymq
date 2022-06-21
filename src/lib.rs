@@ -25,7 +25,7 @@ pub mod v5;
 pub mod fuzzy;
 
 pub use chash::ConsistentHash;
-pub use cluster::{Cluster, Node, Rebalancer};
+pub use cluster::{Cluster, Node};
 pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use listener::Listener;
@@ -36,16 +36,15 @@ pub use thread::{Thread, Threadable};
 pub use types::{Blob, ClientID, MqttProtocol, UserProperty, VarU32};
 pub use types::{TopicFilter, TopicName};
 
+use uuid::Uuid;
+
 use std::net::SocketAddr;
 
 pub const MAX_NODES: usize = 1024;
 pub const MAX_SHARDS: u32 = 0x8000;
 pub const MAX_SESSIONS: usize = 1024 * 8;
 pub const MQTT_PORT: u16 = 1883;
-pub const CLUSTER_CHAN_SIZE: usize = 16;
-pub const LISTENER_CHAN_SIZE: usize = 16;
-pub const SHARD_CHAN_SIZE: usize = 1024;
-pub const MIOT_CHAN_SIZE: usize = 1024;
+pub const CHANNEL_SIZE: usize = 1024;
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation
@@ -75,8 +74,18 @@ pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
 }
 
+pub trait NodeStore {
+    fn len(&self) -> usize;
+
+    fn get(&self, uuid: &Uuid) -> Option<&Node>;
+
+    fn insert(&self, uuid: Uuid, node: Node);
+
+    fn remove(&self, uuid: &Uuid);
+}
+
 /// Default listen address for MQTT packets: `0.0.0.0:1883`
-pub fn default_listen_address4(port: Option<u16>) -> SocketAddr {
+pub fn mqtt_listen_address4(port: Option<u16>) -> SocketAddr {
     use std::net::{IpAddr, Ipv4Addr};
 
     let port = port.unwrap_or(MQTT_PORT);

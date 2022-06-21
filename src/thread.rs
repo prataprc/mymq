@@ -210,20 +210,21 @@ where
     }
 }
 
-pub fn pending_msg<Q, R>(
+/// Return (requests, empty, disconnected)
+pub fn pending_requests<Q, R>(
     rx: &Rx<Q, R>,
     max: usize,
-) -> (Vec<(Q, Option<mpsc::Sender<R>>)>, bool) {
+) -> (Vec<(Q, Option<mpsc::Sender<R>>)>, bool, bool) {
     let mut reqs = vec![];
     loop {
         match rx.try_recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),
             Ok(req) => {
                 reqs.push(req);
-                break (reqs, false);
+                break (reqs, false, false);
             }
-            Err(mpsc::TryRecvError::Disconnected) => break (reqs, true),
-            Err(mpsc::TryRecvError::Empty) => break (reqs, false),
+            Err(mpsc::TryRecvError::Disconnected) => break (reqs, false, true),
+            Err(mpsc::TryRecvError::Empty) => break (reqs, true, false),
         }
     }
 }

@@ -33,11 +33,13 @@ pub struct RunLoop {
 
 impl Default for Shard {
     fn default() -> Shard {
+        use crate::CHANNEL_SIZE;
+
         let config = Config::default();
         Shard {
             name: format!("{}-shard", config.name),
             uuid: Uuid::new_v4(),
-            chan_size: config.shard_chan_size.unwrap(),
+            chan_size: CHANNEL_SIZE,
             config,
             inner: Inner::Init,
         }
@@ -73,7 +75,7 @@ impl Shard {
         let val = Shard {
             name: format!("{}-shard", config.name),
             uuid: s.uuid,
-            chan_size: config.shard_chan_size.unwrap_or(s.chan_size),
+            chan_size: s.chan_size,
             config: config.clone(),
             inner: Inner::Init,
         };
@@ -170,11 +172,11 @@ impl Threadable for Shard {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
-        use crate::thread::pending_msg;
+        use crate::thread::pending_requests;
         use Request::*;
 
         loop {
-            let (qs, disconnected) = pending_msg(&rx, self.chan_size);
+            let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
             for q in qs.into_iter() {
                 match q {
                     (SetMiot(miot_handle), Some(tx)) => {
