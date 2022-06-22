@@ -127,12 +127,34 @@ pub enum Packet {
     PubComp(Pub),
     Subscribe(Subscribe),
     SubAck(SubAck),
-    Unsubscribe(UnSubscribe),
+    UnSubscribe(UnSubscribe),
     UnsubAck(UnsubAck),
     PingReq,
     PingResp,
     Disconnect(Disconnect),
     Auth(Auth),
+}
+
+impl Packet {
+    pub fn to_packet_type(&self) -> PacketType {
+        match self {
+            Packet::Connect(_) => PacketType::Connect,
+            Packet::ConnAck(_) => PacketType::ConnAck,
+            Packet::Publish(_) => PacketType::Publish,
+            Packet::PubAck(_) => PacketType::PubAck,
+            Packet::PubRec(_) => PacketType::PubRec,
+            Packet::PubRel(_) => PacketType::PubRel,
+            Packet::PubComp(_) => PacketType::PubComp,
+            Packet::Subscribe(_) => PacketType::Subscribe,
+            Packet::SubAck(_) => PacketType::SubAck,
+            Packet::UnSubscribe(_) => PacketType::UnSubscribe,
+            Packet::UnsubAck(_) => PacketType::UnsubAck,
+            Packet::PingReq => PacketType::PingReq,
+            Packet::PingResp => PacketType::PingResp,
+            Packet::Disconnect(_) => PacketType::Disconnect,
+            Packet::Auth(_) => PacketType::Auth,
+        }
+    }
 }
 
 pub enum PacketRead {
@@ -154,6 +176,80 @@ impl PacketRead {
                 PacketRead::Init { bytes }
             }
             _ => unreachable!(),
+        }
+    }
+
+    pub fn parse(&self) -> Result<Packet> {
+        let (pkt, n, m) = match self {
+            PacketRead::Fin { bytes, fh } => match fh.unwrap()?.0 {
+                PacketType::Connect => {
+                    let (pkt, n) = Connect::decode(&bytes)?;
+                    (Packet::Connect(pkt), n, bytes.len())
+                }
+                PacketType::ConnAck => {
+                    let (pkt, n) = ConnAck::decode(&bytes)?;
+                    (Packet::ConnAck(pkt), n, bytes.len())
+                }
+                PacketType::Publish => {
+                    let (pkt, n) = Publish::decode(&bytes)?;
+                    (Packet::Publish(pkt), n, bytes.len())
+                }
+                PacketType::PubAck => {
+                    let (pkt, n) = Pub::decode(&bytes)?;
+                    (Packet::PubAck(pkt), n, bytes.len())
+                }
+                PacketType::PubRec => {
+                    let (pkt, n) = Pub::decode(&bytes)?;
+                    (Packet::PubRec(pkt), n, bytes.len())
+                }
+                PacketType::PubRel => {
+                    let (pkt, n) = Pub::decode(&bytes)?;
+                    (Packet::PubRel(pkt), n, bytes.len())
+                }
+                PacketType::PubComp => {
+                    let (pkt, n) = Pub::decode(&bytes)?;
+                    (Packet::PubComp(pkt), n, bytes.len())
+                }
+                PacketType::Subscribe => {
+                    let (pkt, n) = Subscribe::decode(&bytes)?;
+                    (Packet::Subscribe(pkt), n, bytes.len())
+                }
+                PacketType::SubAck => {
+                    let (pkt, n) = SubAck::decode(&bytes)?;
+                    (Packet::SubAck(pkt), n, bytes.len())
+                }
+                PacketType::UnSubscribe => {
+                    let (pkt, n) = UnSubscribe::decode(&bytes)?;
+                    (Packet::UnSubscribe(pkt), n, bytes.len())
+                }
+                PacketType::UnsubAck => {
+                    let (pkt, n) = UnsubAck::decode(&bytes)?;
+                    (Packet::UnsubAck(pkt), n, bytes.len())
+                }
+                PacketType::PingReq => {
+                    let (_pkt, n) = PingReq::decode(&bytes)?;
+                    (Packet::PingReq, n, bytes.len())
+                }
+                PacketType::PingResp => {
+                    let (_pkt, n) = PingResp::decode(&bytes)?;
+                    (Packet::PingResp, n, bytes.len())
+                }
+                PacketType::Disconnect => {
+                    let (pkt, n) = Disconnect::decode(&bytes)?;
+                    (Packet::Disconnect(pkt), n, bytes.len())
+                }
+                PacketType::Auth => {
+                    let (pkt, n) = Auth::decode(&bytes)?;
+                    (Packet::Auth(pkt), n, bytes.len())
+                }
+            },
+            _ => unreachable!(),
+        };
+
+        if n != m {
+            err!(MalformedPacket, code: MalformedPacket, "partial parse {}!={}", n, m)
+        } else {
+            Ok(pkt)
         }
     }
 
@@ -247,7 +343,7 @@ pub enum PacketType {
     PubComp = 7,
     Subscribe = 8,
     SubAck = 9,
-    Unsubscribe = 10,
+    UnSubscribe = 10,
     UnsubAck = 11,
     PingReq = 12,
     PingResp = 13,
@@ -269,7 +365,7 @@ impl TryFrom<u8> for PacketType {
             7 => PacketType::PubComp,
             8 => PacketType::Subscribe,
             9 => PacketType::SubAck,
-            10 => PacketType::Unsubscribe,
+            10 => PacketType::UnSubscribe,
             11 => PacketType::UnsubAck,
             12 => PacketType::PingReq,
             13 => PacketType::PingResp,
@@ -294,7 +390,7 @@ impl From<PacketType> for u8 {
             PacketType::PubComp => 7,
             PacketType::Subscribe => 8,
             PacketType::SubAck => 9,
-            PacketType::Unsubscribe => 10,
+            PacketType::UnSubscribe => 10,
             PacketType::UnsubAck => 11,
             PacketType::PingReq => 12,
             PacketType::PingResp => 13,
@@ -456,7 +552,7 @@ impl FixedHeader {
             err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
         }
 
-        let (packet_type, qos) = (u8::from(PacketType::Unsubscribe), QoS::AtLeastOnce);
+        let (packet_type, qos) = (u8::from(PacketType::UnSubscribe), QoS::AtLeastOnce);
         let val = FixedHeader {
             byte1: fixed_byte!(packet_type, false, qos, false),
             remaining_len,
@@ -510,7 +606,7 @@ impl FixedHeader {
             PubComp if qos == AtMostOnce && !retain && !dup => Ok(()),
             Subscribe if qos == AtLeastOnce && !retain && !dup => Ok(()),
             SubAck if qos == AtMostOnce && !retain && !dup => Ok(()),
-            Unsubscribe if qos == AtLeastOnce && !retain && !dup => Ok(()),
+            UnSubscribe if qos == AtLeastOnce && !retain && !dup => Ok(()),
             UnsubAck if qos == AtMostOnce && !retain && !dup => Ok(()),
             Disconnect if qos == AtMostOnce && !retain && !dup => Ok(()),
             Auth if qos == AtMostOnce && !retain && !dup => Ok(()),

@@ -33,8 +33,8 @@ pub use miot::Miot;
 pub use session::Session;
 pub use shard::Shard;
 pub use thread::{Thread, Threadable};
-pub use types::{Blob, ClientID, MqttProtocol, UserProperty, VarU32};
-pub use types::{TopicFilter, TopicName};
+pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
+pub use types::{ClientID, TopicFilter, TopicName};
 
 use uuid::Uuid;
 
@@ -45,6 +45,7 @@ pub const MAX_SHARDS: u32 = 0x8000;
 pub const MAX_SESSIONS: usize = 1024 * 8;
 pub const MQTT_PORT: u16 = 1883;
 pub const CHANNEL_SIZE: usize = 1024;
+pub const MAX_SOCKET_RETRY: usize = 128;
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation

@@ -10,6 +10,39 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 // TODO: there is a protocol limit for packet size, provide a way for applications
 //       to set a limit for packet size.
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+pub enum MqttProtocol {
+    V4 = 4,
+    V5 = 5,
+}
+
+impl TryFrom<u8> for MqttProtocol {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<MqttProtocol> {
+        match val {
+            4 => Ok(MqttProtocol::V4),
+            5 => Ok(MqttProtocol::V5),
+            val => err!(
+                UnsupportedProtocolVersion,
+                code: UnsupportedProtocolVersion,
+                "found: {:?}",
+                val
+            )?,
+        }
+    }
+}
+
+impl From<MqttProtocol> for u8 {
+    fn from(val: MqttProtocol) -> u8 {
+        match val {
+            MqttProtocol::V4 => 4,
+            MqttProtocol::V5 => 5,
+        }
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Blob {
     Small { data: [u8; 32], size: usize },
@@ -377,39 +410,6 @@ impl Packetize for Vec<u8> {
                 data.extend_from_slice(self.as_ref());
                 Ok(Blob::Large { data })
             }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-pub enum MqttProtocol {
-    V4 = 4,
-    V5 = 5,
-}
-
-impl TryFrom<u8> for MqttProtocol {
-    type Error = Error;
-
-    fn try_from(val: u8) -> Result<MqttProtocol> {
-        match val {
-            4 => Ok(MqttProtocol::V4),
-            5 => Ok(MqttProtocol::V5),
-            val => err!(
-                UnsupportedProtocolVersion,
-                code: UnsupportedProtocolVersion,
-                "found: {:?}",
-                val
-            )?,
-        }
-    }
-}
-
-impl From<MqttProtocol> for u8 {
-    fn from(val: MqttProtocol) -> u8 {
-        match val {
-            MqttProtocol::V4 => 4,
-            MqttProtocol::V5 => 5,
         }
     }
 }

@@ -4,7 +4,7 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net, path, sync::mpsc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{Config, ConfigNode, Listener, Shard};
+use crate::{v5, Config, ConfigNode, Listener, Shard};
 use crate::{Error, ErrorKind, Result};
 use crate::{Hostable, NodeStore};
 
@@ -222,6 +222,11 @@ pub enum Request {
     FailedThread {
         name: &'static str,
     },
+    Connect {
+        conn: mio::net::TcpStream,
+        addr: net::SocketAddr,
+        pkt: v5::Connect,
+    },
     Close,
 }
 
@@ -229,33 +234,41 @@ pub enum Request {
 impl Cluster {
     pub fn failed_listener(&self) -> Result<()> {
         match &self.inner {
-            Inner::Tx(tx) => {
-                tx.post(Request::FailedThread { name: "listener" })?;
-            }
+            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "listener" })?,
             _ => unreachable!(),
-        }
+        };
 
         Ok(())
     }
 
     pub fn add_nodes(&self, nodes: Vec<Node>) -> Result<()> {
         match &self.inner {
-            Inner::Handle(thrd) => {
-                thrd.request(Request::AddNodes { nodes })??;
-            }
+            Inner::Handle(thrd) => thrd.request(Request::AddNodes { nodes })??,
             _ => unreachable!(),
-        }
+        };
 
         Ok(())
     }
 
     pub fn remove_nodes(&self, uuids: Vec<Uuid>) -> Result<()> {
         match &self.inner {
-            Inner::Handle(thrd) => {
-                thrd.request(Request::RemoveNodes { uuids })??;
-            }
+            Inner::Handle(thrd) => thrd.request(Request::RemoveNodes { uuids })??,
             _ => unreachable!(),
-        }
+        };
+
+        Ok(())
+    }
+
+    pub fn connect(
+        &self,
+        conn: mio::net::TcpStream,
+        addr: net::SocketAddr,
+        pkt: v5::Connect,
+    ) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => tx.request(Request::Connect { conn, addr, pkt })??,
+            _ => unreachable!(),
+        };
 
         Ok(())
     }
@@ -311,13 +324,18 @@ impl Threadable for Cluster {
                         IPCFail,
                         try: tx.send(self.handle_remove_nodes(q))
                     )?,
-                    (q @ Close, Some(tx)) => {
-                        err!(IPCFail, try: tx.send(self.handle_close(q)))?
-                    }
                     (FailedThread { name: "listener" }, None) => {
                         let msg = "listener-failed".to_string();
                         err!(IPCFail, try: self.as_app_tx().send(msg))?
                     }
+                    (q @ Connect { .. }, Some(tx)) => err!(
+                        IPCFail,
+                        try: tx.send(self.handle_connect(q))
+                    )?,
+                    (q @ Close, Some(tx)) => {
+                        err!(IPCFail, try: tx.send(self.handle_close(q)))?
+                    }
+
                     (_, _) => unreachable!(),
                 }
             }
@@ -408,6 +426,10 @@ impl Cluster {
         }
 
         Ok(Response::Ok)
+    }
+
+    fn handle_connect(&mut self, req: Request) -> Result<Response> {
+        todo!()
     }
 
     fn handle_close(&mut self, _: Request) -> Result<Response> {

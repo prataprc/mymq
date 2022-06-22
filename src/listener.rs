@@ -3,7 +3,7 @@ use log::{debug, error, info};
 use std::{net, sync::Arc, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{Cluster, Config};
+use crate::{v5, Cluster, Config};
 use crate::{Error, ErrorKind, Result};
 
 const BATCH_SIZE: usize = 1024;
@@ -227,12 +227,12 @@ impl Listener {
     fn mio_conn(&mut self) -> Result<bool> {
         use std::io;
 
-        let server = match &self.inner {
-            Inner::Main(RunLoop { server, .. }) => server,
+        let (server, cluster) = match &self.inner {
+            Inner::Main(RunLoop { server, cluster, .. }) => (server, cluster),
             _ => unreachable!(),
         };
 
-        let (mut conn, addr) = match server.as_ref().unwrap().accept() {
+        let (conn, addr) = match server.as_ref().unwrap().accept() {
             Ok((conn, addr)) => (conn, addr),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
             Err(err) => {
@@ -240,9 +240,15 @@ impl Listener {
                 err!(IOError, try: Err(err))?
             }
         };
-        info!("{} New connection {}", self.pp(), addr);
 
-        // TODO: handle connection.
+        let hs = Handshake {
+            conn: Some(conn),
+            addr,
+            cluster: cluster.to_tx(),
+            retries: 0,
+        };
+        let _thrd = Thread::spawn_sync("handshake", 1, hs);
+
         Ok(false)
     }
 
@@ -304,5 +310,59 @@ impl Listener {
             Inner::Main(RunLoop { cluster, .. }) => cluster,
             _ => unreachable!(),
         }
+    }
+}
+
+struct Handshake {
+    conn: Option<mio::net::TcpStream>,
+    addr: net::SocketAddr,
+    cluster: Cluster,
+    retries: usize,
+}
+
+impl Threadable for Handshake {
+    type Req = ();
+    type Resp = ();
+
+    fn main_loop(mut self, _rx: Rx<(), ()>) -> Result<Self> {
+        use crate::{v5::Packet, MAX_SOCKET_RETRY};
+
+        info!("new connection {}", self.addr);
+
+        let mut packetr = v5::PacketRead::new();
+        let (conn, addr) = (self.conn.take().unwrap(), self.addr);
+
+        let pkt_connect = loop {
+            packetr = match packetr.read(&conn) {
+                Ok((pr, true)) if self.retries < MAX_SOCKET_RETRY => {
+                    self.retries += 1;
+                    pr
+                }
+                Ok((_pr, true)) => {
+                    err!(IOError, desc: "handshake fail after {} retries", self.retries)?
+                }
+                Ok((pr, false)) => match pr.parse() {
+                    Ok(Packet::Connect(pkt_connect)) => break pkt_connect,
+                    Ok(pkt) => {
+                        // SPEC: After a Network Connection is established by a Client to
+                        // a Server, the first packet sent from the Client to the
+                        // Server MUST be a CONNECT packet [MQTT-3.1.0-1].
+                        err!(
+                            IOError,
+                            desc: "unexpect {:?} on new connection",
+                            pkt.to_packet_type()
+                        )?
+                    }
+                    Err(err) => {
+                        err!(IOError, desc: "{} handshake parse failed {}", addr, err)?
+                    }
+                },
+                Err(err) => err!(IOError, desc: "{} handshake failed {}", addr, err)?,
+            };
+        };
+
+        err!(IPCFail, try: self.cluster.connect(conn, addr, pkt_connect))?;
+
+        Ok(self)
     }
 }
