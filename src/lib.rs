@@ -38,14 +38,16 @@ pub use types::{ClientID, TopicFilter, TopicName};
 
 use uuid::Uuid;
 
-use std::net::SocketAddr;
+use std::net;
 
 pub const MAX_NODES: usize = 1024;
 pub const MAX_SHARDS: u32 = 0x8000;
 pub const MAX_SESSIONS: usize = 1024 * 8;
 pub const MQTT_PORT: u16 = 1883;
 pub const CHANNEL_SIZE: usize = 1024;
-pub const MAX_SOCKET_RETRY: usize = 128;
+pub const MAX_SOCKET_RETRY: u64 = 128;
+pub const MAX_CONNECT_TIMEOUT: u64 = 4000; // in milli-seconds.
+pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 
 // TODO: restrict packet size to maximum allowed for each session or use
 //       protocol-limitation
@@ -86,11 +88,11 @@ pub trait NodeStore {
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`
-pub fn mqtt_listen_address4(port: Option<u16>) -> SocketAddr {
+pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
     use std::net::{IpAddr, Ipv4Addr};
 
     let port = port.unwrap_or(MQTT_PORT);
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
+    net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }
 
 #[cfg(test)]

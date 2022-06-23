@@ -1,3 +1,8 @@
+### System
+
+* One or remote nodes shall continuously connect and disconnect with broker. We can
+  increase the concurrency of this operation from 1, 2, 4, 8, 16, 32, 64, 128
+
 ### Sesson-level
 
 * `FixedHeader.remaining_len` must be validated with

@@ -6,8 +6,6 @@ use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{v5, Cluster, Config};
 use crate::{Error, ErrorKind, Result};
 
-const BATCH_SIZE: usize = 1024;
-
 pub struct Listener {
     /// Human readable name for this mio thread.
     pub name: String,
@@ -33,6 +31,8 @@ pub struct RunLoop {
     server: Option<mio::net::TcpListener>,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
+    /// whether thread is closed.
+    closed: bool,
 }
 
 impl Default for Listener {
@@ -41,7 +41,7 @@ impl Default for Listener {
 
         let config = Config::default();
         Listener {
-            name: "<listener-thrd>".to_string(),
+            name: format!("{}-listener-init", config.name),
             port: config.port.unwrap(),
             chan_size: CHANNEL_SIZE,
             config,
@@ -68,8 +68,8 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    const SERVER_TOKEN: mio::Token = mio::Token(1);
-    const WAKE_TOKEN: mio::Token = mio::Token(2);
+    const WAKE_TOKEN: mio::Token = mio::Token(1);
+    const SERVER_TOKEN: mio::Token = mio::Token(2);
 
     /// Create a listener from configuration. Listener shall be in `Init` state, to start
     /// the listener thread call [Listener::spawn].
@@ -111,6 +111,7 @@ impl Listener {
                 poll,
                 server: Some(server),
                 cluster: Box::new(cluster),
+                closed: false,
             }),
         };
         let thrd = Thread::spawn_sync(&self.name, self.chan_size, listener);
@@ -130,8 +131,8 @@ impl Listener {
         info!("{} cloning tx ...", self.pp());
 
         let inner = match &self.inner {
-            Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(&waker), thrd.to_tx()),
-            Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(&waker), tx.clone()),
+            Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(waker), thrd.to_tx()),
+            Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
             _ => unreachable!(),
         };
 
@@ -223,6 +224,33 @@ impl Listener {
         }
     }
 
+    // Return (empty, disconnected)
+    fn mio_chan(&mut self, rx: &Rx<Request, Result<Response>>) -> Result<(bool, bool)> {
+        use crate::thread::pending_requests;
+        use Request::*;
+
+        let closed = match &self.inner {
+            Inner::Main(RunLoop { closed, .. }) => *closed,
+            _ => unreachable!(),
+        };
+
+        let (qs, empty, disconnected) = pending_requests(&rx, self.chan_size);
+
+        debug!("{} processing {} requests closed:{} ...", self.pp(), qs.len(), closed);
+        for q in qs.into_iter() {
+            if closed {
+                continue;
+            }
+            match q {
+                (q @ Close, Some(tx)) => {
+                    err!(IPCFail, try: tx.send(self.handle_close(q)))?
+                }
+                (_, _) => unreachable!(),
+            }
+        }
+        Ok((empty, disconnected))
+    }
+
     // Return empty
     fn mio_conn(&mut self) -> Result<bool> {
         use std::io;
@@ -252,38 +280,21 @@ impl Listener {
         Ok(false)
     }
 
-    // Return (empty, disconnected)
-    fn mio_chan(&mut self, rx: &Rx<Request, Result<Response>>) -> Result<(bool, bool)> {
-        use crate::thread::pending_requests;
-        use Request::*;
-
-        let (qs, empty, disconnected) = pending_requests(&rx, BATCH_SIZE);
-        debug!("{} processing {} requests ...", self.pp(), qs.len());
-        for q in qs.into_iter() {
-            match q {
-                (q @ Close, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_close(q)))?
-                }
-                (_, _) => unreachable!(),
-            }
-        }
-
-        Ok((empty, disconnected))
-    }
-
     fn handle_close(&mut self, _req: Request) -> Result<Response> {
         use std::mem;
 
         info!("{} close ...", self.pp());
 
-        let RunLoop { server, cluster, .. } = match &mut self.inner {
+        let RunLoop { poll, server, cluster, closed } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
+        *closed = true;
 
         let cluster = mem::replace(cluster, Box::new(Cluster::default()));
         mem::drop(cluster);
         mem::drop(server.take());
+        mem::drop(mem::replace(poll, mio::Poll::new()?));
 
         Ok(Response::Ok)
     }
@@ -317,7 +328,7 @@ struct Handshake {
     conn: Option<mio::net::TcpStream>,
     addr: net::SocketAddr,
     cluster: Cluster,
-    retries: usize,
+    retries: u64,
 }
 
 impl Threadable for Handshake {
@@ -361,7 +372,7 @@ impl Threadable for Handshake {
             };
         };
 
-        err!(IPCFail, try: self.cluster.connect(conn, addr, pkt_connect))?;
+        err!(IPCFail, try: self.cluster.add_connection(conn, addr, pkt_connect))?;
 
         Ok(self)
     }

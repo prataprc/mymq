@@ -121,8 +121,9 @@ impl Cluster {
         }
         if self.num_shards > (MAX_SHARDS as usize) {
             err!(InvalidInput, desc: "num. of shards too large {}", self.num_shards)?;
-        }
-        if !util::is_power_of_2(self.num_shards) {
+        } else if self.num_shards == 0 {
+            err!(InvalidInput, desc: "num_shards can't be ZERO")?;
+        } else if !util::is_power_of_2(self.num_shards) {
             err!(
                 InvalidInput,
                 desc: "num. of shards must be power of 2 {}",
@@ -222,7 +223,7 @@ pub enum Request {
     FailedThread {
         name: &'static str,
     },
-    Connect {
+    AddConnection {
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
         pkt: v5::Connect,
@@ -232,15 +233,6 @@ pub enum Request {
 
 // calls to interfacw with cluster-thread.
 impl Cluster {
-    pub fn failed_listener(&self) -> Result<()> {
-        match &self.inner {
-            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "listener" })?,
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
     pub fn add_nodes(&self, nodes: Vec<Node>) -> Result<()> {
         match &self.inner {
             Inner::Handle(thrd) => thrd.request(Request::AddNodes { nodes })??,
@@ -259,14 +251,32 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn connect(
+    pub fn add_connection(
         &self,
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
         pkt: v5::Connect,
     ) -> Result<()> {
         match &self.inner {
-            Inner::Tx(tx) => tx.request(Request::Connect { conn, addr, pkt })??,
+            Inner::Tx(tx) => tx.request(Request::AddConnection { conn, addr, pkt })??,
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub fn failed_listener(&self) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "listener" })?,
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub fn failed_shard(&self) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "shard" })?,
             _ => unreachable!(),
         };
 
@@ -310,9 +320,13 @@ impl Threadable for Cluster {
             self.chan_size
         );
 
+        let mut closed = false;
         loop {
-            let (qs, _empty, disconnected) = pending_requests(&rx, 16);
+            let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
             for q in qs.into_iter() {
+                if closed {
+                    continue;
+                }
                 match q {
                     (q @ Set { .. }, Some(tx)) => {
                         err!(IPCFail, try: tx.send(self.handle_set(q)))?
@@ -328,11 +342,16 @@ impl Threadable for Cluster {
                         let msg = "listener-failed".to_string();
                         err!(IPCFail, try: self.as_app_tx().send(msg))?
                     }
-                    (q @ Connect { .. }, Some(tx)) => err!(
+                    (FailedThread { name: "shard" }, None) => {
+                        let msg = "shard-failed".to_string();
+                        err!(IPCFail, try: self.as_app_tx().send(msg))?
+                    }
+                    (q @ AddConnection { .. }, Some(tx)) => err!(
                         IPCFail,
-                        try: tx.send(self.handle_connect(q))
+                        try: tx.send(self.handle_add_connection(q))
                     )?,
                     (q @ Close, Some(tx)) => {
+                        closed = true;
                         err!(IPCFail, try: tx.send(self.handle_close(q)))?
                     }
 
@@ -428,23 +447,47 @@ impl Cluster {
         Ok(Response::Ok)
     }
 
-    fn handle_connect(&mut self, req: Request) -> Result<Response> {
-        todo!()
+    fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
+        let shards = match &mut self.inner {
+            Inner::Main(RunLoop { shards, .. }) => shards,
+            _ => unreachable!(),
+        };
+        let (conn, addr, pkt) = match req {
+            Request::AddConnection { conn, addr, pkt } => (conn, addr, pkt),
+            _ => unreachable!(),
+        };
+
+        let mut counts: Vec<(Uuid, usize)> =
+            shards.iter_mut().map(|(uuid, shard)| (*uuid, shard.n_sessions)).collect();
+        counts.sort_by_key(|x| x.1);
+
+        match shards.get_mut(&counts[0].0) {
+            Some(shard) => {
+                shard.n_sessions += 1;
+                shard.add_session(conn, addr, pkt)?;
+            }
+            None => (),
+        }
+
+        Ok(Response::Ok)
     }
 
     fn handle_close(&mut self, _: Request) -> Result<Response> {
         use std::mem;
 
-        let RunLoop { nodes, shards, .. } = match &mut self.inner {
+        let RunLoop { nodes, listener, shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        // TODO: is there any explicit clean up to be done for Node ?
-        let hshards = mem::replace(shards, BTreeMap::default());
-        let (n, m) = (nodes.len(), hshards.len());
+        let (n, m) = (nodes.len(), shards.len());
         info!("Cluster::close, there are {} nodes and {} shards", n, m);
 
+        // TODO: is there any explicit clean up to be done for Node ?
+
+        *listener = mem::replace(listener, Listener::default()).close_wait()?;
+
+        let hshards = mem::replace(shards, BTreeMap::default());
         for (uuid, shard) in hshards.into_iter() {
             let shard = shard.close_wait()?;
             shards.insert(uuid, shard);

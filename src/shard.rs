@@ -1,10 +1,10 @@
 use log::{debug, error, info};
 use uuid::Uuid;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{ClientID, Cluster, Config, Miot, Session, Shardable};
+use crate::{v5, ClientID, Cluster, Config, Miot, Session, Shardable};
 use crate::{Error, ErrorKind, Result};
 
 pub struct Shard {
@@ -15,6 +15,7 @@ pub struct Shard {
     /// Input channel size for the shard's thread.
     pub chan_size: usize,
     config: Config,
+    pub(crate) n_sessions: usize, // used by Cluster.
     inner: Inner,
 }
 
@@ -26,8 +27,16 @@ pub enum Inner {
 }
 
 pub struct RunLoop {
+    /// Cluster::Tx to communicate back to cluster.
+    /// Shall be dropped after close_wait call, when the thread returns, will point
+    /// to Inner::Init
     cluster: Box<Cluster>,
+    /// Collection of sessions and corresponding clients managed by this shard.
+    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
     sessions: BTreeMap<ClientID, Session>,
+    /// Inner::Handle to corresponding miot-thread.
+    /// Shall be dropped after close_wait call, when the thread returns, will point
+    /// to Inner::Init
     miot: Miot,
 }
 
@@ -37,10 +46,11 @@ impl Default for Shard {
 
         let config = Config::default();
         Shard {
-            name: format!("{}-shard", config.name),
+            name: format!("{}-shard-init", config.name),
             uuid: Uuid::new_v4(),
             chan_size: CHANNEL_SIZE,
             config,
+            n_sessions: Default::default(),
             inner: Inner::Init,
         }
     }
@@ -58,13 +68,13 @@ impl Drop for Shard {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("Shard::Init, {:?}, drop ...", self.name),
+            Inner::Init => debug!("{} drop ...", self.pp()),
             Inner::Handle(_) => {
-                error!("Shard::Handle, {:?} invalid drop ...", self.name);
-                panic!("Shard::Handle, {:?} nvalid drop ...", self.name);
+                error!("{} invalid drop ...", self.pp());
+                panic!("{} invalid drop ...", self.pp());
             }
-            Inner::Tx(_tx) => info!("Shard::Tx {:?} drop ...", self.name),
-            Inner::Main(_run_loop) => info!("Shard::Main {:?} drop ...", self.name),
+            Inner::Tx(_tx) => info!("{} drop ...", self.pp()),
+            Inner::Main(_run_loop) => info!("{} drop ...", self.pp()),
         }
     }
 }
@@ -73,10 +83,11 @@ impl Shard {
     pub fn from_config(config: Config) -> Result<Shard> {
         let s = Shard::default();
         let val = Shard {
-            name: format!("{}-shard", config.name),
+            name: format!("{}-shard-init", config.name),
             uuid: s.uuid,
             chan_size: s.chan_size,
             config: config.clone(),
+            n_sessions: Default::default(),
             inner: Inner::Init,
         };
 
@@ -84,20 +95,16 @@ impl Shard {
     }
 
     pub fn spawn(self, cluster: Cluster) -> Result<Shard> {
-        info!(
-            "Starting shard {:?} uuid:{} chan_size:{} ...",
-            self.name, self.uuid, self.chan_size
-        );
-
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
 
         let shard = Shard {
-            name: self.name.clone(),
+            name: format!("{}-shard-main", self.config.name),
             uuid: self.uuid,
             chan_size: self.chan_size,
             config: self.config.clone(),
+            n_sessions: Default::default(),
             inner: Inner::Main(RunLoop {
                 cluster: Box::new(cluster),
                 sessions: BTreeMap::default(),
@@ -107,10 +114,11 @@ impl Shard {
         let thrd = Thread::spawn_sync(&self.name, self.chan_size, shard);
 
         let shard = Shard {
-            name: self.name.clone(),
+            name: format!("{}-shard-handle", self.config.name),
             uuid: self.uuid,
             chan_size: self.chan_size,
             config: self.config.clone(),
+            n_sessions: Default::default(),
             inner: Inner::Handle(thrd),
         };
         {
@@ -127,7 +135,7 @@ impl Shard {
     }
 
     pub fn to_tx(&self) -> Self {
-        info!("Shard::to_tx {:?} cloning tx ...", self.name);
+        info!("{} cloning tx ...", self.pp());
 
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
@@ -136,12 +144,41 @@ impl Shard {
         };
 
         Shard {
-            name: self.name.clone(),
+            name: format!("{}-shard-tx", self.config.name),
             uuid: self.uuid,
             chan_size: self.chan_size,
             config: self.config.clone(),
+            n_sessions: Default::default(),
             inner,
         }
+    }
+}
+
+// calls to interfacw with cluster-thread.
+impl Shard {
+    pub fn add_session(
+        &self,
+        conn: mio::net::TcpStream,
+        addr: net::SocketAddr,
+        pkt: v5::Connect,
+    ) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(thrd) => {
+                thrd.request(Request::AddSession { conn, addr, pkt })??;
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub fn failed_miot(&self) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "miot" })?,
+            _ => unreachable!(),
+        };
+
+        Ok(())
     }
 
     pub fn close_wait(mut self) -> Result<Shard> {
@@ -160,6 +197,14 @@ impl Shard {
 
 pub enum Request {
     SetMiot(Miot),
+    AddSession {
+        conn: mio::net::TcpStream,
+        addr: net::SocketAddr,
+        pkt: v5::Connect,
+    },
+    FailedThread {
+        name: &'static str,
+    },
     Close,
 }
 
@@ -175,14 +220,29 @@ impl Threadable for Shard {
         use crate::thread::pending_requests;
         use Request::*;
 
+        info!("{} uuid:{} chan_size:{} ...", self.pp(), self.uuid, self.chan_size);
+
+        let mut closed = false;
         loop {
             let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
             for q in qs.into_iter() {
+                if closed {
+                    continue;
+                }
                 match q {
                     (SetMiot(miot_handle), Some(tx)) => {
                         err!(IPCFail, try: tx.send(self.handle_set_miot(miot_handle)))?
                     }
+                    (q @ AddSession { .. }, Some(tx)) => err!(
+                        IPCFail,
+                        try: tx.send(self.handle_add_session(q))
+                    )?,
+                    (FailedThread { name: "miot" }, None) => {
+                        self.as_cluster().failed_shard().unwrap();
+                        err!(ThreadFail, desc: "miot thread failed, cascading")?
+                    }
                     (Close, Some(tx)) => {
+                        closed = true;
                         err!(IPCFail, try: tx.send(self.handle_close()))?
                     }
                     (_, _) => unreachable!(),
@@ -209,24 +269,42 @@ impl Shard {
         Ok(Response::Ok)
     }
 
+    fn handle_add_session(&mut self, _req: Request) -> Result<Response> {
+        todo!()
+    }
+
     fn handle_close(&mut self) -> Result<Response> {
         use std::mem;
 
+        let prefix = self.pp();
         let RunLoop { cluster, sessions, miot } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        info!("Shard::close, {:?} sessions:{} ...", self.name, sessions.len());
+        info!("{} sessions:{} ...", prefix, sessions.len());
 
         let cluster = mem::replace(cluster, Box::new(Cluster::default()));
         *miot = mem::replace(miot, Miot::default()).close_wait()?;
 
         for (_, sess) in mem::replace(sessions, BTreeMap::default()).into_iter() {
-            mem::drop(sess);
+            sess.close()?; // session is dropped here.
         }
 
         mem::drop(cluster);
         Ok(Response::Ok)
+    }
+}
+
+impl Shard {
+    fn pp(&self) -> String {
+        format!("{}", self.name)
+    }
+
+    fn as_cluster(&self) -> &Cluster {
+        match &self.inner {
+            Inner::Main(RunLoop { cluster, .. }) => cluster,
+            _ => unreachable!(),
+        }
     }
 }

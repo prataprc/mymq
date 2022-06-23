@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
-use log::warn;
 
-use std::io;
+use std::{io, thread, time};
 
 use crate::util::advance;
 use crate::{Blob, Packetize, Result, TopicName, UserProperty, VarU32};
@@ -169,13 +168,82 @@ impl PacketRead {
         PacketRead::Init { bytes: Vec::with_capacity(1024) }
     }
 
-    pub fn reset(self) -> Self {
+    pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool)> {
+        use crate::{MAX_CONNECT_TIMEOUT, MAX_SOCKET_RETRY};
+        use PacketRead::{Fin, Header, Init, Remain};
+
+        let dur = MAX_CONNECT_TIMEOUT / MAX_SOCKET_RETRY;
+
+        let mut scratch = [0_u8; 5];
         match self {
-            PacketRead::Fin { mut bytes, .. } => {
-                bytes.truncate(0);
-                PacketRead::Init { bytes }
+            Init { mut bytes } => match stream.read(&mut scratch) {
+                Ok(0) => err!(Disconnected, desc:  "")?,
+                Ok(1) => Ok((PacketRead::Header { byte1: scratch[0], bytes }, true)),
+                Ok(n) => {
+                    let byte1 = scratch[0];
+                    match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
+                        Some(_) => {
+                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
+                            bytes.extend_from_slice(&scratch[m + 1..n]);
+                            bytes.reserve(*remaining_len as usize);
+                            let fh = FixedHeader { byte1, remaining_len };
+                            Ok((PacketRead::Remain { bytes, fh }, true))
+                        }
+                        None => {
+                            bytes.extend_from_slice(&scratch[1..n]);
+                            Ok((PacketRead::Header { byte1, bytes }, true))
+                        }
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(time::Duration::from_millis(dur));
+                    Ok((PacketRead::Init { bytes }, true))
+                }
+                Err(err) => err!(Disconnected, try: Err(err)),
+            },
+            Header { byte1, mut bytes } => match stream.read(&mut scratch) {
+                Ok(0) => err!(Disconnected, desc:  ""),
+                Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
+                    Some(_) => {
+                        bytes.extend_from_slice(&scratch[..n]);
+                        let (remaining_len, m) = VarU32::decode(&bytes)?;
+                        bytes.truncate(0);
+                        bytes.extend_from_slice(&scratch[m..n]);
+                        bytes.reserve(*remaining_len as usize);
+                        let fh = FixedHeader { byte1, remaining_len };
+                        Ok((PacketRead::Remain { bytes, fh }, true))
+                    }
+                    None => {
+                        bytes.extend_from_slice(&scratch[..n]);
+                        Ok((PacketRead::Header { byte1, bytes }, true))
+                    }
+                },
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(time::Duration::from_millis(dur));
+                    Ok((PacketRead::Header { byte1, bytes }, true))
+                }
+                Err(err) => err!(Disconnected, try: Err(err)),
+            },
+            Remain { mut bytes, fh } => {
+                let m = bytes.len();
+                unsafe { bytes.set_len(*fh.remaining_len as usize) };
+                match stream.read(&mut bytes[m..]) {
+                    Ok(0) => err!(Disconnected, desc:  ""),
+                    Ok(n) if (m + n) == (*fh.remaining_len as usize) => {
+                        Ok((PacketRead::Fin { bytes, fh }, false))
+                    }
+                    Ok(n) => {
+                        unsafe { bytes.set_len(m + n) };
+                        Ok((PacketRead::Remain { bytes, fh }, true))
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(time::Duration::from_millis(dur));
+                        Ok((PacketRead::Remain { bytes, fh }, true))
+                    }
+                    Err(err) => err!(Disconnected, try: Err(err)),
+                }
             }
-            _ => unreachable!(),
+            Fin { bytes, fh } => Ok((PacketRead::Fin { bytes, fh }, false)),
         }
     }
 
@@ -253,79 +321,13 @@ impl PacketRead {
         }
     }
 
-    pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool)> {
-        use PacketRead::{Fin, Header, Init, Remain};
-
-        let mut scratch = [0_u8; 5];
+    pub fn reset(self) -> Self {
         match self {
-            Init { mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  "")?,
-                Ok(1) => Ok((PacketRead::Header { byte1: scratch[0], bytes }, true)),
-                Ok(n) => {
-                    let byte1 = scratch[0];
-                    match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
-                        Some(_) => {
-                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
-                            bytes.extend_from_slice(&scratch[m + 1..n]);
-                            bytes.reserve(*remaining_len as usize);
-                            let fh = FixedHeader { byte1, remaining_len };
-                            Ok((PacketRead::Remain { bytes, fh }, true))
-                        }
-                        None => {
-                            bytes.extend_from_slice(&scratch[1..n]);
-                            Ok((PacketRead::Header { byte1, bytes }, true))
-                        }
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    warn!("woke up on empty stream ?");
-                    err!(WouldBlock, desc: "")
-                }
-                Err(err) => err!(Disconnected, try: Err(err)),
-            },
-            Header { byte1, mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  ""),
-                Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
-                    Some(_) => {
-                        bytes.extend_from_slice(&scratch[..n]);
-                        let (remaining_len, m) = VarU32::decode(&bytes)?;
-                        bytes.truncate(0);
-                        bytes.extend_from_slice(&scratch[m..n]);
-                        bytes.reserve(*remaining_len as usize);
-                        let fh = FixedHeader { byte1, remaining_len };
-                        Ok((PacketRead::Remain { bytes, fh }, true))
-                    }
-                    None => {
-                        bytes.extend_from_slice(&scratch[..n]);
-                        Ok((PacketRead::Header { byte1, bytes }, true))
-                    }
-                },
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    warn!("woke up on empty stream ?");
-                    err!(WouldBlock, desc: "")
-                }
-                Err(err) => err!(Disconnected, try: Err(err)),
-            },
-            Remain { mut bytes, fh } => {
-                let m = bytes.len();
-                unsafe { bytes.set_len(*fh.remaining_len as usize) };
-                match stream.read(&mut bytes[m..]) {
-                    Ok(0) => err!(Disconnected, desc:  ""),
-                    Ok(n) if (m + n) == (*fh.remaining_len as usize) => {
-                        Ok((PacketRead::Fin { bytes, fh }, false))
-                    }
-                    Ok(n) => {
-                        unsafe { bytes.set_len(m + n) };
-                        Ok((PacketRead::Remain { bytes, fh }, true))
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        warn!("woke up on empty stream ?");
-                        err!(WouldBlock, desc: "")
-                    }
-                    Err(err) => err!(Disconnected, try: Err(err)),
-                }
+            PacketRead::Fin { mut bytes, .. } => {
+                bytes.truncate(0);
+                PacketRead::Init { bytes }
             }
-            Fin { bytes, fh } => Ok((PacketRead::Fin { bytes, fh }, false)),
+            _ => unreachable!(),
         }
     }
 }
