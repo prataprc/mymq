@@ -2,6 +2,8 @@ use crate::v5::{FixedHeader, Property, PropertyType};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::UnSubscribe";
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct UnSubscribe {
     pub packet_id: u16,
@@ -19,9 +21,11 @@ impl Packetize for UnSubscribe {
         let (packet_id, n) = dec_field!(u16, stream, fh_len);
         let (properties, n) = dec_props!(UnSubscribeProperties, stream, n);
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
-            m if m == n => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
+            m if m == n => {
+                err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?
+            }
             m if m <= stream.len() => (&stream[n..m], m),
-            m => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
+            m => err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?,
         };
 
         let mut filters = vec![];
@@ -64,7 +68,7 @@ impl Packetize for UnSubscribe {
 impl UnSubscribe {
     fn validate(&self) -> Result<()> {
         if self.filters.len() == 0 {
-            err!(ProtocolError, code: ProtocolError, "no topic filter in unsubscribe")?
+            err!(ProtocolError, code: ProtocolError, "{} topic filter missing", PP)?
         }
 
         Ok(())
@@ -94,18 +98,15 @@ impl Packetize for UnSubscribeProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
             match property {
                 UserProp(val) => props.user_properties.push(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in will properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             }
         }
 

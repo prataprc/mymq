@@ -5,6 +5,8 @@ use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::ConnAck";
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnackFlags(pub u8);
 
@@ -48,7 +50,7 @@ impl ConnackFlags {
 
     pub fn unwrap(&self) -> Result<bool> {
         if (self.0 & 0b_1111_1110) > 0 {
-            err!(MalformedPacket, code: MalformedPacket, "connack flags {:?}", self.0)?;
+            err!(MalformedPacket, code: MalformedPacket, "{} flags {:?}", PP, self.0)?;
         }
 
         Ok(self.0 & (*Self::SESSION_PRESENT) > 0)
@@ -108,7 +110,9 @@ impl TryFrom<u8> for ConnectReasonCode {
             0x9c => Ok(ConnectReasonCode::UseAnotherServer),
             0x9d => Ok(ConnectReasonCode::ServerMoved),
             0x9f => Ok(ConnectReasonCode::ExceedConnectionRate),
-            val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val),
+            val => {
+                err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val)
+            }
         }
     }
 }
@@ -195,7 +199,7 @@ impl Packetize for ConnAckProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
@@ -203,7 +207,7 @@ impl Packetize for ConnAckProperties {
                 SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
                 ReceiveMaximum(val) => props.receive_maximum = Some(val),
                 MaximumQoS(QoS::ExactlyOnce) => {
-                    err!(ProtocolError, code: ProtocolError, "max_qos QoS::ExactlyOnce")?;
+                    err!(ProtocolError, code: ProtocolError, "{} QoS::ExactlyOnce", PP)?;
                 }
                 MaximumQoS(val) => props.max_qos = Some(val),
                 RetainAvailable(val) => {
@@ -211,7 +215,7 @@ impl Packetize for ConnAckProperties {
                         Some(util::u8_to_bool(val, "retain_available")?);
                 }
                 MaximumPacketSize(0) => {
-                    err!(ProtocolError, code: ProtocolError, "max_packet_size is ZERO")?;
+                    err!(ProtocolError, code: ProtocolError, "{} max_packet_size:0", PP)?;
                 }
                 MaximumPacketSize(val) => props.max_packet_size = Some(val),
                 AssignedClientIdentifier(val) => {
@@ -239,12 +243,9 @@ impl Packetize for ConnAckProperties {
                 ServerReference(val) => props.server_reference = Some(val),
                 AuthenticationMethod(val) => props.authentication_method = Some(val),
                 AuthenticationData(val) => props.authentication_data = Some(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in connack properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             };
         }
 
@@ -259,7 +260,7 @@ impl Packetize for ConnAckProperties {
         enc_prop!(opt: data, SessionExpiryInterval, self.session_expiry_interval);
         enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
         match &self.max_qos {
-            Some(QoS::ExactlyOnce) => err!(InvalidInput, desc:"max_qos ExactlyOnce")?,
+            Some(QoS::ExactlyOnce) => err!(InvalidInput, desc:"{} QoS::ExactlyOnce", PP)?,
             Some(val) => enc_prop!(data, MaximumQoS, u8::from(*val)),
             None => (),
         }

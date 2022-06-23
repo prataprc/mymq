@@ -5,6 +5,8 @@ use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserPro
 use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::Connect";
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnectFlags(pub u8);
 
@@ -63,7 +65,7 @@ impl ConnectFlags {
         let will_retain: bool = (self.0 & Self::WILL_RETAIN.0) > 0;
 
         if (self.0 & 0b_0000_0001) > 0 {
-            err!(MalformedPacket, code: MalformedPacket, "conn-flags {:0x?}", self.0)?;
+            err!(MalformedPacket, code: MalformedPacket, "{} flags {:0x?}", PP, self.0)?;
         }
 
         Ok((clean_start, will_flag, will_qos, will_retain))
@@ -194,7 +196,8 @@ impl Connect {
             err!(
                 UnsupportedProtocolVersion,
                 code: UnsupportedProtocolVersion,
-                "invalid protocol name {:?}",
+                "{} proto-name {:?}",
+                PP,
                 self.protocol_name
             )?;
         }
@@ -202,7 +205,8 @@ impl Connect {
             err!(
                 UnsupportedProtocolVersion,
                 code: UnsupportedProtocolVersion,
-                "can't support {:?}",
+                "{} proto-version {:?}",
+                PP,
                 self.protocol_version
             )?;
         };
@@ -213,7 +217,8 @@ impl Connect {
                     ProtocolError,
                     code: PayloadFormatInvalid,
                     cause: err,
-                    "payload format invalid in will message"
+                    "{} will-message:payload not utf8",
+                    PP
                 )?
             }
         }
@@ -253,18 +258,18 @@ impl Packetize for ConnectProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
             match property {
                 SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
                 ReceiveMaximum(0) => {
-                    err!(ProtocolError, code: ProtocolError, "receive_maximum is ZERO")?;
+                    err!(ProtocolError, code: ProtocolError, "{} receive_maximum:0", PP)?;
                 }
                 ReceiveMaximum(val) => props.receive_maximum = Some(val),
                 MaximumPacketSize(0) => {
-                    err!(ProtocolError, code: ProtocolError, "max_packet_size is ZERO")?;
+                    err!(ProtocolError, code: ProtocolError, "{} max_packet_size:0", PP)?;
                 }
                 MaximumPacketSize(val) => props.max_packet_size = Some(val),
                 TopicAliasMaximum(val) => props.topic_alias_max = Some(val),
@@ -279,12 +284,9 @@ impl Packetize for ConnectProperties {
                 UserProp(val) => props.user_properties.push(val),
                 AuthenticationMethod(val) => props.authentication_method = Some(val),
                 AuthenticationData(val) => props.authentication_data = Some(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in will properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             }
         }
 
@@ -375,7 +377,13 @@ impl Packetize for WillProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{} repeat prop in will-message {:?}",
+                    PP,
+                    pt
+                )?
             }
             dups[pt as usize] = true;
 
@@ -392,7 +400,8 @@ impl Packetize for WillProperties {
                 _ => err!(
                     ProtocolError,
                     code: ProtocolError,
-                    "{:?} found in will properties",
+                    "{} bad prop in will-message {:?}",
+                    PP,
                     pt
                 )?,
             }

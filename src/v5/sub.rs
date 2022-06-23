@@ -2,6 +2,8 @@ use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::Subscribe";
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct SubscriptionOpt(u8);
 
@@ -37,7 +39,8 @@ impl SubscriptionOpt {
             err!(
                 MalformedPacket,
                 code: MalformedPacket,
-                "subscription option reserved bit is non-ZERO {:?}",
+                "{} sub-opt reserved bit != 0 {:?}",
+                PP,
                 self.0
             )?
         }
@@ -65,7 +68,7 @@ impl TryFrom<u8> for RetainForwardRule {
             0 => RetainForwardRule::OnEverySubscribe,
             1 => RetainForwardRule::OnNewSubscribe,
             2 => RetainForwardRule::Never,
-            _ => err!(ProtocolError, code: ProtocolError, "forbidden packet")?,
+            _ => err!(ProtocolError, code: ProtocolError, "{} forbidden packet", PP)?,
         };
 
         Ok(val)
@@ -99,9 +102,11 @@ impl Packetize for Subscribe {
         let (packet_id, n) = dec_field!(u16, stream, fh_len);
         let (properties, n) = dec_props!(SubscribeProperties, stream, n);
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
-            m if m == n => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
+            m if m == n => {
+                err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?
+            }
             m if m <= stream.len() => (&stream[n..m], m),
-            m => err!(ProtocolError, code: ProtocolError, "in payload {}", m)?,
+            m => err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?,
         };
 
         let mut filters = vec![];
@@ -144,7 +149,7 @@ impl Packetize for Subscribe {
 impl Subscribe {
     fn validate(&self) -> Result<()> {
         if self.filters.len() == 0 {
-            err!(ProtocolError, code: ProtocolError, "no topic filter in subscribe")?
+            err!(ProtocolError, code: ProtocolError, "{} missing topic filter", PP)?
         }
 
         Ok(())
@@ -175,19 +180,16 @@ impl Packetize for SubscribeProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
             match property {
                 SubscriptionIdentifier(val) => props.subscription_id = Some(val),
                 UserProp(val) => props.user_properties.push(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in will properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             }
         }
 

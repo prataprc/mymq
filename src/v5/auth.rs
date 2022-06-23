@@ -1,7 +1,8 @@
-use crate::util::advance;
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
-use crate::{Blob, Packetize, UserProperty, VarU32};
+use crate::{util::advance, Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
+
+const PP: &'static str = "Packet::Auth";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AuthReasonCode {
@@ -18,7 +19,7 @@ impl TryFrom<u8> for AuthReasonCode {
             0x00 => Ok(AuthReasonCode::Success),
             0x18 => Ok(AuthReasonCode::ContinueAuthentication),
             0x19 => Ok(AuthReasonCode::ReAuthenticate),
-            val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val),
+            val => err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val),
         }
     }
 }
@@ -104,7 +105,7 @@ impl Packetize for AuthProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
@@ -113,22 +114,21 @@ impl Packetize for AuthProperties {
                 AuthenticationData(val) => authentication_data = Some(val),
                 ReasonString(val) => props.reason_string = Some(val),
                 UserProp(val) => props.user_properties.push(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in disconnect properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             };
         }
 
         match authentication_method {
             Some(val) => props.authentication_method = val,
-            None => err!(ProtocolError, code: ProtocolError, "missing auth-method")?,
+            None => {
+                err!(ProtocolError, code: ProtocolError, "{} missing auth-method", PP)?
+            }
         }
         match authentication_data {
             Some(val) => props.authentication_data = val,
-            None => err!(ProtocolError, code: ProtocolError, "missing auth-data")?,
+            None => err!(ProtocolError, code: ProtocolError, "{} missing auth-data", PP)?,
         }
 
         Ok((props, n))

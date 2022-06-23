@@ -3,6 +3,8 @@ use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::SubAck";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubAckReasonCode {
     QoS0 = 0x0,
@@ -36,7 +38,9 @@ impl TryFrom<u8> for SubAckReasonCode {
             0x9e => SubAckReasonCode::SharedSubscriptionsNotSupported,
             0xa1 => SubAckReasonCode::SubscriptionIdNotSupported,
             0xa2 => SubAckReasonCode::WildcardSubscriptionsNotSupported,
-            val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val)?,
+            val => {
+                err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val)?
+            }
         };
 
         Ok(v)
@@ -81,9 +85,13 @@ impl Packetize for SubAck {
         let (properties, n) = dec_props!(SubAckProperties, stream, n);
 
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
-            m if m == n => err!(MalformedPacket, code: MalformedPacket, "no payload")?,
+            m if m == n => {
+                err!(MalformedPacket, code: MalformedPacket, "{} no payload", PP)?
+            }
             m if m <= stream.len() => (stream[n..m].to_vec(), m),
-            m => err!(InsufficientBytes, code: MalformedPacket, "in payload {}", m)?,
+            m => {
+                err!(InsufficientBytes, code: MalformedPacket, "{} in payload {}", PP, m)?
+            }
         };
 
         let mut return_codes: Vec<SubAckReasonCode> = vec![];
@@ -139,19 +147,16 @@ impl Packetize for SubAckProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
             match property {
                 Property::ReasonString(val) => props.reason_string = Some(val),
                 Property::UserProp(val) => props.user_properties.push(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in suback properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop, {:?}", PP, pt)?
+                }
             };
         }
 

@@ -3,8 +3,7 @@ use arbitrary::Arbitrary;
 
 use std::{io, thread, time};
 
-use crate::util::advance;
-use crate::{Blob, Packetize, Result, TopicName, UserProperty, VarU32};
+use crate::{util::advance, Blob, Packetize, Result, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
 #[macro_export]
@@ -45,7 +44,7 @@ macro_rules! dec_props {
                         err!(
                             ProtocolError,
                             code: ProtocolError,
-                            "property len not matching {}",
+                            "property len mismatching {}",
                             r
                         )?
                     }
@@ -67,7 +66,7 @@ macro_rules! dec_props {
                     err!(
                         ProtocolError,
                         code: ProtocolError,
-                        "property len not matching {}",
+                        "property len mismatching {}",
                         r
                     )?
                 }
@@ -89,30 +88,6 @@ macro_rules! enc_prop {
         $data.extend_from_slice($($val)*.encode()?.as_ref());
     }};
 }
-
-mod auth;
-mod connack;
-mod connect;
-mod disconnect;
-mod ping;
-mod pubaclc;
-mod publish;
-mod sub;
-mod suback;
-mod unsub;
-mod unsuback;
-
-pub use auth::Auth;
-pub use connack::ConnAck;
-pub use connect::Connect;
-pub use disconnect::Disconnect;
-pub use ping::{PingReq, PingResp};
-pub use pubaclc::Pub;
-pub use publish::Publish;
-pub use sub::Subscribe;
-pub use suback::SubAck;
-pub use unsub::UnSubscribe;
-pub use unsuback::UnsubAck;
 
 /// All that is MQTT
 #[derive(Debug, Clone, PartialEq)]
@@ -177,7 +152,7 @@ impl PacketRead {
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  "")?,
+                Ok(0) => err!(Disconnected, desc: "PacketRead::Init")?,
                 Ok(1) => Ok((PacketRead::Header { byte1: scratch[0], bytes }, true)),
                 Ok(n) => {
                     let byte1 = scratch[0];
@@ -199,10 +174,10 @@ impl PacketRead {
                     thread::sleep(time::Duration::from_millis(dur));
                     Ok((PacketRead::Init { bytes }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err)),
+                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Init"),
             },
             Header { byte1, mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  ""),
+                Ok(0) => err!(Disconnected, desc:  "PacketRead::Header"),
                 Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
                     Some(_) => {
                         bytes.extend_from_slice(&scratch[..n]);
@@ -222,13 +197,13 @@ impl PacketRead {
                     thread::sleep(time::Duration::from_millis(dur));
                     Ok((PacketRead::Header { byte1, bytes }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err)),
+                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Header"),
             },
             Remain { mut bytes, fh } => {
                 let m = bytes.len();
                 unsafe { bytes.set_len(*fh.remaining_len as usize) };
                 match stream.read(&mut bytes[m..]) {
-                    Ok(0) => err!(Disconnected, desc:  ""),
+                    Ok(0) => err!(Disconnected, desc:  "PacketRead::Remain"),
                     Ok(n) if (m + n) == (*fh.remaining_len as usize) => {
                         Ok((PacketRead::Fin { bytes, fh }, false))
                     }
@@ -240,7 +215,7 @@ impl PacketRead {
                         thread::sleep(time::Duration::from_millis(dur));
                         Ok((PacketRead::Remain { bytes, fh }, true))
                     }
-                    Err(err) => err!(Disconnected, try: Err(err)),
+                    Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Remain"),
                 }
             }
             Fin { bytes, fh } => Ok((PacketRead::Fin { bytes, fh }, false)),
@@ -315,7 +290,7 @@ impl PacketRead {
         };
 
         if n != m {
-            err!(MalformedPacket, code: MalformedPacket, "partial parse {}!={}", n, m)
+            err!(MalformedPacket, code: MalformedPacket, "PacketRead::Fin {}!={}", n, m)
         } else {
             Ok(pkt)
         }
@@ -373,7 +348,7 @@ impl TryFrom<u8> for PacketType {
             13 => PacketType::PingResp,
             14 => PacketType::Disconnect,
             15 => PacketType::Auth,
-            _ => err!(MalformedPacket, code: MalformedPacket, "forbidden packet")?,
+            _ => err!(MalformedPacket, code: MalformedPacket, "forbidden packet-type")?,
         };
 
         Ok(val)
@@ -419,7 +394,7 @@ impl TryFrom<u8> for QoS {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
-            _ => err!(MalformedPacket, code: InvalidQoS, "forbidden packet")?,
+            _ => err!(MalformedPacket, code: InvalidQoS, "reserved QoS")?,
         };
 
         Ok(val)
@@ -498,7 +473,7 @@ impl Packetize for FixedHeader {
 impl FixedHeader {
     pub fn new(pkt_type: PacketType, remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
         }
         let byte1 = u8::from(pkt_type) << 4;
         Ok(FixedHeader { byte1, remaining_len })
@@ -511,7 +486,7 @@ impl FixedHeader {
         remaining_len: VarU32,
     ) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
         }
 
         let val = FixedHeader {
@@ -524,7 +499,7 @@ impl FixedHeader {
 
     pub fn new_pubrel(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
         }
 
         let (packet_type, qos) = (u8::from(PacketType::PubRel), QoS::AtLeastOnce);
@@ -538,7 +513,7 @@ impl FixedHeader {
 
     pub fn new_subscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
         }
 
         let (packet_type, qos) = (u8::from(PacketType::Subscribe), QoS::AtLeastOnce);
@@ -551,7 +526,7 @@ impl FixedHeader {
     }
     pub fn new_unsubscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "payload too long for MQTT packets")?
+            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
         }
 
         let (packet_type, qos) = (u8::from(PacketType::UnSubscribe), QoS::AtLeastOnce);
@@ -571,7 +546,12 @@ impl FixedHeader {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
-            qos => err!(InvalidInput, code: InvalidQoS, "qos:{} not supported", qos)?,
+            qos => err!(
+                InvalidInput,
+                code: InvalidQoS,
+                "FixedHeader qos:{} not supported",
+                qos
+            )?,
         };
         let dup = (self.byte1 & 0b1000) > 0;
 
@@ -587,7 +567,12 @@ impl FixedHeader {
             n if n < 16_384 => 2,
             n if n < 2_097_152 => 3,
             n if n < *VarU32::MAX => 4,
-            n => err!(InvalidInput, code: MalformedPacket, "remaining-len {}", n)?,
+            n => err!(
+                InvalidInput,
+                code: MalformedPacket,
+                "FixedHeader, remaining-len {}",
+                n
+            )?,
         };
 
         Ok(val)
@@ -615,7 +600,7 @@ impl FixedHeader {
             _ if retain || dup || qos != QoS::AtMostOnce => err!(
                 MalformedPacket,
                 code: MalformedPacket,
-                "invalid flags found for {:?}",
+                "FixedHeader invalid flags found for {:?}",
                 pkt_type
             ),
             _ => Ok(()),
@@ -688,7 +673,12 @@ impl TryFrom<u32> for PropertyType {
             40 => WildcardSubscriptionAvailable,
             41 => SubscriptionIdentifierAvailable,
             42 => SharedSubscriptionAvailable,
-            _ => err!(MalformedPacket, code: MalformedPacket, "u32->PropertyType")?,
+            val => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "invalid PropertyType {}",
+                val
+            )?,
         };
 
         Ok(val)
@@ -949,6 +939,30 @@ fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
 
     Ok(data)
 }
+
+mod auth;
+mod connack;
+mod connect;
+mod disconnect;
+mod ping;
+mod pubaclc;
+mod publish;
+mod sub;
+mod suback;
+mod unsub;
+mod unsuback;
+
+pub use auth::Auth;
+pub use connack::ConnAck;
+pub use connect::Connect;
+pub use disconnect::Disconnect;
+pub use ping::{PingReq, PingResp};
+pub use pubaclc::Pub;
+pub use publish::Publish;
+pub use sub::Subscribe;
+pub use suback::SubAck;
+pub use unsub::UnSubscribe;
+pub use unsuback::UnsubAck;
 
 #[cfg(test)]
 #[path = "mod_test.rs"]

@@ -3,6 +3,8 @@ use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::Publish";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Publish {
     pub retain: bool,
@@ -34,7 +36,9 @@ impl Packetize for Publish {
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
             m if m == n => (None, n),
             m if m <= stream.len() => (Some(stream[n..m].to_vec()), m),
-            m => err!(InsufficientBytes, code: MalformedPacket, "in payload {}", m)?,
+            m => {
+                err!(InsufficientBytes, code: MalformedPacket, "{} in payload {}", PP, m)?
+            }
         };
 
         let val = Publish {
@@ -90,7 +94,8 @@ impl Publish {
                         ProtocolError,
                         code: PayloadFormatInvalid,
                         cause: err,
-                        "payload format invalid in publish"
+                        "{} payload invalid utf8 ",
+                        PP
                     )?;
                 }
             }
@@ -131,7 +136,7 @@ impl Packetize for PublishProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
 
@@ -141,7 +146,7 @@ impl Packetize for PublishProperties {
                 }
                 MessageExpiryInterval(val) => props.message_expiry_interval = Some(val),
                 TopicAlias(0) => {
-                    err!(ProtocolError, code: ProtocolError, "topic-alias is ZERO")?
+                    err!(ProtocolError, code: ProtocolError, "{} topic-alias:ZERO", PP)?
                 }
                 TopicAlias(val) => props.topic_alias = Some(val),
                 ResponseTopic(val) => props.response_topic = Some(val),
@@ -149,12 +154,9 @@ impl Packetize for PublishProperties {
                 SubscriptionIdentifier(val) => props.subscribtion_identifier = Some(val),
                 ContentType(val) => props.content_type = Some(val),
                 UserProp(val) => props.user_properties.push(val),
-                _ => err!(
-                    ProtocolError,
-                    code: ProtocolError,
-                    "{:?} found in will properties",
-                    pt
-                )?,
+                _ => {
+                    err!(ProtocolError, code: ProtocolError, "{} bad prop {:?}", PP, pt)?
+                }
             }
         }
 

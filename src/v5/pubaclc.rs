@@ -3,6 +3,8 @@ use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+const PP: &'static str = "Packet::PubACLC";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PubReasonCode {
     Success = 0x00,
@@ -32,7 +34,7 @@ impl TryFrom<u8> for PubReasonCode {
             0x92 => Ok(PubReasonCode::PacketIdNotFound),
             0x97 => Ok(PubReasonCode::QuotaExceeded),
             0x99 => Ok(PubReasonCode::PayloadFormatInvalid),
-            val => err!(ProtocolError, code: ProtocolError, "reason-code {:?}", val),
+            val => err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val),
         }
     }
 }
