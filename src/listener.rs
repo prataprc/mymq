@@ -1,10 +1,13 @@
 use log::{debug, error, info};
+use mio::event::Events;
 
 use std::{net, sync::Arc, time};
 
-use crate::thread::{Rx, Thread, Threadable, Tx};
+use crate::thread::{Rx, Thread, Threadable};
 use crate::{v5, Cluster, Config};
 use crate::{Error, ErrorKind, Result};
+
+type ThreadRx = Rx<Request, Result<Response>>;
 
 pub struct Listener {
     /// Human readable name for this mio thread.
@@ -20,7 +23,6 @@ pub struct Listener {
 pub enum Inner {
     Init,
     Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
-    Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     Main(RunLoop),
 }
 
@@ -61,15 +63,14 @@ impl Drop for Listener {
                 error!("{} invalid drop ...", self.pp());
                 panic!("{} invalid drop ...", self.pp());
             }
-            Inner::Tx(_waker, _tx) => info!("{} drop ...", self.pp()),
             Inner::Main(_run_loop) => info!("{} drop ...", self.pp()),
         }
     }
 }
 
 impl Listener {
-    const WAKE_TOKEN: mio::Token = mio::Token(1);
-    const SERVER_TOKEN: mio::Token = mio::Token(2);
+    const TOKEN_WAKE: mio::Token = mio::Token(1);
+    const TOKEN_SERVER: mio::Token = mio::Token(2);
 
     /// Create a listener from configuration. Listener shall be in `Init` state, to start
     /// the listener thread call [Listener::spawn].
@@ -99,8 +100,8 @@ impl Listener {
         };
 
         let poll = mio::Poll::new()?;
-        poll.registry().register(&mut server, Self::SERVER_TOKEN, Interest::READABLE)?;
-        let waker = Arc::new(Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
+        poll.registry().register(&mut server, Self::TOKEN_SERVER, Interest::READABLE)?;
+        let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
 
         let listener = Listener {
             name: format!("{}-listener-main", self.config.name),
@@ -125,24 +126,6 @@ impl Listener {
         };
 
         Ok(listener)
-    }
-
-    pub fn to_tx(&self) -> Self {
-        info!("{} cloning tx ...", self.pp());
-
-        let inner = match &self.inner {
-            Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(waker), thrd.to_tx()),
-            Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
-            _ => unreachable!(),
-        };
-
-        Listener {
-            name: format!("{}-listener-tx", self.config.name),
-            port: self.port,
-            chan_size: self.chan_size,
-            config: self.config.clone(),
-            inner,
-        }
     }
 }
 
@@ -175,53 +158,65 @@ impl Threadable for Listener {
     type Req = Request;
     type Resp = Result<Response>;
 
-    fn main_loop(mut self, rx: Rx<Request, Result<Response>>) -> Result<Self> {
+    fn main_loop(mut self, rx: ThreadRx) -> Self {
         info!("{} spawn port:{} chan_size:{} ...", self.pp(), self.port, self.chan_size);
 
-        let mut events = mio::Events::with_capacity(2);
-        loop {
+        let mut events = Events::with_capacity(2);
+        let res = loop {
             let timeout: Option<time::Duration> = None;
             match self.as_mut_poll().poll(&mut events, timeout) {
                 Ok(()) => (),
                 Err(err) => {
-                    error!("{} poll error `{}`", self.pp(), err);
-                    self.as_cluster().failed_listener().unwrap();
-                    err!(IOError, try: Err(err))?
-                }
-            };
-            let n = events.iter().collect::<Vec<&mio::event::Event>>().len();
-            debug!("{} polled and got {} events", self.pp(), n);
-
-            let exit = match self.mio_events(&rx) {
-                Ok(exit) => exit,
-                Err(err) => {
-                    error!("{} exiting with failure `{}`", self.pp(), err);
-                    self.as_cluster().failed_listener().unwrap();
-                    break Err(err);
+                    break err!(IOError, try: Err(err), "{} poll error", self.pp())
                 }
             };
 
-            if exit {
-                break Ok(self);
+            match self.mio_events(&rx, &events) {
+                Ok(true) => break Ok(()),
+                Ok(false) => (),
+                Err(err) => break Err(err),
+            };
+        };
+
+        match res {
+            Ok(()) => {
+                info!("{} thread normal exit...", self.pp());
+            }
+            Err(err) => {
+                error!("{} fatal error, try restarting thread `{}`", self.pp(), err);
+                allow_panic!(self.as_cluster().restart_listener());
             }
         }
+
+        self
     }
 }
 
 impl Listener {
-    // return whether we are doing normal exit.
-    fn mio_events(&mut self, rx: &Rx<Request, Result<Response>>) -> Result<bool> {
-        loop {
-            match self.mio_chan(rx)? {
-                (_empty, true) => break Ok(true),
-                (false, false) => continue,
-                (true, false) => (),
+    // return whether we are doing normal exit, which is rx-disconnected
+    fn mio_events(&mut self, rx: &ThreadRx, es: &Events) -> Result<bool> {
+        let mut count = 0_usize;
+        let mut iter = es.iter();
+        let res = 'outer: loop {
+            if let Some(e) = iter.next() {
+                count += 1;
+                match e.token() {
+                    Self::TOKEN_WAKE => loop {
+                        match self.mio_chan(rx)? {
+                            (_empty, true) => break 'outer Ok(true),
+                            (true, _) => break,
+                            (_, _) => (),
+                        }
+                    },
+                    Self::TOKEN_SERVER => while !self.mio_conn()? {},
+                    _ => unreachable!(),
+                }
             }
-            match self.mio_conn()? {
-                empty if !empty => continue,
-                _ => break Ok(false),
-            }
-        }
+            break Ok(false);
+        };
+        debug!("{} polled and got {} events", self.pp(), count);
+
+        res
     }
 
     // Return (empty, disconnected)
@@ -234,13 +229,16 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        let (qs, empty, disconnected) = pending_requests(&rx, self.chan_size);
+        let (mut qs, empty, disconnected) = pending_requests(&rx, self.chan_size);
 
-        debug!("{} processing {} requests closed:{} ...", self.pp(), qs.len(), closed);
+        if closed {
+            info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+            qs.drain(..);
+        } else {
+            debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+        }
+
         for q in qs.into_iter() {
-            if closed {
-                continue;
-            }
             match q {
                 (q @ Close, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_close(q)))?
@@ -248,6 +246,7 @@ impl Listener {
                 (_, _) => unreachable!(),
             }
         }
+
         Ok((empty, disconnected))
     }
 
@@ -260,24 +259,22 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        let (conn, addr) = match server.as_ref().unwrap().accept() {
-            Ok((conn, addr)) => (conn, addr),
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(true),
-            Err(err) => {
-                error!("{} accept failed {}", self.pp(), err);
-                err!(IOError, try: Err(err))?
+        match server.as_ref().unwrap().accept() {
+            Ok((conn, addr)) => {
+                let hs = Handshake {
+                    prefix: format!("{}-handshake:{}", self.pp(), addr),
+                    conn: Some(conn),
+                    addr,
+                    cluster: cluster.to_tx(),
+                    retries: 0,
+                };
+                let _thrd = Thread::spawn_sync("handshake", 1, hs);
+
+                Ok(false)
             }
-        };
-
-        let hs = Handshake {
-            conn: Some(conn),
-            addr,
-            cluster: cluster.to_tx(),
-            retries: 0,
-        };
-        let _thrd = Thread::spawn_sync("handshake", 1, hs);
-
-        Ok(false)
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(true),
+            Err(err) => err!(AcceptFailed, try: Err(err)),
+        }
     }
 
     fn handle_close(&mut self, _req: Request) -> Result<Response> {
@@ -325,6 +322,7 @@ impl Listener {
 }
 
 struct Handshake {
+    prefix: String,
     conn: Option<mio::net::TcpStream>,
     addr: net::SocketAddr,
     cluster: Cluster,
@@ -335,7 +333,7 @@ impl Threadable for Handshake {
     type Req = ();
     type Resp = ();
 
-    fn main_loop(mut self, _rx: Rx<(), ()>) -> Result<Self> {
+    fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         use crate::{v5::Packet, MAX_SOCKET_RETRY};
 
         info!("new connection {}", self.addr);
@@ -345,35 +343,49 @@ impl Threadable for Handshake {
 
         let pkt_connect = loop {
             packetr = match packetr.read(&conn) {
-                Ok((pr, true)) if self.retries < MAX_SOCKET_RETRY => {
+                Ok((pr, true /*retry*/)) if self.retries < MAX_SOCKET_RETRY => {
                     self.retries += 1;
                     pr
                 }
                 Ok((_pr, true)) => {
-                    err!(IOError, desc: "handshake fail after {} retries", self.retries)?
+                    break err!(
+                        InsufficientBytes,
+                        desc: "{} fail after {} retries",
+                        self.prefix,
+                        self.retries
+                    )
                 }
                 Ok((pr, false)) => match pr.parse() {
-                    Ok(Packet::Connect(pkt_connect)) => break pkt_connect,
+                    Ok(Packet::Connect(pkt_connect)) => break Ok(pkt_connect),
                     Ok(pkt) => {
                         // SPEC: After a Network Connection is established by a Client to
                         // a Server, the first packet sent from the Client to the
                         // Server MUST be a CONNECT packet [MQTT-3.1.0-1].
-                        err!(
+                        break err!(
                             IOError,
-                            desc: "unexpect {:?} on new connection",
+                            desc: "{} unexpect {:?} on new connection",
+                            self.prefix,
                             pkt.to_packet_type()
-                        )?
+                        );
                     }
                     Err(err) => {
-                        err!(IOError, desc: "{} handshake parse failed {}", addr, err)?
+                        break err!(IOError, desc: "{} parse failed {}", self.prefix, err);
                     }
                 },
-                Err(err) => err!(IOError, desc: "{} handshake failed {}", addr, err)?,
+                Err(err) => {
+                    break err!(IOError, desc: "{} read failed {}", self.prefix, err)
+                }
             };
         };
 
-        err!(IPCFail, try: self.cluster.add_connection(conn, addr, pkt_connect))?;
+        match pkt_connect {
+            Ok(pkt_connect) => {
+                err!(IPCFail, try: self.cluster.add_connection(conn, addr, pkt_connect))
+                    .ok();
+            }
+            Err(_) => (),
+        }
 
-        Ok(self)
+        self
     }
 }

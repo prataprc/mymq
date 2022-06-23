@@ -113,12 +113,29 @@ macro_rules! log_error {
         use std::backtrace::BacktraceStatus::*;
 
         error!("{}: {}", $e.kind, $e.description);
+        match &$e.cause {
+            Some(cause) => error!("cause:{}", cause.to_string()),
+            None => (),
+        }
 
         #[cfg(feature = "backtrace")]
         match $e.backtrace.status() {
             Unsupported => error!("[BACKTRACE Unsupported]"),
             Disabled => error!("[BACKTRACE Disabled]"),
             Captured => $e.backtrace.frames().for_each(|f| error!("{:?}", f)),
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! allow_panic {
+    ($($args:expr),+) => {{
+        match $($args),+ {
+            Ok(()) => (),
+            Err(err) => {
+                error!("Now we are going to panic");
+                panic!("{}", err);
+            }
         }
     }};
 }
@@ -148,7 +165,7 @@ impl Default for Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(f, "{}", self.description)
+        write!(f, "{}:{}", self.kind, self.description)
     }
 }
 
@@ -237,18 +254,24 @@ impl Error {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
     NoError,
+    // general error
     Fatal,
+    InvalidInput,
+    FailConvert,
+    // mqtt errors
     UnsupportedProtocolVersion,
     InsufficientBytes,
     MalformedPacket,
     ProtocolError,
-    InvalidInput,
     PayloadTooLong,
-    FailConvert,
+    // network error
     WouldBlock,
+    AcceptFailed,
+    // thread / ipc error
     ThreadFail,
     IPCFail,
     Disconnected,
+    // chain of error
     TryFromIntError,
     IOError,
 }
@@ -259,18 +282,24 @@ impl fmt::Display for ErrorKind {
 
         match self {
             NoError => write!(f, "NoError"),
+            // general error
             Fatal => write!(f, "Fatal"),
+            InvalidInput => write!(f, "InvalidInput"),
+            FailConvert => write!(f, "FailConvert"),
+            // mqtt errors
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
             ProtocolError => write!(f, "ProtocolError"),
-            InvalidInput => write!(f, "InvalidInput"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
-            FailConvert => write!(f, "FailConvert"),
+            // network error
             WouldBlock => write!(f, "WouldBlock"),
+            AcceptFailed => write!(f, "AcceptFailed"),
+            // thread / ipc error
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
             Disconnected => write!(f, "Disconnected"),
+            // chain of error
             TryFromIntError => write!(f, "TryFromIntError"),
             IOError => write!(f, "IOError"),
         }

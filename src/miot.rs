@@ -1,10 +1,13 @@
 use log::{debug, error, info};
+use mio::Events;
 
 use std::{collections::BTreeMap, net, sync::Arc, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{ClientID, Config, Shard};
 use crate::{Error, ErrorKind, Result};
+
+type ThreadRx = Rx<Request, Result<Response>>;
 
 pub struct Miot {
     /// Human readable name for this miot thread.
@@ -196,46 +199,45 @@ impl Threadable for Miot {
     type Req = Request;
     type Resp = Result<Response>;
 
-    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
+    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         info!("{} spawn chan_size:{} ...", self.pp(), self.chan_size);
 
         let mut events = mio::Events::with_capacity(2);
-        loop {
+        let res = loop {
             let timeout: Option<time::Duration> = None;
             match self.as_mut_poll().poll(&mut events, timeout) {
                 Ok(()) => (),
                 Err(err) => {
-                    error!("{} poll error `{}`", self.pp(), err);
-                    self.as_shard().failed_miot().unwrap();
-                    err!(IOError, try: Err(err))?
+                    break err!(IOError, try: Err(err), "{} poll error", self.pp());
                 }
             }
-            let es: Vec<mio::event::Event> = events.iter().map(|e| e.clone()).collect();
-            debug!("{} polled and got {} events", self.pp(), es.len());
 
-            let exit = match self.mio_events(&rx, es) {
-                Ok(exit) => exit,
+            match self.mio_events(&rx, &events) {
+                Ok(true) => break Ok(()),
+                Ok(false) => (),
                 Err(err) => {
-                    error!("{} exiting with failure `{}`", self.pp(), err);
-                    self.as_shard().failed_miot().unwrap();
                     break Err(err);
                 }
             };
+        };
 
-            if exit {
-                break Ok(self);
+        match res {
+            Ok(()) => {
+                info!("{} thread normal exit...", self.pp());
+            }
+            Err(err) => {
+                error!("{} fatal error, try restarting thread `{}`", self.pp(), err);
+                // TODO: allow_panic!(self.as_cluster().restart_miot());
             }
         }
+
+        self
     }
 }
 
 impl Miot {
     // return whether we are doing normal exit.
-    fn mio_events(
-        &mut self,
-        _rx: &Rx<Request, Result<Response>>,
-        _es: Vec<mio::event::Event>,
-    ) -> Result<bool> {
+    fn mio_events(&mut self, _rx: &ThreadRx, _es: &Events) -> Result<bool> {
         todo!()
         //loop {
         //    match self.mio_chan(rx)? {
@@ -248,6 +250,7 @@ impl Miot {
         //        _ => break Ok(false),
         //    }
         //}
+        //debug!("{} polled and got {} events", self.pp(), es.len());
     }
 
     // Return (empty, disconnected)

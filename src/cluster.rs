@@ -220,7 +220,7 @@ pub enum Request {
     RemoveNodes {
         uuids: Vec<Uuid>,
     },
-    FailedThread {
+    RestartChild {
         name: &'static str,
     },
     AddConnection {
@@ -265,9 +265,9 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn failed_listener(&self) -> Result<()> {
+    pub fn restart_listener(&self) -> Result<()> {
         match &self.inner {
-            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "listener" })?,
+            Inner::Tx(tx) => tx.post(Request::RestartChild { name: "listener" })?,
             _ => unreachable!(),
         };
 
@@ -276,7 +276,7 @@ impl Cluster {
 
     pub fn failed_shard(&self) -> Result<()> {
         match &self.inner {
-            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "shard" })?,
+            Inner::Tx(tx) => tx.post(Request::RestartChild { name: "shard" })?,
             _ => unreachable!(),
         };
 
@@ -306,7 +306,7 @@ impl Threadable for Cluster {
     type Req = Request;
     type Resp = Result<Response>;
 
-    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
+    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         use crate::thread::pending_requests;
         use Request::*;
 
@@ -322,40 +322,41 @@ impl Threadable for Cluster {
 
         let mut closed = false;
         loop {
-            let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            let (mut qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            if closed {
+                info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+                qs.drain(..);
+            } else {
+                debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+            }
+
             for q in qs.into_iter() {
-                if closed {
-                    continue;
-                }
-                match q {
-                    (q @ Set { .. }, Some(tx)) => {
-                        err!(IPCFail, try: tx.send(self.handle_set(q)))?
+                let res = match q {
+                    (q @ Set { .. }, Some(tx)) => tx.send(self.handle_set(q)),
+                    (q @ AddNodes { .. }, Some(tx)) => tx.send(self.handle_add_nodes(q)),
+                    (q @ RemoveNodes { .. }, Some(tx)) => {
+                        tx.send(self.handle_remove_nodes(q))
                     }
-                    (q @ AddNodes { .. }, Some(tx)) => {
-                        err!(IPCFail, try: tx.send(self.handle_add_nodes(q)))?
+                    (RestartChild { name: "listener" }, None) => todo!(),
+                    (RestartChild { name: "shard" }, None) => todo!(),
+                    (q @ AddConnection { .. }, Some(tx)) => {
+                        tx.send(self.handle_add_connection(q))
                     }
-                    (q @ RemoveNodes { .. }, Some(tx)) => err!(
-                        IPCFail,
-                        try: tx.send(self.handle_remove_nodes(q))
-                    )?,
-                    (FailedThread { name: "listener" }, None) => {
-                        let msg = "listener-failed".to_string();
-                        err!(IPCFail, try: self.as_app_tx().send(msg))?
-                    }
-                    (FailedThread { name: "shard" }, None) => {
-                        let msg = "shard-failed".to_string();
-                        err!(IPCFail, try: self.as_app_tx().send(msg))?
-                    }
-                    (q @ AddConnection { .. }, Some(tx)) => err!(
-                        IPCFail,
-                        try: tx.send(self.handle_add_connection(q))
-                    )?,
                     (q @ Close, Some(tx)) => {
                         closed = true;
-                        err!(IPCFail, try: tx.send(self.handle_close(q)))?
+                        tx.send(self.handle_close(q))
                     }
 
                     (_, _) => unreachable!(),
+                };
+                match res {
+                    Ok(()) if closed => break,
+                    Ok(()) => (),
+                    Err(err) => {
+                        let msg = format!("fatal error, {}", err.to_string());
+                        allow_panic!(self.as_app_tx().send(msg));
+                        break;
+                    }
                 }
             }
 
@@ -364,7 +365,8 @@ impl Threadable for Cluster {
             }
         }
 
-        Ok(self)
+        info!("{} thread normal exit...", self.pp());
+        self
     }
 }
 

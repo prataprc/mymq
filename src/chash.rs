@@ -35,7 +35,7 @@ impl ConsistentHash {
 
                 Ok(ch)
             }
-            None => err!(InvalidInput, desc: "Atleast one node must be a in cluster"),
+            None => err!(InvalidInput, desc: "Atleast one node must be in cluster"),
         }
     }
 

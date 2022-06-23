@@ -208,7 +208,7 @@ impl Packetize for VarU32 {
             }
         }
 
-        err!(MalformedPacket, code: MalformedPacket, "VarU32::read")
+        err!(MalformedPacket, code: MalformedPacket, "VarU32::decode")
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -236,7 +236,7 @@ impl Packetize for VarU32 {
                 data[3] = ((val >> 21) & 0x7f_u32) as u8;
                 4
             }
-            val => err!(InvalidInput, desc: "VarU32:write({})", val)?,
+            val => err!(InvalidInput, desc: "VarU32::encode({})", val)?,
         };
 
         Ok(Blob::Small { data, size })
@@ -353,7 +353,11 @@ impl Packetize for String {
 
         match std::str::from_utf8(&stream[2..2 + len]) {
             Ok(s) if s.chars().any(util::is_invalid_utf8_code_point) => {
-                err!(MalformedPacket, code: MalformedPacket, "invalid utf8 string")
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "String::encode invalid utf8 string"
+                )
             }
             Ok(s) => Ok((s.to_string(), 2 + len)),
             Err(err) => {
@@ -364,12 +368,12 @@ impl Packetize for String {
 
     fn encode(&self) -> Result<Blob> {
         if self.chars().any(util::is_invalid_utf8_code_point) {
-            return err!(InvalidInput, desc: "invalid utf8 string");
+            return err!(InvalidInput, desc: "String::encode invalid utf8 string");
         }
 
         match self.len() {
             n if n > (u16::MAX as usize) => {
-                err!(InvalidInput, desc: "String too large {:?}", n)
+                err!(InvalidInput, desc: "String::encode too large {:?}", n)
             }
             n if n < 30 => {
                 let mut data = [0_u8; 32];
@@ -394,7 +398,7 @@ impl Packetize for Vec<u8> {
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
         if len + 2 > stream.len() {
-            return err!(InsufficientBytes, code: MalformedPacket, "Vector::read");
+            return err!(InsufficientBytes, code: MalformedPacket, "Vector::decode");
         }
         Ok((stream[2..2 + len].to_vec(), 2 + len))
     }
@@ -402,7 +406,7 @@ impl Packetize for Vec<u8> {
     fn encode(&self) -> Result<Blob> {
         match self.len() {
             n if n > (u16::MAX as usize) => {
-                err!(InvalidInput, desc: "Vector::write({})", n)
+                err!(InvalidInput, desc: "Vector::encode({})", n)
             }
             n => {
                 let mut data = Vec::with_capacity(2 + n);

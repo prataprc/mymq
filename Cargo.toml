@@ -7,6 +7,10 @@ edition = "2021"
 name = "mqcl"
 required-features = ["mqcl"]
 
+[[bin]]
+name = "play"
+required-features = ["play"]
+
 [dependencies]
 log = "0.4.17"
 rand = { version = "0.8.5", features = ["std_rng"] }
@@ -28,3 +32,4 @@ arbitrary = { version = "1.1.0", features = ["derive"] }
 backtrace = []
 fuzzy = ["arbitrary"]
 mqcl = ["structopt", "env_logger"]
+play = ["structopt", "env_logger"]

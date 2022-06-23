@@ -216,7 +216,7 @@ impl Threadable for Shard {
     type Req = Request;
     type Resp = Result<Response>;
 
-    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self> {
+    fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         use crate::thread::pending_requests;
         use Request::*;
 
@@ -224,28 +224,39 @@ impl Threadable for Shard {
 
         let mut closed = false;
         loop {
-            let (qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            let (mut qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            if closed {
+                info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+                qs.drain(..);
+            } else {
+                debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+            }
+
             for q in qs.into_iter() {
-                if closed {
-                    continue;
-                }
-                match q {
+                let res = match q {
                     (SetMiot(miot_handle), Some(tx)) => {
-                        err!(IPCFail, try: tx.send(self.handle_set_miot(miot_handle)))?
+                        tx.send(self.handle_set_miot(miot_handle))
                     }
-                    (q @ AddSession { .. }, Some(tx)) => err!(
-                        IPCFail,
-                        try: tx.send(self.handle_add_session(q))
-                    )?,
-                    (FailedThread { name: "miot" }, None) => {
-                        self.as_cluster().failed_shard().unwrap();
-                        err!(ThreadFail, desc: "miot thread failed, cascading")?
+                    (q @ AddSession { .. }, Some(tx)) => {
+                        tx.send(self.handle_add_session(q))
                     }
+                    (FailedThread { name: "miot" }, None) => todo!(),
                     (Close, Some(tx)) => {
                         closed = true;
-                        err!(IPCFail, try: tx.send(self.handle_close()))?
+                        tx.send(self.handle_close())
                     }
+
                     (_, _) => unreachable!(),
+                };
+                match res {
+                    Ok(()) if closed => break,
+                    Ok(()) => (),
+                    Err(err) => {
+                        let msg = format!("fatal error, {}", err.to_string());
+                        // TODO
+                        // allow_panic!(self.as_app_tx().send(msg));
+                        break;
+                    }
                 }
             }
 
@@ -254,7 +265,8 @@ impl Threadable for Shard {
             }
         }
 
-        Ok(self)
+        info!("{} thread normal exit...", self.pp());
+        self
     }
 }
 

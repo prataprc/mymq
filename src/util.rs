@@ -9,7 +9,7 @@ pub fn u8_to_bool(val: u8, what: &str) -> Result<bool> {
     match val {
         0 => Ok(false),
         1 => Ok(true),
-        v => err!(ProtocolError, code: ProtocolError, "invalid {:?}, {:?}", what, v),
+        v => err!(ProtocolError, code: ProtocolError, "invalid bool {:?}, {:?}", what, v),
     }
 }
 

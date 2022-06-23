@@ -4,8 +4,6 @@
 //! expected to hold onto its own state, and handle all inter-thread communication
 //! via channels and message queues.
 
-use log::info;
-
 use std::{sync::mpsc, thread};
 
 use crate::{Error, ErrorKind, Result};
@@ -14,7 +12,7 @@ pub trait Threadable: Sized {
     type Req;
     type Resp;
 
-    fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Result<Self>;
+    fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Self;
 }
 
 /// IPC type, that enumerates as either [mpsc::Sender] or, [mpsc::SyncSender] channel.
@@ -98,7 +96,7 @@ where
     R: 'static + Send,
 {
     name: String,
-    handle: Option<thread::JoinHandle<Result<T>>>,
+    handle: Option<thread::JoinHandle<T>>,
     tx: Option<Tx<Q, R>>,
 }
 
@@ -168,11 +166,7 @@ where
 
         let handle = self.handle.take().unwrap();
         match handle.join() {
-            Ok(Ok(thread_val)) => {
-                info!("closing thread {:?} ...", self.name);
-                Ok(thread_val)
-            }
-            Ok(Err(err)) => Err(err),
+            Ok(thread_val) => Ok(thread_val),
             Err(err) => panic::resume_unwind(err),
         }
     }

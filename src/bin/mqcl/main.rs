@@ -28,6 +28,7 @@ pub enum SubCommand {
 
 fn main() {
     setup_logging();
+    println!("{:?}", mqtr::v5::PropertyType::UserProp);
 
     let opts = Opt::from_args();
 
