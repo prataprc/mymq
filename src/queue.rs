@@ -1,7 +1,8 @@
 use std::{net, sync::mpsc};
 
+use crate::packet::{PacketRead, PacketWrite};
 use crate::Result;
-use crate::{packet::PacketRead, v5, ClientID};
+use crate::{v5, ClientID};
 
 pub type QueueTx = mpsc::SyncSender<v5::Packet>;
 pub type QueueRx = mpsc::Receiver<Result<v5::Packet>>;
@@ -34,8 +35,7 @@ impl SocketRd {
 }
 
 pub struct SocketWt {
-    pub data: Vec<u8>,
-    pub start: usize,
+    pub pw: PacketWrite,
     pub msg_rx: QueueRx,
     pub packets: Vec<v5::Packet>,
 }

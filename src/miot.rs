@@ -3,9 +3,10 @@ use mio::Events;
 
 use std::{collections::BTreeMap, net, sync::Arc, time};
 
+use crate::packet::{PacketRead, PacketWrite};
 use crate::queue::{Queue, QueueRx, QueueTx, SocketRd, SocketWt};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{packet::PacketRead, v5, ClientID, Config, Shard};
+use crate::{v5, ClientID, Config, Shard};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -291,7 +292,6 @@ impl Miot {
     }
 
     fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
-        use crate::MSG_TYPICAL_SIZE;
         use mio::Interest;
 
         let (client_id, mut conn, addr, msg_tx, msg_rx) = match req {
@@ -324,8 +324,7 @@ impl Miot {
                 packets: Vec::default(),
             };
             let wt = SocketWt {
-                data: Vec::with_capacity(MSG_TYPICAL_SIZE),
-                start: 0,
+                pw: PacketWrite::new(&[]),
                 msg_rx,
                 packets: Vec::default(),
             };
@@ -366,49 +365,59 @@ impl Miot {
 }
 
 impl Miot {
-    fn read_conns(&mut self) {
-        todo!()
-        //let (conns, closed) = match &self.inner {
-        //    Inner::Main(RunLoop { conns, closed, .. }) => (conns, closed),
-        //    _ => unreachable!(),
-        //};
+    fn read_conns(&mut self) -> Result<()> {
+        let prefix = self.pp();
 
-        //if closed {
-        //    info!("{} skipping read connections closed:{}", self.pp(), closed);
-        //} else {
-        //    for (client_id, conn) in conns.iter_mut() {
-        //        self.read_packets(client_id, conn)?
-        //    }
-        //}
+        let (conns, closed) = match &mut self.inner {
+            Inner::Main(RunLoop { conns, closed, .. }) => (conns, *closed),
+            _ => unreachable!(),
+        };
+
+        if closed {
+            info!("{} skipping closed:{}", prefix, closed);
+        } else {
+            debug!("{} process closed:{}", prefix, closed);
+        }
+
+        // if thread is closed, conns will be empty.
+        for (_, queue) in conns.iter_mut() {
+            Self::read_packets(&prefix, queue)?;
+        }
+
+        Ok(())
     }
 
-    // return packets from connection.  return (block,)
-    fn read_packets(&self, queue: &mut Queue) -> Result<bool> {
+    // return packets from connection.
+    fn read_packets(prefix: &str, queue: &mut Queue) -> Result<()> {
         use crate::MSG_CHANNEL_SIZE;
 
         // before reading from socket, send packets to shard.
-        let upstream_block = self.send_packets(queue)?;
+        let upstream_block = Self::send_upstream(prefix, queue)?;
         match upstream_block {
-            true => Ok(true),
+            true => Ok(()),
             false => {
                 //
                 loop {
-                    match self.read_packet(queue)? {
+                    match Self::read_packet(prefix, queue)? {
                         Some(pkt) if queue.rd.packets.len() < MSG_CHANNEL_SIZE => {
                             queue.rd.packets.push(pkt);
                         }
                         Some(pkt) => {
+                            Self::send_upstream(prefix, queue)?;
                             queue.rd.packets.push(pkt);
-                            break Ok(false);
+                            break Ok(());
                         }
-                        None => break Ok(true),
+                        None => {
+                            Self::send_upstream(prefix, queue)?;
+                            break Ok(());
+                        }
                     }
                 }
             }
         }
     }
 
-    fn read_packet(&self, queue: &mut Queue) -> Result<Option<v5::Packet>> {
+    fn read_packet(prefix: &str, queue: &mut Queue) -> Result<Option<v5::Packet>> {
         use crate::MAX_SOCKET_RETRY;
         use std::mem;
 
@@ -425,7 +434,7 @@ impl Miot {
                 err!(
                     InsufficientBytes,
                     desc: "{} fail after {} retries",
-                    self.pp(),
+                    prefix,
                     queue.rd.retries
                 )?;
             } else {
@@ -435,7 +444,7 @@ impl Miot {
                         break Ok(Some(pkt));
                     }
                     Err(err) => err!(
-                        IOError, desc: "{} parse failed {}", self.pp(), err
+                        IOError, desc: "{} parse failed {}", prefix, err
                     )?,
                 }
             };
@@ -445,8 +454,8 @@ impl Miot {
         res
     }
 
-    // return (upstream-block,)
-    fn send_packets(&self, queue: &mut Queue) -> Result<bool> {
+    // return (block,)
+    fn send_upstream(prefix: &str, queue: &mut Queue) -> Result<bool> {
         use std::sync::mpsc;
 
         let mut iter = {
@@ -466,7 +475,7 @@ impl Miot {
                         err!(
                             Disconnected,
                             desc: "{} upstream channel disconnected",
-                            self.pp()
+                            prefix
                         )?;
                     }
                 },
@@ -483,6 +492,14 @@ impl Miot {
     }
 
     fn write_packets(&mut self) {
+        todo!()
+    }
+
+    fn write_packet(&mut self) {
+        todo!()
+    }
+
+    fn send_downstream(&mut self) {
         todo!()
     }
 }
