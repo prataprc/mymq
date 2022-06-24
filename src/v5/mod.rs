@@ -1,8 +1,6 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
 
-use std::{io, thread, time};
-
 use crate::{util::advance, Blob, Packetize, Result, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
@@ -89,224 +87,6 @@ macro_rules! enc_prop {
     }};
 }
 
-/// All that is MQTT
-#[derive(Debug, Clone, PartialEq)]
-pub enum Packet {
-    Connect(Connect),
-    ConnAck(ConnAck),
-    Publish(Publish),
-    PubAck(Pub),
-    PubRec(Pub),
-    PubRel(Pub),
-    PubComp(Pub),
-    Subscribe(Subscribe),
-    SubAck(SubAck),
-    UnSubscribe(UnSubscribe),
-    UnsubAck(UnsubAck),
-    PingReq,
-    PingResp,
-    Disconnect(Disconnect),
-    Auth(Auth),
-}
-
-impl Packet {
-    pub fn to_packet_type(&self) -> PacketType {
-        match self {
-            Packet::Connect(_) => PacketType::Connect,
-            Packet::ConnAck(_) => PacketType::ConnAck,
-            Packet::Publish(_) => PacketType::Publish,
-            Packet::PubAck(_) => PacketType::PubAck,
-            Packet::PubRec(_) => PacketType::PubRec,
-            Packet::PubRel(_) => PacketType::PubRel,
-            Packet::PubComp(_) => PacketType::PubComp,
-            Packet::Subscribe(_) => PacketType::Subscribe,
-            Packet::SubAck(_) => PacketType::SubAck,
-            Packet::UnSubscribe(_) => PacketType::UnSubscribe,
-            Packet::UnsubAck(_) => PacketType::UnsubAck,
-            Packet::PingReq => PacketType::PingReq,
-            Packet::PingResp => PacketType::PingResp,
-            Packet::Disconnect(_) => PacketType::Disconnect,
-            Packet::Auth(_) => PacketType::Auth,
-        }
-    }
-}
-
-pub enum PacketRead {
-    Init { bytes: Vec<u8> },
-    Header { byte1: u8, bytes: Vec<u8> },
-    Remain { bytes: Vec<u8>, fh: FixedHeader },
-    Fin { bytes: Vec<u8>, fh: FixedHeader },
-}
-
-impl PacketRead {
-    pub fn new() -> PacketRead {
-        PacketRead::Init { bytes: Vec::with_capacity(1024) }
-    }
-
-    pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool)> {
-        use crate::{MAX_CONNECT_TIMEOUT, MAX_SOCKET_RETRY};
-        use PacketRead::{Fin, Header, Init, Remain};
-
-        let dur = MAX_CONNECT_TIMEOUT / MAX_SOCKET_RETRY;
-
-        let mut scratch = [0_u8; 5];
-        match self {
-            Init { mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc: "PacketRead::Init")?,
-                Ok(1) => Ok((PacketRead::Header { byte1: scratch[0], bytes }, true)),
-                Ok(n) => {
-                    let byte1 = scratch[0];
-                    match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
-                        Some(_) => {
-                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
-                            bytes.extend_from_slice(&scratch[m + 1..n]);
-                            bytes.reserve(*remaining_len as usize);
-                            let fh = FixedHeader { byte1, remaining_len };
-                            Ok((PacketRead::Remain { bytes, fh }, true))
-                        }
-                        None => {
-                            bytes.extend_from_slice(&scratch[1..n]);
-                            Ok((PacketRead::Header { byte1, bytes }, true))
-                        }
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(time::Duration::from_millis(dur));
-                    Ok((PacketRead::Init { bytes }, true))
-                }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Init"),
-            },
-            Header { byte1, mut bytes } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  "PacketRead::Header"),
-                Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
-                    Some(_) => {
-                        bytes.extend_from_slice(&scratch[..n]);
-                        let (remaining_len, m) = VarU32::decode(&bytes)?;
-                        bytes.truncate(0);
-                        bytes.extend_from_slice(&scratch[m..n]);
-                        bytes.reserve(*remaining_len as usize);
-                        let fh = FixedHeader { byte1, remaining_len };
-                        Ok((PacketRead::Remain { bytes, fh }, true))
-                    }
-                    None => {
-                        bytes.extend_from_slice(&scratch[..n]);
-                        Ok((PacketRead::Header { byte1, bytes }, true))
-                    }
-                },
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(time::Duration::from_millis(dur));
-                    Ok((PacketRead::Header { byte1, bytes }, true))
-                }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Header"),
-            },
-            Remain { mut bytes, fh } => {
-                let m = bytes.len();
-                unsafe { bytes.set_len(*fh.remaining_len as usize) };
-                match stream.read(&mut bytes[m..]) {
-                    Ok(0) => err!(Disconnected, desc:  "PacketRead::Remain"),
-                    Ok(n) if (m + n) == (*fh.remaining_len as usize) => {
-                        Ok((PacketRead::Fin { bytes, fh }, false))
-                    }
-                    Ok(n) => {
-                        unsafe { bytes.set_len(m + n) };
-                        Ok((PacketRead::Remain { bytes, fh }, true))
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(time::Duration::from_millis(dur));
-                        Ok((PacketRead::Remain { bytes, fh }, true))
-                    }
-                    Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Remain"),
-                }
-            }
-            Fin { bytes, fh } => Ok((PacketRead::Fin { bytes, fh }, false)),
-        }
-    }
-
-    pub fn parse(&self) -> Result<Packet> {
-        let (pkt, n, m) = match self {
-            PacketRead::Fin { bytes, fh } => match fh.unwrap()?.0 {
-                PacketType::Connect => {
-                    let (pkt, n) = Connect::decode(&bytes)?;
-                    (Packet::Connect(pkt), n, bytes.len())
-                }
-                PacketType::ConnAck => {
-                    let (pkt, n) = ConnAck::decode(&bytes)?;
-                    (Packet::ConnAck(pkt), n, bytes.len())
-                }
-                PacketType::Publish => {
-                    let (pkt, n) = Publish::decode(&bytes)?;
-                    (Packet::Publish(pkt), n, bytes.len())
-                }
-                PacketType::PubAck => {
-                    let (pkt, n) = Pub::decode(&bytes)?;
-                    (Packet::PubAck(pkt), n, bytes.len())
-                }
-                PacketType::PubRec => {
-                    let (pkt, n) = Pub::decode(&bytes)?;
-                    (Packet::PubRec(pkt), n, bytes.len())
-                }
-                PacketType::PubRel => {
-                    let (pkt, n) = Pub::decode(&bytes)?;
-                    (Packet::PubRel(pkt), n, bytes.len())
-                }
-                PacketType::PubComp => {
-                    let (pkt, n) = Pub::decode(&bytes)?;
-                    (Packet::PubComp(pkt), n, bytes.len())
-                }
-                PacketType::Subscribe => {
-                    let (pkt, n) = Subscribe::decode(&bytes)?;
-                    (Packet::Subscribe(pkt), n, bytes.len())
-                }
-                PacketType::SubAck => {
-                    let (pkt, n) = SubAck::decode(&bytes)?;
-                    (Packet::SubAck(pkt), n, bytes.len())
-                }
-                PacketType::UnSubscribe => {
-                    let (pkt, n) = UnSubscribe::decode(&bytes)?;
-                    (Packet::UnSubscribe(pkt), n, bytes.len())
-                }
-                PacketType::UnsubAck => {
-                    let (pkt, n) = UnsubAck::decode(&bytes)?;
-                    (Packet::UnsubAck(pkt), n, bytes.len())
-                }
-                PacketType::PingReq => {
-                    let (_pkt, n) = PingReq::decode(&bytes)?;
-                    (Packet::PingReq, n, bytes.len())
-                }
-                PacketType::PingResp => {
-                    let (_pkt, n) = PingResp::decode(&bytes)?;
-                    (Packet::PingResp, n, bytes.len())
-                }
-                PacketType::Disconnect => {
-                    let (pkt, n) = Disconnect::decode(&bytes)?;
-                    (Packet::Disconnect(pkt), n, bytes.len())
-                }
-                PacketType::Auth => {
-                    let (pkt, n) = Auth::decode(&bytes)?;
-                    (Packet::Auth(pkt), n, bytes.len())
-                }
-            },
-            _ => unreachable!(),
-        };
-
-        if n != m {
-            err!(MalformedPacket, code: MalformedPacket, "PacketRead::Fin {}!={}", n, m)
-        } else {
-            Ok(pkt)
-        }
-    }
-
-    pub fn reset(self) -> Self {
-        match self {
-            PacketRead::Fin { mut bytes, .. } => {
-                bytes.truncate(0);
-                PacketRead::Init { bytes }
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// MQTT packet type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
@@ -373,6 +153,48 @@ impl From<PacketType> for u8 {
             PacketType::PingResp => 13,
             PacketType::Disconnect => 14,
             PacketType::Auth => 15,
+        }
+    }
+}
+
+/// All that is MQTT
+#[derive(Debug, Clone, PartialEq)]
+pub enum Packet {
+    Connect(Connect),
+    ConnAck(ConnAck),
+    Publish(Publish),
+    PubAck(Pub),
+    PubRec(Pub),
+    PubRel(Pub),
+    PubComp(Pub),
+    Subscribe(Subscribe),
+    SubAck(SubAck),
+    UnSubscribe(UnSubscribe),
+    UnsubAck(UnsubAck),
+    PingReq,
+    PingResp,
+    Disconnect(Disconnect),
+    Auth(Auth),
+}
+
+impl Packet {
+    pub fn to_packet_type(&self) -> PacketType {
+        match self {
+            Packet::Connect(_) => PacketType::Connect,
+            Packet::ConnAck(_) => PacketType::ConnAck,
+            Packet::Publish(_) => PacketType::Publish,
+            Packet::PubAck(_) => PacketType::PubAck,
+            Packet::PubRec(_) => PacketType::PubRec,
+            Packet::PubRel(_) => PacketType::PubRel,
+            Packet::PubComp(_) => PacketType::PubComp,
+            Packet::Subscribe(_) => PacketType::Subscribe,
+            Packet::SubAck(_) => PacketType::SubAck,
+            Packet::UnSubscribe(_) => PacketType::UnSubscribe,
+            Packet::UnsubAck(_) => PacketType::UnsubAck,
+            Packet::PingReq => PacketType::PingReq,
+            Packet::PingResp => PacketType::PingResp,
+            Packet::Disconnect(_) => PacketType::Disconnect,
+            Packet::Auth(_) => PacketType::Auth,
         }
     }
 }

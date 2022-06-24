@@ -266,7 +266,6 @@ pub enum ErrorKind {
     PayloadTooLong,
     // network error
     WouldBlock,
-    AcceptFailed,
     // thread / ipc error
     ThreadFail,
     IPCFail,
@@ -294,7 +293,6 @@ impl fmt::Display for ErrorKind {
             PayloadTooLong => write!(f, "PayloadTooLong"),
             // network error
             WouldBlock => write!(f, "WouldBlock"),
-            AcceptFailed => write!(f, "AcceptFailed"),
             // thread / ipc error
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),

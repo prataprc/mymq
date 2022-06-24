@@ -42,13 +42,13 @@ pub struct RunLoop {
 
 impl Default for Shard {
     fn default() -> Shard {
-        use crate::CHANNEL_SIZE;
+        use crate::REQ_CHANNEL_SIZE;
 
         let config = Config::default();
         Shard {
             name: format!("{}-shard-init", config.name),
             uuid: Uuid::new_v4(),
-            chan_size: CHANNEL_SIZE,
+            chan_size: REQ_CHANNEL_SIZE,
             config,
             n_sessions: Default::default(),
             inner: Inner::Init,
@@ -172,9 +172,9 @@ impl Shard {
         Ok(())
     }
 
-    pub fn failed_miot(&self) -> Result<()> {
+    pub fn restart_miot(&self) -> Result<()> {
         match &self.inner {
-            Inner::Tx(tx) => tx.post(Request::FailedThread { name: "miot" })?,
+            Inner::Tx(tx) => tx.post(Request::RestartChild { name: "miot" })?,
             _ => unreachable!(),
         };
 
@@ -202,7 +202,7 @@ pub enum Request {
         addr: net::SocketAddr,
         pkt: v5::Connect,
     },
-    FailedThread {
+    RestartChild {
         name: &'static str,
     },
     Close,
@@ -240,7 +240,7 @@ impl Threadable for Shard {
                     (q @ AddSession { .. }, Some(tx)) => {
                         tx.send(self.handle_add_session(q))
                     }
-                    (FailedThread { name: "miot" }, None) => todo!(),
+                    (RestartChild { name: "miot" }, None) => todo!(),
                     (Close, Some(tx)) => {
                         closed = true;
                         tx.send(self.handle_close())

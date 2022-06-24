@@ -51,7 +51,7 @@ pub struct RunLoop {
 
 impl Default for Cluster {
     fn default() -> Cluster {
-        use crate::CHANNEL_SIZE;
+        use crate::REQ_CHANNEL_SIZE;
 
         let config = Config::default();
         Cluster {
@@ -60,7 +60,7 @@ impl Default for Cluster {
             num_shards: config.num_shards.unwrap(),
             port: config.port.unwrap(),
             gods: Vec::default(),
-            chan_size: CHANNEL_SIZE,
+            chan_size: REQ_CHANNEL_SIZE,
             config,
             inner: Inner::Init,
         }

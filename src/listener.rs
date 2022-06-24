@@ -4,7 +4,7 @@ use mio::event::Events;
 use std::{net, sync::Arc, time};
 
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{v5, Cluster, Config};
+use crate::{Cluster, Config};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -39,13 +39,13 @@ pub struct RunLoop {
 
 impl Default for Listener {
     fn default() -> Listener {
-        use crate::CHANNEL_SIZE;
+        use crate::REQ_CHANNEL_SIZE;
 
         let config = Config::default();
         Listener {
             name: format!("{}-listener-init", config.name),
             port: config.port.unwrap(),
-            chan_size: CHANNEL_SIZE,
+            chan_size: REQ_CHANNEL_SIZE,
             config,
             inner: Inner::Init,
         }
@@ -198,21 +198,23 @@ impl Listener {
         let mut count = 0_usize;
         let mut iter = es.iter();
         let res = 'outer: loop {
-            if let Some(e) = iter.next() {
-                count += 1;
-                match e.token() {
-                    Self::TOKEN_WAKE => loop {
-                        match self.mio_chan(rx)? {
-                            (_empty, true) => break 'outer Ok(true),
-                            (true, _) => break,
-                            (_, _) => (),
-                        }
-                    },
-                    Self::TOKEN_SERVER => while !self.mio_conn()? {},
-                    _ => unreachable!(),
+            match iter.next() {
+                Some(e) => {
+                    count += 1;
+                    match e.token() {
+                        Self::TOKEN_WAKE => loop {
+                            match self.mio_chan(rx)? {
+                                (_empty, true) => break 'outer Ok(true),
+                                (true, _disconnected) => break,
+                                (false, false) => (),
+                            }
+                        },
+                        Self::TOKEN_SERVER => while !self.mio_conn() {},
+                        _ => unreachable!(),
+                    }
                 }
+                None => break Ok(false),
             }
-            break Ok(false);
         };
         debug!("{} polled and got {} events", self.pp(), count);
 
@@ -250,8 +252,8 @@ impl Listener {
         Ok((empty, disconnected))
     }
 
-    // Return empty
-    fn mio_conn(&mut self) -> Result<bool> {
+    // Return would_block
+    fn mio_conn(&mut self) -> bool {
         use std::io;
 
         let (server, cluster) = match &self.inner {
@@ -266,14 +268,15 @@ impl Listener {
                     conn: Some(conn),
                     addr,
                     cluster: cluster.to_tx(),
-                    retries: 0,
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
-
-                Ok(false)
+                false
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(true),
-            Err(err) => err!(AcceptFailed, try: Err(err)),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
+            Err(err) => {
+                error!("{} accept-failed {}", self.pp(), err);
+                false
+            }
         }
     }
 
@@ -326,7 +329,6 @@ struct Handshake {
     conn: Option<mio::net::TcpStream>,
     addr: net::SocketAddr,
     cluster: Cluster,
-    retries: u64,
 }
 
 impl Threadable for Handshake {
@@ -334,48 +336,47 @@ impl Threadable for Handshake {
     type Resp = ();
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
-        use crate::{v5::Packet, MAX_SOCKET_RETRY};
+        use crate::{packet::PacketRead, v5, MAX_CONNECT_TIMEOUT, MAX_SOCKET_RETRY};
+        use std::thread;
 
         info!("new connection {}", self.addr);
 
-        let mut packetr = v5::PacketRead::new();
+        let mut packetr = PacketRead::new();
         let (conn, addr) = (self.conn.take().unwrap(), self.addr);
+        let dur = MAX_CONNECT_TIMEOUT / u64::try_from(MAX_SOCKET_RETRY).unwrap();
+        let (mut retries, prefix) = (0, self.prefix.clone());
 
         let pkt_connect = loop {
             packetr = match packetr.read(&conn) {
-                Ok((pr, true /*retry*/)) if self.retries < MAX_SOCKET_RETRY => {
-                    self.retries += 1;
+                Ok((pr, true, _)) if retries < MAX_SOCKET_RETRY => {
+                    retries += 1;
                     pr
                 }
-                Ok((_pr, true)) => {
+                Ok((_pr, true, _)) => {
                     break err!(
                         InsufficientBytes,
                         desc: "{} fail after {} retries",
-                        self.prefix,
-                        self.retries
+                        prefix,
+                        retries
                     )
                 }
-                Ok((pr, false)) => match pr.parse() {
-                    Ok(Packet::Connect(pkt_connect)) => break Ok(pkt_connect),
+                Ok((pr, false, _)) => match pr.parse() {
+                    Ok(v5::Packet::Connect(pkt_connect)) => break Ok(pkt_connect),
                     Ok(pkt) => {
-                        // SPEC: After a Network Connection is established by a Client to
-                        // a Server, the first packet sent from the Client to the
-                        // Server MUST be a CONNECT packet [MQTT-3.1.0-1].
                         break err!(
                             IOError,
                             desc: "{} unexpect {:?} on new connection",
-                            self.prefix,
+                            prefix,
                             pkt.to_packet_type()
                         );
                     }
                     Err(err) => {
-                        break err!(IOError, desc: "{} parse failed {}", self.prefix, err);
+                        break err!(IOError, desc: "{} parse failed {}", prefix, err);
                     }
                 },
-                Err(err) => {
-                    break err!(IOError, desc: "{} read failed {}", self.prefix, err)
-                }
+                Err(err) => break err!(IOError, desc: "{} read failed {}", prefix, err),
             };
+            thread::sleep(time::Duration::from_millis(dur));
         };
 
         match pkt_connect {
