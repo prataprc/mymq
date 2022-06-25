@@ -49,6 +49,7 @@ pub const MQTT_PORT: u16 = 1883;
 pub const REQ_CHANNEL_SIZE: usize = 1024;
 pub const MSG_CHANNEL_SIZE: usize = 1024;
 pub const MAX_SOCKET_RETRY: usize = 128;
+pub const MAX_FLUSH_RETRY: usize = 16;
 pub const MAX_CONNECT_TIMEOUT: u64 = 4000; // in milli-seconds.
 pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 pub const MSG_TYPICAL_SIZE: usize = 1024;
@@ -59,7 +60,9 @@ pub const MSG_TYPICAL_SIZE: usize = 1024;
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Trait for protocol framing, data-encoding and decoding.
+/// Trait for protocol framing, data-encoding and decoding. Shall return one of the
+/// following error-kind: `ProtocolError`, `PacketEncode`, `PacketDecode`,
+/// `MalformedPacket`.
 pub trait Packetize: Sized {
     /// Deserialize bytes and construct a packet or packet's field. Upon error, it is
     /// expected that the stream is left at meaningful boundry to re-detect the error.

@@ -259,17 +259,22 @@ pub enum ErrorKind {
     InvalidInput,
     FailConvert,
     // mqtt errors
+    ProtocolError,
+    PacketEncode,
+    PacketDecode,
     UnsupportedProtocolVersion,
     InsufficientBytes,
     MalformedPacket,
-    ProtocolError,
     PayloadTooLong,
     // network error
     WouldBlock,
+    Disconnected,
+    BadPacket,
     // thread / ipc error
     ThreadFail,
     IPCFail,
-    Disconnected,
+    RxClosed,
+    TxFinish,
     // chain of error
     TryFromIntError,
     IOError,
@@ -286,17 +291,22 @@ impl fmt::Display for ErrorKind {
             InvalidInput => write!(f, "InvalidInput"),
             FailConvert => write!(f, "FailConvert"),
             // mqtt errors
+            ProtocolError => write!(f, "ProtocolError"),
+            PacketEncode => write!(f, "PacketEncode"),
+            PacketDecode => write!(f, "PacketDecode"),
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
-            ProtocolError => write!(f, "ProtocolError"),
             PayloadTooLong => write!(f, "PayloadTooLong"),
             // network error
             WouldBlock => write!(f, "WouldBlock"),
+            Disconnected => write!(f, "Disconnected"),
+            BadPacket => write!(f, "BadPacket"),
             // thread / ipc error
             ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
-            Disconnected => write!(f, "Disconnected"),
+            RxClosed => write!(f, "RxClosed"),
+            TxFinish => write!(f, "TxFinish"),
             // chain of error
             TryFromIntError => write!(f, "TryFromIntError"),
             IOError => write!(f, "IOError"),

@@ -1,4 +1,4 @@
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use mio::event::Events;
 
 use std::{net, sync::Arc, time};
@@ -14,8 +14,7 @@ pub struct Listener {
     pub name: String,
     /// Port to listen to.
     pub port: u16,
-    /// Input channel size for this thread.
-    pub chan_size: usize,
+    prefix: String,
     config: Config,
     inner: Inner,
 }
@@ -39,16 +38,16 @@ pub struct RunLoop {
 
 impl Default for Listener {
     fn default() -> Listener {
-        use crate::REQ_CHANNEL_SIZE;
-
         let config = Config::default();
-        Listener {
+        let mut def = Listener {
             name: format!("{}-listener-init", config.name),
             port: config.port.unwrap(),
-            chan_size: REQ_CHANNEL_SIZE,
+            prefix: String::default(),
             config,
             inner: Inner::Init,
-        }
+        };
+        def.prefix = def.prefix();
+        def
     }
 }
 
@@ -58,12 +57,12 @@ impl Drop for Listener {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.pp()),
+            Inner::Init => debug!("{} drop ...", self.prefix),
             Inner::Handle(_waker, _thrd) => {
-                error!("{} invalid drop ...", self.pp());
-                panic!("{} invalid drop ...", self.pp());
+                error!("{} invalid drop ...", self.prefix);
+                panic!("{} invalid drop ...", self.prefix);
             }
-            Inner::Main(_run_loop) => info!("{} drop ...", self.pp()),
+            Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -75,14 +74,15 @@ impl Listener {
     /// Create a listener from configuration. Listener shall be in `Init` state, to start
     /// the listener thread call [Listener::spawn].
     pub fn from_config(config: Config) -> Result<Listener> {
-        let l = Listener::default();
-        let val = Listener {
-            name: format!("{}-listener-init", config.name),
-            port: config.port.unwrap_or(l.port),
-            chan_size: l.chan_size,
+        let def = Listener::default();
+        let mut val = Listener {
+            name: def.name.clone(),
+            port: config.port.unwrap_or(def.port),
+            prefix: String::default(),
             config,
             inner: Inner::Init,
         };
+        val.prefix = val.prefix();
 
         Ok(val)
     }
@@ -106,7 +106,7 @@ impl Listener {
         let listener = Listener {
             name: format!("{}-listener-main", self.config.name),
             port: self.port,
-            chan_size: self.chan_size,
+            prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
@@ -115,12 +115,12 @@ impl Listener {
                 closed: false,
             }),
         };
-        let thrd = Thread::spawn_sync(&self.name, self.chan_size, listener);
+        let thrd = Thread::spawn(&self.name, listener);
 
         let listener = Listener {
             name: format!("{}-listener-handle", self.config.name),
             port: self.port,
-            chan_size: self.chan_size,
+            prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
@@ -159,7 +159,7 @@ impl Threadable for Listener {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        info!("{} spawn port:{} chan_size:{} ...", self.pp(), self.port, self.chan_size);
+        info!("{} spawn port:{} ...", self.prefix, self.port,);
 
         let mut events = Events::with_capacity(2);
         let res = loop {
@@ -167,7 +167,7 @@ impl Threadable for Listener {
             match self.as_mut_poll().poll(&mut events, timeout) {
                 Ok(()) => (),
                 Err(err) => {
-                    break err!(IOError, try: Err(err), "{} poll error", self.pp())
+                    break err!(IOError, try: Err(err), "{} poll error", self.prefix)
                 }
             };
 
@@ -178,12 +178,17 @@ impl Threadable for Listener {
             };
         };
 
+        match self.handle_close(Request::Close) {
+            Ok(Response::Ok) => (),
+            Err(err) => error!("{} thread pre-exit close failed {}", self.prefix, err),
+        }
+
         match res {
             Ok(()) => {
-                info!("{} thread normal exit...", self.pp());
+                info!("{} thread normal exit...", self.prefix);
             }
             Err(err) => {
-                error!("{} fatal error, try restarting thread `{}`", self.pp(), err);
+                error!("{} fatal error, try restarting thread `{}`", self.prefix, err);
                 allow_panic!(self.as_cluster().restart_listener());
             }
         }
@@ -194,36 +199,38 @@ impl Threadable for Listener {
 
 impl Listener {
     // return whether we are doing normal exit, which is rx-disconnected
-    fn mio_events(&mut self, rx: &ThreadRx, es: &Events) -> Result<bool> {
+    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> Result<bool> {
         let mut count = 0_usize;
-        let mut iter = es.iter();
+        let mut iter = events.iter();
         let res = 'outer: loop {
             match iter.next() {
-                Some(e) => {
+                Some(event) => {
+                    trace!("{} poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
-                    match e.token() {
+
+                    match event.token() {
                         Self::TOKEN_WAKE => loop {
-                            match self.mio_chan(rx)? {
+                            match self.control_chan(rx)? {
                                 (_empty, true) => break 'outer Ok(true),
                                 (true, _disconnected) => break,
                                 (false, false) => (),
                             }
                         },
-                        Self::TOKEN_SERVER => while !self.mio_conn() {},
+                        Self::TOKEN_SERVER => while !self.accept_conn() {},
                         _ => unreachable!(),
                     }
                 }
                 None => break Ok(false),
             }
         };
-        debug!("{} polled and got {} events", self.pp(), count);
 
+        debug!("{} polled and got {} events", self.prefix, count);
         res
     }
 
     // Return (empty, disconnected)
-    fn mio_chan(&mut self, rx: &Rx<Request, Result<Response>>) -> Result<(bool, bool)> {
-        use crate::thread::pending_requests;
+    fn control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
+        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
         use Request::*;
 
         let closed = match &self.inner {
@@ -231,13 +238,13 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, self.chan_size);
+        let (mut qs, empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
 
         if closed {
-            info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+            info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
             qs.drain(..);
         } else {
-            debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+            debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
         }
 
         for q in qs.into_iter() {
@@ -253,7 +260,7 @@ impl Listener {
     }
 
     // Return would_block
-    fn mio_conn(&mut self) -> bool {
+    fn accept_conn(&mut self) -> bool {
         use std::io;
 
         let (server, cluster) = match &self.inner {
@@ -263,8 +270,9 @@ impl Listener {
 
         match server.as_ref().unwrap().accept() {
             Ok((conn, addr)) => {
+                // for every successful accept launch a handshake thread.
                 let hs = Handshake {
-                    prefix: format!("{}-handshake:{}", self.pp(), addr),
+                    prefix: format!("{}-handshake:{}", self.prefix, addr),
                     conn: Some(conn),
                     addr,
                     cluster: cluster.to_tx(),
@@ -274,16 +282,18 @@ impl Listener {
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
             Err(err) => {
-                error!("{} accept-failed {}", self.pp(), err);
+                error!("{} accept-failed {}", self.prefix, err);
                 false
             }
         }
     }
+}
 
+impl Listener {
     fn handle_close(&mut self, _req: Request) -> Result<Response> {
         use std::mem;
 
-        info!("{} close ...", self.pp());
+        info!("{} close ...", self.prefix);
 
         let RunLoop { poll, server, cluster, closed } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
@@ -305,7 +315,7 @@ impl Listener {
         format!("0.0.0.0:{}", self.port)
     }
 
-    fn pp(&self) -> String {
+    fn prefix(&self) -> String {
         format!("{}:{}", self.name, self.server_address())
     }
 

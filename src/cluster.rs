@@ -23,8 +23,7 @@ pub struct Cluster {
     pub port: u16,
     /// Refer [Config::gods]
     pub gods: Vec<God>,
-    /// Input channel size for the cluster thread.
-    pub chan_size: usize,
+    prefix: String,
     config: Config,
     inner: Inner,
 }
@@ -51,19 +50,19 @@ pub struct RunLoop {
 
 impl Default for Cluster {
     fn default() -> Cluster {
-        use crate::REQ_CHANNEL_SIZE;
-
         let config = Config::default();
-        Cluster {
+        let mut def = Cluster {
             name: config.name.to_string(),
             max_nodes: config.max_nodes.unwrap(),
             num_shards: config.num_shards.unwrap(),
             port: config.port.unwrap(),
             gods: Vec::default(),
-            chan_size: REQ_CHANNEL_SIZE,
+            prefix: String::default(),
             config,
             inner: Inner::Init,
-        }
+        };
+        def.prefix = def.prefix();
+        def
     }
 }
 
@@ -73,13 +72,13 @@ impl Drop for Cluster {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.pp()),
+            Inner::Init => debug!("{} drop ...", self.prefix),
             Inner::Handle(_) => {
-                error!("{} invalid drop ...", self.pp());
-                panic!("{} invalid drop ...", self.pp());
+                error!("{} invalid drop ...", self.prefix);
+                panic!("{} invalid drop ...", self.prefix);
             }
-            Inner::Tx(_tx) => info!("{} drop ...", self.pp()),
-            Inner::Main(_run_loop) => info!("{} drop ...", self.pp()),
+            Inner::Tx(_tx) => info!("{} drop ...", self.prefix),
+            Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -89,14 +88,14 @@ impl Cluster {
     /// Create a cluster from configuration. Cluster shall be in `Init` state, to start
     /// the cluster call [Cluster::spawn]
     pub fn from_config(config: Config) -> Result<Cluster> {
-        let c = Cluster::default();
+        let def = Cluster::default();
         let val = Cluster {
             name: format!("{}-cluster-init", config.name),
-            max_nodes: config.max_nodes.unwrap_or(c.max_nodes),
-            num_shards: config.num_shards.unwrap_or(c.num_shards),
-            port: config.port.unwrap_or(c.port),
-            chan_size: c.chan_size,
+            max_nodes: config.max_nodes.unwrap_or(def.max_nodes),
+            num_shards: config.num_shards.unwrap_or(def.num_shards),
+            port: config.port.unwrap_or(def.port),
             gods: Vec::default(),
+            prefix: def.prefix.clone(),
             config,
             inner: Inner::Init,
         };
@@ -144,7 +143,7 @@ impl Cluster {
             num_shards: self.num_shards,
             port: self.port,
             gods: Vec::default(),
-            chan_size: self.chan_size,
+            prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 gods,
@@ -154,7 +153,7 @@ impl Cluster {
                 app_tx: tx,
             }),
         };
-        let thrd = Thread::spawn_sync(&self.name, self.chan_size, cluster);
+        let thrd = Thread::spawn(&self.name, cluster);
 
         let cluster = Cluster {
             name: format!("{}-cluster-handle", self.config.name),
@@ -162,7 +161,7 @@ impl Cluster {
             num_shards: self.num_shards,
             port: self.port,
             gods: Vec::default(),
-            chan_size: self.chan_size,
+            prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
@@ -189,7 +188,7 @@ impl Cluster {
     }
 
     pub fn to_tx(&self) -> Self {
-        info!("{} cloning tx ...", self.pp());
+        info!("{} cloning tx ...", self.prefix);
 
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
@@ -202,7 +201,7 @@ impl Cluster {
             num_shards: self.num_shards,
             port: self.port,
             gods: Vec::default(),
-            chan_size: self.chan_size,
+            prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner,
         }
@@ -307,27 +306,26 @@ impl Threadable for Cluster {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
-        use crate::thread::pending_requests;
+        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
         use Request::*;
 
         info!(
-            "{} max_nodes:{} num_shards:{} port:{} gods:{} chan_size:{} ...",
-            self.pp(),
+            "{} max_nodes:{} num_shards:{} port:{} gods:{} ...",
+            self.prefix,
             self.max_nodes,
             self.num_shards,
             self.port,
             self.gods.len(),
-            self.chan_size
         );
 
         let mut closed = false;
         loop {
-            let (mut qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            let (mut qs, _empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
             if closed {
-                info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+                info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
                 qs.drain(..);
             } else {
-                debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+                debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
             }
 
             for q in qs.into_iter() {
@@ -365,7 +363,7 @@ impl Threadable for Cluster {
             }
         }
 
-        info!("{} thread normal exit...", self.pp());
+        info!("{} thread normal exit...", self.prefix);
         self
     }
 }
@@ -500,7 +498,7 @@ impl Cluster {
 }
 
 impl Cluster {
-    fn pp(&self) -> String {
+    fn prefix(&self) -> String {
         format!("{}", self.name)
     }
 

@@ -12,10 +12,10 @@ pub struct Shard {
     pub name: String,
     /// Unique id for this shard. All shards in a cluster MUST be unique.
     pub uuid: Uuid,
-    /// Input channel size for the shard's thread.
-    pub chan_size: usize,
+    /// Active count of sessions maintained by this shard.
+    pub n_sessions: usize, // used by Cluster.
+    prefix: String,
     config: Config,
-    pub(crate) n_sessions: usize, // used by Cluster.
     inner: Inner,
 }
 
@@ -42,17 +42,17 @@ pub struct RunLoop {
 
 impl Default for Shard {
     fn default() -> Shard {
-        use crate::REQ_CHANNEL_SIZE;
-
         let config = Config::default();
-        Shard {
+        let mut def = Shard {
             name: format!("{}-shard-init", config.name),
             uuid: Uuid::new_v4(),
-            chan_size: REQ_CHANNEL_SIZE,
-            config,
             n_sessions: Default::default(),
+            prefix: String::default(),
+            config,
             inner: Inner::Init,
-        }
+        };
+        def.prefix = def.prefix();
+        def
     }
 }
 
@@ -68,26 +68,26 @@ impl Drop for Shard {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.pp()),
+            Inner::Init => debug!("{} drop ...", self.prefix),
             Inner::Handle(_) => {
-                error!("{} invalid drop ...", self.pp());
-                panic!("{} invalid drop ...", self.pp());
+                error!("{} invalid drop ...", self.prefix);
+                panic!("{} invalid drop ...", self.prefix);
             }
-            Inner::Tx(_tx) => info!("{} drop ...", self.pp()),
-            Inner::Main(_run_loop) => info!("{} drop ...", self.pp()),
+            Inner::Tx(_tx) => info!("{} drop ...", self.prefix),
+            Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
         }
     }
 }
 
 impl Shard {
     pub fn from_config(config: Config) -> Result<Shard> {
-        let s = Shard::default();
+        let def = Shard::default();
         let val = Shard {
-            name: format!("{}-shard-init", config.name),
-            uuid: s.uuid,
-            chan_size: s.chan_size,
-            config: config.clone(),
+            name: def.name.clone(),
+            uuid: def.uuid,
             n_sessions: Default::default(),
+            prefix: def.prefix.clone(),
+            config: config.clone(),
             inner: Inner::Init,
         };
 
@@ -102,23 +102,23 @@ impl Shard {
         let shard = Shard {
             name: format!("{}-shard-main", self.config.name),
             uuid: self.uuid,
-            chan_size: self.chan_size,
-            config: self.config.clone(),
             n_sessions: Default::default(),
+            prefix: self.prefix.clone(),
+            config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 cluster: Box::new(cluster),
                 sessions: BTreeMap::default(),
                 miot: Miot::default(),
             }),
         };
-        let thrd = Thread::spawn_sync(&self.name, self.chan_size, shard);
+        let thrd = Thread::spawn(&self.name, shard);
 
         let shard = Shard {
             name: format!("{}-shard-handle", self.config.name),
             uuid: self.uuid,
-            chan_size: self.chan_size,
-            config: self.config.clone(),
             n_sessions: Default::default(),
+            prefix: self.prefix.clone(),
+            config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
         {
@@ -135,7 +135,7 @@ impl Shard {
     }
 
     pub fn to_tx(&self) -> Self {
-        info!("{} cloning tx ...", self.pp());
+        info!("{} cloning tx ...", self.prefix);
 
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
@@ -146,9 +146,9 @@ impl Shard {
         Shard {
             name: format!("{}-shard-tx", self.config.name),
             uuid: self.uuid,
-            chan_size: self.chan_size,
-            config: self.config.clone(),
             n_sessions: Default::default(),
+            prefix: self.prefix.clone(),
+            config: self.config.clone(),
             inner,
         }
     }
@@ -165,6 +165,17 @@ impl Shard {
         match &self.inner {
             Inner::Handle(thrd) => {
                 thrd.request(Request::AddSession { conn, addr, pkt })??;
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub fn failed_connection(&self, id: ClientID, ps: Vec<v5::Packet>) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => {
+                tx.post(Request::FailedConnection { client_id: id, packets: ps })?
             }
             _ => unreachable!(),
         };
@@ -202,6 +213,10 @@ pub enum Request {
         addr: net::SocketAddr,
         pkt: v5::Connect,
     },
+    FailedConnection {
+        client_id: ClientID,
+        packets: Vec<v5::Packet>,
+    },
     RestartChild {
         name: &'static str,
     },
@@ -217,19 +232,19 @@ impl Threadable for Shard {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
-        use crate::thread::pending_requests;
+        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
         use Request::*;
 
-        info!("{} uuid:{} chan_size:{} ...", self.pp(), self.uuid, self.chan_size);
+        info!("{} uuid:{} ...", self.prefix, self.uuid);
 
         let mut closed = false;
         loop {
-            let (mut qs, _empty, disconnected) = pending_requests(&rx, self.chan_size);
+            let (mut qs, _empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
             if closed {
-                info!("{} skipping {} requests closed:{}", self.pp(), qs.len(), closed);
+                info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
                 qs.drain(..);
             } else {
-                debug!("{} process {} requests closed:{}", self.pp(), qs.len(), closed);
+                debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
             }
 
             for q in qs.into_iter() {
@@ -240,6 +255,7 @@ impl Threadable for Shard {
                     (q @ AddSession { .. }, Some(tx)) => {
                         tx.send(self.handle_add_session(q))
                     }
+                    (FailedConnection { client_id: _, packets: _ }, None) => todo!(),
                     (RestartChild { name: "miot" }, None) => todo!(),
                     (Close, Some(tx)) => {
                         closed = true;
@@ -265,7 +281,7 @@ impl Threadable for Shard {
             }
         }
 
-        info!("{} thread normal exit...", self.pp());
+        info!("{} thread normal exit...", self.prefix);
         self
     }
 }
@@ -288,13 +304,12 @@ impl Shard {
     fn handle_close(&mut self) -> Result<Response> {
         use std::mem;
 
-        let prefix = self.pp();
         let RunLoop { cluster, sessions, miot } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        info!("{} sessions:{} ...", prefix, sessions.len());
+        info!("{} sessions:{} ...", self.prefix, sessions.len());
 
         let cluster = mem::replace(cluster, Box::new(Cluster::default()));
         *miot = mem::replace(miot, Miot::default()).close_wait()?;
@@ -309,7 +324,7 @@ impl Shard {
 }
 
 impl Shard {
-    fn pp(&self) -> String {
+    fn prefix(&self) -> String {
         format!("{}", self.name)
     }
 

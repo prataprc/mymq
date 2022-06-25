@@ -24,14 +24,15 @@ impl PacketRead {
         PacketRead::Init { data: Vec::with_capacity(MSG_TYPICAL_SIZE) }
     }
 
-    // return (self, retry, wouldblock)
+    // return (self, retry, wouldblock),
+    // errors shall be folded as Disconnected, and implies a bad connection.
     pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool, bool)> {
         use PacketRead::{Fin, Header, Init, Remain};
 
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut data } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc: "PacketRead::Init")?,
+                Ok(0) => err!(Disconnected, desc: "PacketRead::Init"),
                 Ok(1) => {
                     Ok((PacketRead::Header { byte1: scratch[0], data }, true, false))
                 }
@@ -39,10 +40,10 @@ impl PacketRead {
                     let byte1 = scratch[0];
                     match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
                         Some(_) => {
-                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
+                            let (rlen, m) = VarU32::decode(&scratch[1..]).unwrap();
                             data.extend_from_slice(&scratch[m + 1..n]);
-                            data.reserve(*remaining_len as usize);
-                            let fh = v5::FixedHeader { byte1, remaining_len };
+                            data.reserve(*rlen as usize);
+                            let fh = v5::FixedHeader { byte1, remaining_len: rlen };
                             Ok((PacketRead::Remain { data, fh }, true, false))
                         }
                         None => {
@@ -61,7 +62,7 @@ impl PacketRead {
                 Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
                     Some(_) => {
                         data.extend_from_slice(&scratch[..n]);
-                        let (remaining_len, m) = VarU32::decode(&data)?;
+                        let (remaining_len, m) = VarU32::decode(&data).unwrap();
                         data.truncate(0);
                         data.extend_from_slice(&scratch[m..n]);
                         data.reserve(*remaining_len as usize);
@@ -210,6 +211,7 @@ impl PacketWrite {
     }
 
     // return (self, retry, wouldblock)
+    // errors shall be folded as Disconnected, and implies a bad connection.
     pub fn write<W: io::Write>(self, mut stream: W) -> Result<(Self, bool, bool)> {
         use PacketWrite::{Fin, Init, Remain};
 
@@ -247,7 +249,7 @@ impl PacketWrite {
         }
     }
 
-    pub fn reset(mut self, buf: &[u8]) -> Self {
+    pub fn reset(self, buf: &[u8]) -> Self {
         match self {
             PacketWrite::Fin { mut data } => {
                 data.truncate(0);

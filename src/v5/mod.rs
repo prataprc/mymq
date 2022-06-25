@@ -177,6 +177,96 @@ pub enum Packet {
     Auth(Auth),
 }
 
+impl Packetize for Packet {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+        let (fh, _) = FixedHeader::decode(stream)?;
+
+        match fh.unwrap()?.0 {
+            PacketType::Connect => {
+                let (pkt, n) = Connect::decode(stream)?;
+                Ok((Packet::Connect(pkt), n))
+            }
+            PacketType::ConnAck => {
+                let (pkt, n) = ConnAck::decode(stream)?;
+                Ok((Packet::ConnAck(pkt), n))
+            }
+            PacketType::Publish => {
+                let (pkt, n) = Publish::decode(stream)?;
+                Ok((Packet::Publish(pkt), n))
+            }
+            PacketType::PubAck => {
+                let (pkt, n) = Pub::decode(stream)?;
+                Ok((Packet::PubAck(pkt), n))
+            }
+            PacketType::PubRec => {
+                let (pkt, n) = Pub::decode(stream)?;
+                Ok((Packet::PubRec(pkt), n))
+            }
+            PacketType::PubRel => {
+                let (pkt, n) = Pub::decode(stream)?;
+                Ok((Packet::PubRel(pkt), n))
+            }
+            PacketType::PubComp => {
+                let (pkt, n) = Pub::decode(stream)?;
+                Ok((Packet::PubComp(pkt), n))
+            }
+            PacketType::Subscribe => {
+                let (pkt, n) = Subscribe::decode(stream)?;
+                Ok((Packet::Subscribe(pkt), n))
+            }
+            PacketType::SubAck => {
+                let (pkt, n) = SubAck::decode(stream)?;
+                Ok((Packet::SubAck(pkt), n))
+            }
+            PacketType::UnSubscribe => {
+                let (pkt, n) = UnSubscribe::decode(stream)?;
+                Ok((Packet::UnSubscribe(pkt), n))
+            }
+            PacketType::UnsubAck => {
+                let (pkt, n) = UnsubAck::decode(stream)?;
+                Ok((Packet::UnsubAck(pkt), n))
+            }
+            PacketType::PingReq => {
+                let (_pkt, n) = PingReq::decode(stream)?;
+                Ok((Packet::PingReq, n))
+            }
+            PacketType::PingResp => {
+                let (_pkt, n) = PingResp::decode(stream)?;
+                Ok((Packet::PingResp, n))
+            }
+            PacketType::Disconnect => {
+                let (pkt, n) = Disconnect::decode(stream)?;
+                Ok((Packet::Disconnect(pkt), n))
+            }
+            PacketType::Auth => {
+                let (pkt, n) = Auth::decode(stream)?;
+                Ok((Packet::Auth(pkt), n))
+            }
+        }
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        match self {
+            Packet::Connect(pkt) => pkt.encode(),
+            Packet::ConnAck(pkt) => pkt.encode(),
+            Packet::Publish(pkt) => pkt.encode(),
+            Packet::PubAck(pkt) => pkt.encode(),
+            Packet::PubRec(pkt) => pkt.encode(),
+            Packet::PubRel(pkt) => pkt.encode(),
+            Packet::PubComp(pkt) => pkt.encode(),
+            Packet::Subscribe(pkt) => pkt.encode(),
+            Packet::SubAck(pkt) => pkt.encode(),
+            Packet::UnSubscribe(pkt) => pkt.encode(),
+            Packet::UnsubAck(pkt) => pkt.encode(),
+            Packet::PingReq => PingReq.encode(),
+            Packet::PingResp => PingResp.encode(),
+            Packet::Disconnect(pkt) => pkt.encode(),
+            Packet::Auth(pkt) => pkt.encode(),
+        }
+    }
+}
+
 impl Packet {
     pub fn to_packet_type(&self) -> PacketType {
         match self {
