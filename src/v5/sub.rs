@@ -68,7 +68,7 @@ impl TryFrom<u8> for RetainForwardRule {
             0 => RetainForwardRule::OnEverySubscribe,
             1 => RetainForwardRule::OnNewSubscribe,
             2 => RetainForwardRule::Never,
-            _ => err!(ProtocolError, code: ProtocolError, "{} forbidden packet", PP)?,
+            _ => err!(MalformedPacket, code: MalformedPacket, "{} forbidden packet", PP)?,
         };
 
         Ok(val)
@@ -103,10 +103,10 @@ impl Packetize for Subscribe {
         let (properties, n) = dec_props!(SubscribeProperties, stream, n);
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
             m if m == n => {
-                err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?
+                err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?
             }
             m if m <= stream.len() => (&stream[n..m], m),
-            m => err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?,
+            m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
         let mut filters = vec![];

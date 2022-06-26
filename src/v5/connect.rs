@@ -194,7 +194,7 @@ impl Connect {
     fn validate(&self) -> Result<()> {
         if self.protocol_name != "MQTT" {
             err!(
-                UnsupportedProtocolVersion,
+                ProtocolError,
                 code: UnsupportedProtocolVersion,
                 "{} proto-name {:?}",
                 PP,
@@ -203,7 +203,7 @@ impl Connect {
         }
         if self.protocol_version != MqttProtocol::V5 {
             err!(
-                UnsupportedProtocolVersion,
+                ProtocolError,
                 code: UnsupportedProtocolVersion,
                 "{} proto-version {:?}",
                 PP,
@@ -214,8 +214,8 @@ impl Connect {
         if let Some(true) = pld.will_properties.as_ref().map(|p| p.is_utf8()) {
             if let Err(err) = std::str::from_utf8(pld.will_payload.as_ref().unwrap()) {
                 err!(
-                    ProtocolError,
-                    code: PayloadFormatInvalid,
+                    MalformedPacket,
+                    code: MalformedPacket,
                     cause: err,
                     "{} will-message:payload not utf8",
                     PP

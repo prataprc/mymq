@@ -4,7 +4,7 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net, path, sync::mpsc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{v5, Config, ConfigNode, Listener, Shard};
+use crate::{v5, ClientID, Config, ConfigNode, Listener, Shard};
 use crate::{Error, ErrorKind, Result};
 use crate::{Hostable, NodeStore};
 
@@ -153,7 +153,7 @@ impl Cluster {
                 app_tx: tx,
             }),
         };
-        let thrd = Thread::spawn(&self.name, cluster);
+        let thrd = Thread::spawn(&self.prefix, cluster);
 
         let cluster = Cluster {
             name: format!("{}-cluster-handle", self.config.name),
@@ -167,9 +167,9 @@ impl Cluster {
         };
         {
             let mut shards = BTreeMap::default();
-            for _ in 0..self.num_shards {
+            for shard_id in 0..self.num_shards {
                 let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
-                let shard = Shard::from_config(config)?.spawn(clust_tx)?;
+                let shard = Shard::from_config(config, shard_id)?.spawn(clust_tx)?;
                 shards.insert(shard.uuid, shard);
             }
 
@@ -227,6 +227,9 @@ pub enum Request {
         addr: net::SocketAddr,
         pkt: v5::Connect,
     },
+    RemoveConnection {
+        client_id: ClientID,
+    },
     Close,
 }
 
@@ -258,6 +261,15 @@ impl Cluster {
     ) -> Result<()> {
         match &self.inner {
             Inner::Tx(tx) => tx.request(Request::AddConnection { conn, addr, pkt })??,
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
+    pub fn remove_connection(&self, client_id: ClientID) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(tx) => tx.request(Request::RemoveConnection { client_id })??,
             _ => unreachable!(),
         };
 
@@ -310,7 +322,7 @@ impl Threadable for Cluster {
         use Request::*;
 
         info!(
-            "{} max_nodes:{} num_shards:{} port:{} gods:{} ...",
+            "{} spawn max_nodes:{} num_shards:{} port:{} gods:{} ...",
             self.prefix,
             self.max_nodes,
             self.num_shards,
@@ -340,6 +352,9 @@ impl Threadable for Cluster {
                     (q @ AddConnection { .. }, Some(tx)) => {
                         tx.send(self.handle_add_connection(q))
                     }
+                    (q @ RemoveConnection { .. }, Some(tx)) => {
+                        tx.send(self.handle_remove_connection(q))
+                    }
                     (q @ Close, Some(tx)) => {
                         closed = true;
                         tx.send(self.handle_close(q))
@@ -352,7 +367,7 @@ impl Threadable for Cluster {
                     Ok(()) => (),
                     Err(err) => {
                         let msg = format!("fatal error, {}", err.to_string());
-                        allow_panic!(self.as_app_tx().send(msg));
+                        allow_panic!(self.prefix, self.as_app_tx().send(msg));
                         break;
                     }
                 }
@@ -448,25 +463,47 @@ impl Cluster {
     }
 
     fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
-        let shards = match &mut self.inner {
-            Inner::Main(RunLoop { shards, .. }) => shards,
-            _ => unreachable!(),
-        };
         let (conn, addr, pkt) = match req {
             Request::AddConnection { conn, addr, pkt } => (conn, addr, pkt),
             _ => unreachable!(),
         };
 
-        let mut counts: Vec<(Uuid, usize)> =
-            shards.iter_mut().map(|(uuid, shard)| (*uuid, shard.n_sessions)).collect();
-        counts.sort_by_key(|x| x.1);
+        let shards = match &mut self.inner {
+            Inner::Main(RunLoop { shards, .. }) => shards,
+            _ => unreachable!(),
+        };
 
-        match shards.get_mut(&counts[0].0) {
-            Some(shard) => {
-                shard.n_sessions += 1;
-                shard.add_session(conn, addr, pkt)?;
-            }
-            None => (),
+        let client_id = pkt.payload.client_id.clone();
+        let shard_uuid = {
+            let mut ss = shards
+                .iter()
+                .map(|(u, s)| (*u, s.num_sessions()))
+                .collect::<Vec<(Uuid, usize)>>();
+            ss.sort_by_key(|s| s.1);
+            ss.first().unwrap().0
+        };
+        let shard = shards.get_mut(&shard_uuid).unwrap();
+        let subscribed_tx = shard.add_session(conn, addr, pkt)?;
+
+        for (_, shard) in shards.iter().filter(|(uuid, _)| uuid != &&shard_uuid) {
+            shard.book_session(client_id.clone(), subscribed_tx.clone())?;
+        }
+
+        Ok(Response::Ok)
+    }
+
+    fn handle_remove_connection(&mut self, req: Request) -> Result<Response> {
+        let client_id = match req {
+            Request::RemoveConnection { client_id } => client_id,
+            _ => unreachable!(),
+        };
+        let RunLoop { shards, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        for (_, shard) in shards.iter() {
+            shard.unbook_session(client_id.clone())?;
         }
 
         Ok(Response::Ok)

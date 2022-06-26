@@ -6,26 +6,31 @@ use crate::{v5, ClientID};
 pub type QueueTx = mpsc::SyncSender<v5::Packet>;
 pub type QueueRx = mpsc::Receiver<v5::Packet>;
 
-pub struct Queue {
+pub struct Socket {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,
     pub addr: net::SocketAddr,
     pub token: mio::Token,
-    pub rd: SocketRd,
-    pub wt: SocketWt,
+    pub rd: Source,
+    pub wt: Sink,
 }
 
-pub struct SocketRd {
+pub struct Source {
     pub pr: PacketRead,
     pub retries: usize,
-    pub msg_tx: QueueTx,
+    pub tx: QueueTx,
     pub packets: Vec<v5::Packet>,
 }
 
-pub struct SocketWt {
+pub struct Sink {
     pub pw: PacketWrite,
     pub retries: usize,
-    pub msg_rx: QueueRx,
+    pub rx: QueueRx,
     pub packets: Vec<v5::Packet>,
     pub flush_retries: usize,
+}
+
+#[inline]
+pub fn queue_channel(size: usize) -> (QueueTx, QueueRx) {
+    mpsc::sync_channel(size)
 }

@@ -36,9 +36,7 @@ impl Packetize for Publish {
         let (payload, n) = match fh_len + usize::try_from(*fh.remaining_len)? {
             m if m == n => (None, n),
             m if m <= stream.len() => (Some(stream[n..m].to_vec()), m),
-            m => {
-                err!(InsufficientBytes, code: MalformedPacket, "{} in payload {}", PP, m)?
-            }
+            m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
         let val = Publish {
@@ -91,8 +89,8 @@ impl Publish {
             (Some(payload), Some(true)) => {
                 if let Err(err) = std::str::from_utf8(&payload) {
                     err!(
-                        ProtocolError,
-                        code: PayloadFormatInvalid,
+                        MalformedPacket,
+                        code: MalformedPacket,
                         cause: err,
                         "{} payload invalid utf8 ",
                         PP

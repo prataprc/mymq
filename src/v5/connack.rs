@@ -58,6 +58,7 @@ impl ConnackFlags {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum ConnectReasonCode {
     Success = 0x00,
     UnspecifiedError = 0x80,
@@ -111,7 +112,7 @@ impl TryFrom<u8> for ConnectReasonCode {
             0x9d => Ok(ConnectReasonCode::ServerMoved),
             0x9f => Ok(ConnectReasonCode::ExceedConnectionRate),
             val => {
-                err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val)
+                err!(MalformedPacket, code: MalformedPacket, "{} reason-code {}", PP, val)
             }
         }
     }
@@ -206,9 +207,6 @@ impl Packetize for ConnAckProperties {
             match property {
                 SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
                 ReceiveMaximum(val) => props.receive_maximum = Some(val),
-                MaximumQoS(QoS::ExactlyOnce) => {
-                    err!(ProtocolError, code: ProtocolError, "{} QoS::ExactlyOnce", PP)?;
-                }
                 MaximumQoS(val) => props.max_qos = Some(val),
                 RetainAvailable(val) => {
                     props.retain_available =
@@ -260,7 +258,6 @@ impl Packetize for ConnAckProperties {
         enc_prop!(opt: data, SessionExpiryInterval, self.session_expiry_interval);
         enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
         match &self.max_qos {
-            Some(QoS::ExactlyOnce) => err!(InvalidInput, desc:"{} QoS::ExactlyOnce", PP)?,
             Some(val) => enc_prop!(data, MaximumQoS, u8::from(*val)),
             None => (),
         }

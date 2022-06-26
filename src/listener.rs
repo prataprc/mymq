@@ -26,13 +26,13 @@ pub enum Inner {
 }
 
 pub struct RunLoop {
-    /// Mio poller for asynchronous handling.
+    /// Mio poller for asynchronous handling, aggregate events from server and waker.
     poll: mio::Poll,
     /// MQTT server listening on `port`.
     server: Option<mio::net::TcpListener>,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
-    /// whether thread is closed.
+    /// thread is already closed.
     closed: bool,
 }
 
@@ -68,11 +68,13 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    const TOKEN_WAKE: mio::Token = mio::Token(1);
-    const TOKEN_SERVER: mio::Token = mio::Token(2);
+    /// Poll register token for waker event, OTP calls made to this thread will trigger.
+    pub const TOKEN_WAKE: mio::Token = mio::Token(1);
+    /// Poll register for server TcpStream.
+    pub const TOKEN_SERVER: mio::Token = mio::Token(2);
 
-    /// Create a listener from configuration. Listener shall be in `Init` state, to start
-    /// the listener thread call [Listener::spawn].
+    /// Create a listener from configuration. Listener shall be in `Init` state. To start
+    /// this listener thread call [Listener::spawn].
     pub fn from_config(config: Config) -> Result<Listener> {
         let def = Listener::default();
         let mut val = Listener {
@@ -99,11 +101,11 @@ impl Listener {
             mio::net::TcpListener::bind(sock_addr)?
         };
 
-        let poll = mio::Poll::new()?;
+        let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
         poll.registry().register(&mut server, Self::TOKEN_SERVER, Interest::READABLE)?;
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
 
-        let listener = Listener {
+        let mut listener = Listener {
             name: format!("{}-listener-main", self.config.name),
             port: self.port,
             prefix: self.prefix.clone(),
@@ -115,34 +117,19 @@ impl Listener {
                 closed: false,
             }),
         };
-        let thrd = Thread::spawn(&self.name, listener);
+        listener.prefix = listener.prefix();
+        let thrd = Thread::spawn(&self.prefix, listener);
 
-        let listener = Listener {
+        let mut listener = Listener {
             name: format!("{}-listener-handle", self.config.name),
             port: self.port,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
+        listener.prefix = listener.prefix();
 
         Ok(listener)
-    }
-}
-
-// calls to interface with listener-thread, and shall wake the thread
-impl Listener {
-    pub fn close_wait(mut self) -> Result<Listener> {
-        use std::mem;
-
-        let inner = mem::replace(&mut self.inner, Inner::Init);
-        match inner {
-            Inner::Handle(waker, thrd) => {
-                thrd.request(Request::Close)??;
-                waker.wake()?;
-                thrd.close_wait()
-            }
-            _ => unreachable!(),
-        }
     }
 }
 
@@ -154,14 +141,33 @@ pub enum Response {
     Ok,
 }
 
+// calls to interface with listener-thread, and shall wake the thread
+impl Listener {
+    pub fn close_wait(mut self) -> Result<Listener> {
+        use std::mem;
+
+        let inner = mem::replace(&mut self.inner, Inner::Init);
+        match inner {
+            Inner::Handle(waker, thrd) => {
+                waker.wake()?;
+                thrd.request(Request::Close)??;
+                thrd.close_wait()
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl Threadable for Listener {
     type Req = Request;
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        info!("{} spawn port:{} ...", self.prefix, self.port,);
+        use crate::REQ_CHANNEL_SIZE;
 
-        let mut events = Events::with_capacity(2);
+        info!("{} spawn port:{} ...", self.prefix, self.port);
+
+        let mut events = Events::with_capacity(REQ_CHANNEL_SIZE);
         let res = loop {
             let timeout: Option<time::Duration> = None;
             match self.as_mut_poll().poll(&mut events, timeout) {
@@ -178,10 +184,7 @@ impl Threadable for Listener {
             };
         };
 
-        match self.handle_close(Request::Close) {
-            Ok(Response::Ok) => (),
-            Err(err) => error!("{} thread pre-exit close failed {}", self.prefix, err),
-        }
+        self.handle_close(Request::Close); // handle_close should handle repeat close.
 
         match res {
             Ok(()) => {
@@ -189,7 +192,7 @@ impl Threadable for Listener {
             }
             Err(err) => {
                 error!("{} fatal error, try restarting thread `{}`", self.prefix, err);
-                allow_panic!(self.as_cluster().restart_listener());
+                ignore_error!(self.prefix, "", self.as_cluster().restart_listener());
             }
         }
 
@@ -198,7 +201,7 @@ impl Threadable for Listener {
 }
 
 impl Listener {
-    // return whether we are doing normal exit, which is rx-disconnected
+    // return (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> Result<bool> {
         let mut count = 0_usize;
         let mut iter = events.iter();
@@ -210,13 +213,20 @@ impl Listener {
 
                     match event.token() {
                         Self::TOKEN_WAKE => loop {
+                            // keep repeating until all control requests are drained
                             match self.control_chan(rx)? {
                                 (_empty, true) => break 'outer Ok(true),
                                 (true, _disconnected) => break,
                                 (false, false) => (),
                             }
                         },
-                        Self::TOKEN_SERVER => while !self.accept_conn() {},
+                        Self::TOKEN_SERVER => loop {
+                            match self.accept_conn() {
+                                Ok(true) => break,
+                                Ok(false) => (),
+                                Err(err) => break 'outer Err(err),
+                            };
+                        },
                         _ => unreachable!(),
                     }
                 }
@@ -250,7 +260,7 @@ impl Listener {
         for q in qs.into_iter() {
             match q {
                 (q @ Close, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_close(q)))?
+                    err!(IPCFail, try: tx.send(Ok(self.handle_close(q))))?
                 }
                 (_, _) => unreachable!(),
             }
@@ -259,8 +269,9 @@ impl Listener {
         Ok((empty, disconnected))
     }
 
-    // Return would_block
-    fn accept_conn(&mut self) -> bool {
+    // Return (would_block,)
+    fn accept_conn(&mut self) -> Result<bool> {
+        use crate::Handshake;
         use std::io;
 
         let (server, cluster) = match &self.inner {
@@ -272,41 +283,40 @@ impl Listener {
             Ok((conn, addr)) => {
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
-                    prefix: format!("{}-handshake:{}", self.prefix, addr),
+                    prefix: format!("{}:handshake:{}", self.prefix, addr),
                     conn: Some(conn),
                     addr,
                     cluster: cluster.to_tx(),
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
-                false
+                Ok(false)
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(true),
             Err(err) => {
-                error!("{} accept-failed {}", self.prefix, err);
-                false
+                err!(IOError, try: Err(err), "{} server accept error", self.prefix)
             }
         }
     }
 }
 
 impl Listener {
-    fn handle_close(&mut self, _req: Request) -> Result<Response> {
+    fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        info!("{} close ...", self.prefix);
-
-        let RunLoop { poll, server, cluster, closed } = match &mut self.inner {
+        let RunLoop { server, cluster, closed, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
-        *closed = true;
 
-        let cluster = mem::replace(cluster, Box::new(Cluster::default()));
-        mem::drop(cluster);
-        mem::drop(server.take());
-        mem::drop(mem::replace(poll, mio::Poll::new()?));
+        if *closed == false {
+            let cluster = mem::replace(cluster, Box::new(Cluster::default()));
+            mem::drop(cluster);
+            mem::drop(server.take());
 
-        Ok(Response::Ok)
+            info!("{} closed ...", self.prefix);
+            *closed = true;
+        }
+        Response::Ok
     }
 }
 
@@ -331,72 +341,5 @@ impl Listener {
             Inner::Main(RunLoop { cluster, .. }) => cluster,
             _ => unreachable!(),
         }
-    }
-}
-
-struct Handshake {
-    prefix: String,
-    conn: Option<mio::net::TcpStream>,
-    addr: net::SocketAddr,
-    cluster: Cluster,
-}
-
-impl Threadable for Handshake {
-    type Req = ();
-    type Resp = ();
-
-    fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
-        use crate::{packet::PacketRead, v5, MAX_CONNECT_TIMEOUT, MAX_SOCKET_RETRY};
-        use std::thread;
-
-        info!("new connection {}", self.addr);
-
-        let mut packetr = PacketRead::new();
-        let (conn, addr) = (self.conn.take().unwrap(), self.addr);
-        let dur = MAX_CONNECT_TIMEOUT / u64::try_from(MAX_SOCKET_RETRY).unwrap();
-        let (mut retries, prefix) = (0, self.prefix.clone());
-
-        let pkt_connect = loop {
-            packetr = match packetr.read(&conn) {
-                Ok((pr, true, _)) if retries < MAX_SOCKET_RETRY => {
-                    retries += 1;
-                    pr
-                }
-                Ok((_pr, true, _)) => {
-                    break err!(
-                        InsufficientBytes,
-                        desc: "{} fail after {} retries",
-                        prefix,
-                        retries
-                    )
-                }
-                Ok((pr, false, _)) => match pr.parse() {
-                    Ok(v5::Packet::Connect(pkt_connect)) => break Ok(pkt_connect),
-                    Ok(pkt) => {
-                        break err!(
-                            IOError,
-                            desc: "{} unexpect {:?} on new connection",
-                            prefix,
-                            pkt.to_packet_type()
-                        );
-                    }
-                    Err(err) => {
-                        break err!(IOError, desc: "{} parse failed {}", prefix, err);
-                    }
-                },
-                Err(err) => break err!(IOError, desc: "{} read failed {}", prefix, err),
-            };
-            thread::sleep(time::Duration::from_millis(dur));
-        };
-
-        match pkt_connect {
-            Ok(pkt_connect) => {
-                err!(IPCFail, try: self.cluster.add_connection(conn, addr, pkt_connect))
-                    .ok();
-            }
-            Err(_) => (),
-        }
-
-        self
     }
 }

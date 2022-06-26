@@ -385,7 +385,7 @@ impl Packetize for FixedHeader {
 impl FixedHeader {
     pub fn new(pkt_type: PacketType, remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
+            err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
         }
         let byte1 = u8::from(pkt_type) << 4;
         Ok(FixedHeader { byte1, remaining_len })
@@ -398,7 +398,7 @@ impl FixedHeader {
         remaining_len: VarU32,
     ) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
+            err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
         }
 
         let val = FixedHeader {
@@ -411,7 +411,7 @@ impl FixedHeader {
 
     pub fn new_pubrel(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
+            err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
         }
 
         let (packet_type, qos) = (u8::from(PacketType::PubRel), QoS::AtLeastOnce);
@@ -425,7 +425,7 @@ impl FixedHeader {
 
     pub fn new_subscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
+            err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
         }
 
         let (packet_type, qos) = (u8::from(PacketType::Subscribe), QoS::AtLeastOnce);
@@ -438,7 +438,7 @@ impl FixedHeader {
     }
     pub fn new_unsubscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
-            err!(PayloadTooLong, desc: "FixedHeader payload too long")?
+            err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?;
         }
 
         let (packet_type, qos) = (u8::from(PacketType::UnSubscribe), QoS::AtLeastOnce);
@@ -459,7 +459,7 @@ impl FixedHeader {
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
             qos => err!(
-                InvalidInput,
+                ProtocolError,
                 code: InvalidQoS,
                 "FixedHeader qos:{} not supported",
                 qos
@@ -480,7 +480,7 @@ impl FixedHeader {
             n if n < 2_097_152 => 3,
             n if n < *VarU32::MAX => 4,
             n => err!(
-                InvalidInput,
+                MalformedPacket,
                 code: MalformedPacket,
                 "FixedHeader, remaining-len {}",
                 n
@@ -512,8 +512,8 @@ impl FixedHeader {
             _ if retain || dup || qos != QoS::AtMostOnce => err!(
                 MalformedPacket,
                 code: MalformedPacket,
-                "FixedHeader invalid flags found for {:?}",
-                pkt_type
+                "FixedHeader invalid flags byte1:0x{:x}",
+                self.byte1
             ),
             _ => Ok(()),
         }
@@ -801,7 +801,12 @@ impl TryFrom<u8> for PayloadFormat {
             0 => Ok(PayloadFormat::Binary),
             1 => Ok(PayloadFormat::Utf8),
             _ => {
-                err!(ProtocolError, code: ProtocolError, "invalid payload format {}", val)
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "invalid payload format {}",
+                    val
+                )
             }
         }
     }

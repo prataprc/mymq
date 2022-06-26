@@ -6,6 +6,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::UnsubAck";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum UnsubAckReasonCode {
     QoS0 = 0x0,
     NoSubscriptionExisted = 0x11,
@@ -28,26 +29,16 @@ impl TryFrom<u8> for UnsubAckReasonCode {
             0x87 => UnsubAckReasonCode::NotAuthorized,
             0x8f => UnsubAckReasonCode::InvalidTopicFilter,
             0x91 => UnsubAckReasonCode::PacketIdInuse,
-            val => {
-                err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val)?
-            }
+            val => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "{} reason-code {}",
+                PP,
+                val
+            )?,
         };
 
         Ok(v)
-    }
-}
-
-impl From<UnsubAckReasonCode> for u8 {
-    fn from(val: UnsubAckReasonCode) -> u8 {
-        match val {
-            UnsubAckReasonCode::QoS0 => 0x0,
-            UnsubAckReasonCode::NoSubscriptionExisted => 0x11,
-            UnsubAckReasonCode::UnspecifiedError => 0x80,
-            UnsubAckReasonCode::ImplementationError => 0x83,
-            UnsubAckReasonCode::NotAuthorized => 0x87,
-            UnsubAckReasonCode::InvalidTopicFilter => 0x8f,
-            UnsubAckReasonCode::PacketIdInuse => 0x91,
-        }
     }
 }
 
@@ -74,9 +65,7 @@ impl Packetize for UnsubAck {
                 err!(MalformedPacket, code: MalformedPacket, "{} no payload", PP)?
             }
             m if m <= stream.len() => (stream[n..m].to_vec(), m),
-            m => {
-                err!(InsufficientBytes, code: MalformedPacket, "{} in payload {}", PP, m)?
-            }
+            m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
         let mut return_codes: Vec<UnsubAckReasonCode> = vec![];
@@ -100,7 +89,7 @@ impl Packetize for UnsubAck {
             data.extend_from_slice(VarU32(0).encode()?.as_ref());
         }
         for code in self.return_codes.clone().into_iter() {
-            data.push(code.into())
+            data.push(code as u8)
         }
 
         let fh = FixedHeader::new(PacketType::SubAck, VarU32(data.len().try_into()?))?;

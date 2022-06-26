@@ -6,6 +6,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Disconnect";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u8)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
     DiconnectWillMessage = 0x04,
@@ -73,44 +74,14 @@ impl TryFrom<u8> for DisconnReasonCode {
             0xA1 => Ok(DisconnReasonCode::SubscriptionIdNotSupported),
             0xA2 => Ok(DisconnReasonCode::WildcardSubscriptionsNotSupported),
             val => {
-                err!(ProtocolError, code: ProtocolError, " {} reason-code {}", PP, val)
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    " {} reason-code {}",
+                    PP,
+                    val
+                )
             }
-        }
-    }
-}
-
-impl From<DisconnReasonCode> for u8 {
-    fn from(val: DisconnReasonCode) -> u8 {
-        match val {
-            DisconnReasonCode::NormalDisconnect => 0x00,
-            DisconnReasonCode::DiconnectWillMessage => 0x04,
-            DisconnReasonCode::UnspecifiedError => 0x80,
-            DisconnReasonCode::MalformedPacket => 0x81,
-            DisconnReasonCode::ProtocolError => 0x82,
-            DisconnReasonCode::ImplementationError => 0x83,
-            DisconnReasonCode::NotAuthorized => 0x87,
-            DisconnReasonCode::ServerBusy => 0x89,
-            DisconnReasonCode::ServerShutdown => 0x8B,
-            DisconnReasonCode::KeepAliveTimeout => 0x8D,
-            DisconnReasonCode::SessionTakeOver => 0x8E,
-            DisconnReasonCode::InvalidTopicFilter => 0x8F,
-            DisconnReasonCode::InvalidTopicName => 0x90,
-            DisconnReasonCode::ExceededReceiveMaximum => 0x93,
-            DisconnReasonCode::InvalidTopicAlias => 0x94,
-            DisconnReasonCode::PacketTooLarge => 0x95,
-            DisconnReasonCode::ExceedMessageRate => 0x96,
-            DisconnReasonCode::QuotaExceeded => 0x97,
-            DisconnReasonCode::AdminAction => 0x98,
-            DisconnReasonCode::PayloadFormatInvalid => 0x99,
-            DisconnReasonCode::RetainNotSupported => 0x9A,
-            DisconnReasonCode::InvalidQoS => 0x9B,
-            DisconnReasonCode::UseAnotherServer => 0x9C,
-            DisconnReasonCode::ServerMoved => 0x9D,
-            DisconnReasonCode::UnsupportedSharedSubscription => 0x9E,
-            DisconnReasonCode::ExceedConnectionRate => 0x9F,
-            DisconnReasonCode::ExceedMaximumConnectTime => 0xA0,
-            DisconnReasonCode::SubscriptionIdNotSupported => 0xA1,
-            DisconnReasonCode::WildcardSubscriptionsNotSupported => 0xA2,
         }
     }
 }
@@ -119,6 +90,22 @@ impl From<DisconnReasonCode> for u8 {
 pub struct Disconnect {
     code: Option<DisconnReasonCode>,
     properties: Option<DisconnProperties>,
+}
+
+impl Disconnect {
+    pub fn from_reason_code(code: ReasonCode) -> Disconnect {
+        match code {
+            ReasonCode::MalformedPacket => Disconnect {
+                code: DisconnReasonCode::try_from(code as u8).ok(),
+                properties: None,
+            },
+            ReasonCode::ProtocolError => Disconnect {
+                code: DisconnReasonCode::try_from(code as u8).ok(),
+                properties: None,
+            },
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl Packetize for Disconnect {
@@ -155,7 +142,7 @@ impl Packetize for Disconnect {
         let mut data = Vec::with_capacity(64);
 
         let code = self.code.unwrap_or(DisconnReasonCode::NormalDisconnect);
-        data.extend_from_slice(u8::from(code).encode()?.as_ref());
+        data.extend_from_slice((code as u8).encode()?.as_ref());
         if let Some(properties) = &self.properties {
             data.extend_from_slice(properties.encode()?.as_ref());
         } else {

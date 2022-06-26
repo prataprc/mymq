@@ -5,6 +5,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Auth";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u8)]
 pub enum AuthReasonCode {
     Success = 0x00,
     ContinueAuthentication = 0x18,
@@ -20,16 +21,6 @@ impl TryFrom<u8> for AuthReasonCode {
             0x18 => Ok(AuthReasonCode::ContinueAuthentication),
             0x19 => Ok(AuthReasonCode::ReAuthenticate),
             val => err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val),
-        }
-    }
-}
-
-impl From<AuthReasonCode> for u8 {
-    fn from(val: AuthReasonCode) -> u8 {
-        match val {
-            AuthReasonCode::Success => 0x00,
-            AuthReasonCode::ContinueAuthentication => 0x18,
-            AuthReasonCode::ReAuthenticate => 0x19,
         }
     }
 }
@@ -63,7 +54,7 @@ impl Packetize for Auth {
         let mut data = Vec::with_capacity(64);
 
         let code = self.code.unwrap_or(AuthReasonCode::Success);
-        data.extend_from_slice(u8::from(code).encode()?.as_ref());
+        data.extend_from_slice((code as u8).encode()?.as_ref());
         if let Some(properties) = &self.properties {
             data.extend_from_slice(properties.encode()?.as_ref());
         } else {

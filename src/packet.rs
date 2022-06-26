@@ -5,10 +5,25 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub enum PacketRead {
     None,
-    Init { data: Vec<u8> },
-    Header { byte1: u8, data: Vec<u8> },
-    Remain { data: Vec<u8>, fh: v5::FixedHeader },
-    Fin { data: Vec<u8>, fh: v5::FixedHeader },
+    Init {
+        data: Vec<u8>,
+        max_size: usize,
+    },
+    Header {
+        byte1: u8,
+        data: Vec<u8>,
+        max_size: usize,
+    },
+    Remain {
+        data: Vec<u8>,
+        fh: v5::FixedHeader,
+        max_size: usize,
+    },
+    Fin {
+        data: Vec<u8>,
+        fh: v5::FixedHeader,
+        max_size: usize,
+    },
 }
 
 impl Default for PacketRead {
@@ -18,93 +33,119 @@ impl Default for PacketRead {
 }
 
 impl PacketRead {
-    pub fn new() -> PacketRead {
-        use crate::MSG_TYPICAL_SIZE;
+    pub fn new(max_size: usize) -> PacketRead {
+        use crate::MAX_PACKET_SIZE;
 
-        PacketRead::Init { data: Vec::with_capacity(MSG_TYPICAL_SIZE) }
+        PacketRead::Init {
+            data: Vec::with_capacity(MAX_PACKET_SIZE),
+            max_size,
+        }
     }
 
     // return (self, retry, wouldblock),
-    // errors shall be folded as Disconnected, and implies a bad connection.
+    // Disconnected, and implies a bad connection.
+    // MalformedPacket from VarU32, implies a DISCONNECT-MalformedPacket.
+    // MalformedPacket from remaining_len, implies DISCONNECT-PacketTooLarge.
     pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool, bool)> {
         use PacketRead::{Fin, Header, Init, Remain};
 
         let mut scratch = [0_u8; 5];
         match self {
-            Init { mut data } => match stream.read(&mut scratch) {
+            Init { mut data, max_size } => match stream.read(&mut scratch) {
                 Ok(0) => err!(Disconnected, desc: "PacketRead::Init"),
                 Ok(1) => {
-                    Ok((PacketRead::Header { byte1: scratch[0], data }, true, false))
+                    let val = PacketRead::Header { byte1: scratch[0], data, max_size };
+                    Ok((val, true, false))
                 }
                 Ok(n) => {
                     let byte1 = scratch[0];
                     match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
                         Some(_) => {
-                            let (rlen, m) = VarU32::decode(&scratch[1..]).unwrap();
+                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
+                            if *remaining_len > (max_size as u32) {
+                                err!(
+                                    MalformedPacket,
+                                    code: MalformedPacket,
+                                    "PacketRead::read remaining-len:{}",
+                                    *remaining_len
+                                )?
+                            }
                             data.extend_from_slice(&scratch[m + 1..n]);
-                            data.reserve(*rlen as usize);
-                            let fh = v5::FixedHeader { byte1, remaining_len: rlen };
-                            Ok((PacketRead::Remain { data, fh }, true, false))
+                            data.reserve(*remaining_len as usize);
+                            let fh = v5::FixedHeader { byte1, remaining_len };
+                            Ok((PacketRead::Remain { data, fh, max_size }, true, false))
                         }
                         None => {
                             data.extend_from_slice(&scratch[1..n]);
-                            Ok((PacketRead::Header { byte1, data }, true, false))
+                            let val = PacketRead::Header { byte1, data, max_size };
+                            Ok((val, true, false))
                         }
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketRead::Init { data }, true, true))
+                    Ok((PacketRead::Init { data, max_size }, true, true))
                 }
                 Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Init"),
             },
-            Header { byte1, mut data } => match stream.read(&mut scratch) {
+            Header { byte1, mut data, max_size } => match stream.read(&mut scratch) {
                 Ok(0) => err!(Disconnected, desc:  "PacketRead::Header"),
                 Ok(n) => match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
                     Some(_) => {
                         data.extend_from_slice(&scratch[..n]);
-                        let (remaining_len, m) = VarU32::decode(&data).unwrap();
+                        let (remaining_len, m) = VarU32::decode(&data)?;
+                        if *remaining_len > (max_size as u32) {
+                            err!(
+                                MalformedPacket,
+                                code: MalformedPacket,
+                                "PacketRead::read remaining-len:{}",
+                                *remaining_len
+                            )?
+                        }
                         data.truncate(0);
                         data.extend_from_slice(&scratch[m..n]);
                         data.reserve(*remaining_len as usize);
                         let fh = v5::FixedHeader { byte1, remaining_len };
-                        Ok((PacketRead::Remain { data, fh }, true, false))
+                        Ok((PacketRead::Remain { data, fh, max_size }, true, false))
                     }
                     None => {
                         data.extend_from_slice(&scratch[..n]);
-                        Ok((PacketRead::Header { byte1, data }, true, false))
+                        Ok((PacketRead::Header { byte1, data, max_size }, true, false))
                     }
                 },
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketRead::Header { byte1, data }, true, true))
+                    Ok((PacketRead::Header { byte1, data, max_size }, true, true))
                 }
                 Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Header"),
             },
-            Remain { mut data, fh } => {
+            Remain { mut data, fh, max_size } => {
                 let m = data.len();
                 unsafe { data.set_len(*fh.remaining_len as usize) };
                 match stream.read(&mut data[m..]) {
                     Ok(0) => err!(Disconnected, desc:  "PacketRead::Remain"),
                     Ok(n) if (m + n) == (*fh.remaining_len as usize) => {
-                        Ok((PacketRead::Fin { data, fh }, false, false))
+                        Ok((PacketRead::Fin { data, fh, max_size }, false, false))
                     }
                     Ok(n) => {
                         unsafe { data.set_len(m + n) };
-                        Ok((PacketRead::Remain { data, fh }, true, false))
+                        Ok((PacketRead::Remain { data, fh, max_size }, true, false))
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        Ok((PacketRead::Remain { data, fh }, true, true))
+                        Ok((PacketRead::Remain { data, fh, max_size }, true, true))
                     }
                     Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Remain"),
                 }
             }
-            Fin { data, fh } => Ok((PacketRead::Fin { data, fh }, false, false)),
+            Fin { data, fh, max_size } => {
+                let val = PacketRead::Fin { data, fh, max_size };
+                Ok((val, false, false))
+            }
             PacketRead::None => unreachable!(),
         }
     }
 
     pub fn parse(&self) -> Result<v5::Packet> {
         let (pkt, n, m) = match self {
-            PacketRead::Fin { data, fh } => match fh.unwrap()?.0 {
+            PacketRead::Fin { data, fh, .. } => match fh.unwrap()?.0 {
                 v5::PacketType::Connect => {
                     let (pkt, n) = v5::Connect::decode(&data)?;
                     (v5::Packet::Connect(pkt), n, data.len())
@@ -178,9 +219,9 @@ impl PacketRead {
 
     pub fn reset(self) -> Self {
         match self {
-            PacketRead::Fin { mut data, .. } => {
+            PacketRead::Fin { mut data, max_size, .. } => {
                 data.truncate(0);
-                PacketRead::Init { data }
+                PacketRead::Init { data, max_size }
             }
             _ => unreachable!(),
         }
@@ -189,9 +230,19 @@ impl PacketRead {
 
 pub enum PacketWrite {
     None,
-    Init { data: Vec<u8> },
-    Remain { data: Vec<u8>, start: usize },
-    Fin { data: Vec<u8> },
+    Init {
+        data: Vec<u8>,
+        max_size: usize,
+    },
+    Remain {
+        data: Vec<u8>,
+        start: usize,
+        max_size: usize,
+    },
+    Fin {
+        data: Vec<u8>,
+        max_size: usize,
+    },
 }
 
 impl Default for PacketWrite {
@@ -201,13 +252,13 @@ impl Default for PacketWrite {
 }
 
 impl PacketWrite {
-    pub fn new(buf: &[u8]) -> PacketWrite {
-        use crate::MSG_TYPICAL_SIZE;
+    pub fn new(buf: &[u8], max_size: usize) -> PacketWrite {
+        use crate::MAX_PACKET_SIZE;
         use std::cmp;
 
-        let mut data = Vec::with_capacity(cmp::max(MSG_TYPICAL_SIZE, buf.len()));
+        let mut data = Vec::with_capacity(cmp::max(MAX_PACKET_SIZE, buf.len()));
         data.extend_from_slice(buf);
-        PacketWrite::Init { data }
+        PacketWrite::Init { data, max_size }
     }
 
     // return (self, retry, wouldblock)
@@ -216,45 +267,57 @@ impl PacketWrite {
         use PacketWrite::{Fin, Init, Remain};
 
         match self {
-            Init { data } => match stream.write(&data) {
+            // silently ignore if the packet size is more that requested.
+            Init { data, max_size } if data.len() > max_size => {
+                Ok((PacketWrite::Fin { data, max_size }, false, false))
+            }
+            Init { data, max_size } => match stream.write(&data) {
                 Ok(0) => err!(Disconnected, desc:  "PacketWrite::Init"),
-                Ok(n) if n == data.len() => Ok((PacketWrite::Fin { data }, false, false)),
-                Ok(n) => Ok((PacketWrite::Remain { data, start: n }, true, false)),
+                Ok(n) if n == data.len() => {
+                    Ok((PacketWrite::Fin { data, max_size }, false, false))
+                }
+                Ok(n) => {
+                    let val = PacketWrite::Remain { data, start: n, max_size };
+                    Ok((val, true, false))
+                }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-                    Ok((PacketWrite::Remain { data, start: 0 }, true, false))
+                    Ok((PacketWrite::Remain { data, start: 0, max_size }, true, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketWrite::Remain { data, start: 0 }, true, true))
+                    Ok((PacketWrite::Remain { data, start: 0, max_size }, true, true))
                 }
                 Err(err) => err!(Disconnected, try: Err(err), "PacketWrite::Init"),
             },
-            Remain { data, start } => match stream.write(&data[start..]) {
+            Remain { data, start, max_size } => match stream.write(&data[start..]) {
                 Ok(0) => err!(Disconnected, desc:  "PacketWrite::Remain"),
                 Ok(n) if (start + n) == data.len() => {
-                    Ok((PacketWrite::Fin { data }, false, false))
+                    Ok((PacketWrite::Fin { data, max_size }, false, false))
                 }
                 Ok(n) => {
-                    Ok((PacketWrite::Remain { data, start: start + n }, true, false))
+                    let val = PacketWrite::Remain { data, start: start + n, max_size };
+                    Ok((val, true, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-                    Ok((PacketWrite::Remain { data, start }, true, false))
+                    Ok((PacketWrite::Remain { data, start, max_size }, true, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketWrite::Remain { data, start }, true, true))
+                    Ok((PacketWrite::Remain { data, start, max_size }, true, true))
                 }
                 Err(err) => err!(Disconnected, try: Err(err), "PacketWrite::Remain"),
             },
-            Fin { data } => Ok((PacketWrite::Fin { data }, false, false)),
+            Fin { data, max_size } => {
+                Ok((PacketWrite::Fin { data, max_size }, false, false))
+            }
             PacketWrite::None => unreachable!(),
         }
     }
 
     pub fn reset(self, buf: &[u8]) -> Self {
         match self {
-            PacketWrite::Fin { mut data } => {
+            PacketWrite::Fin { mut data, max_size } => {
                 data.truncate(0);
                 data.extend_from_slice(buf);
-                PacketWrite::Init { data }
+                PacketWrite::Init { data, max_size }
             }
             _ => unreachable!(),
         }

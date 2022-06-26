@@ -6,6 +6,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::SubAck";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SubAckReasonCode {
     QoS0 = 0x0,
     QoS1 = 0x1,
@@ -38,31 +39,16 @@ impl TryFrom<u8> for SubAckReasonCode {
             0x9e => SubAckReasonCode::SharedSubscriptionsNotSupported,
             0xa1 => SubAckReasonCode::SubscriptionIdNotSupported,
             0xa2 => SubAckReasonCode::WildcardSubscriptionsNotSupported,
-            val => {
-                err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val)?
-            }
+            val => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "{} reason-code {}",
+                PP,
+                val
+            )?,
         };
 
         Ok(v)
-    }
-}
-
-impl From<SubAckReasonCode> for u8 {
-    fn from(val: SubAckReasonCode) -> u8 {
-        match val {
-            SubAckReasonCode::QoS0 => 0x00,
-            SubAckReasonCode::QoS1 => 0x01,
-            SubAckReasonCode::QoS2 => 0x02,
-            SubAckReasonCode::UnspecifiedError => 0x80,
-            SubAckReasonCode::ImplementationError => 0x83,
-            SubAckReasonCode::NotAuthorized => 0x87,
-            SubAckReasonCode::InvalidTopicFilter => 0x8f,
-            SubAckReasonCode::PacketIdInuse => 0x91,
-            SubAckReasonCode::QuotaExceeded => 0x97,
-            SubAckReasonCode::SharedSubscriptionsNotSupported => 0x9e,
-            SubAckReasonCode::SubscriptionIdNotSupported => 0xa1,
-            SubAckReasonCode::WildcardSubscriptionsNotSupported => 0xa2,
-        }
     }
 }
 
@@ -89,9 +75,7 @@ impl Packetize for SubAck {
                 err!(MalformedPacket, code: MalformedPacket, "{} no payload", PP)?
             }
             m if m <= stream.len() => (stream[n..m].to_vec(), m),
-            m => {
-                err!(InsufficientBytes, code: MalformedPacket, "{} in payload {}", PP, m)?
-            }
+            m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
         let mut return_codes: Vec<SubAckReasonCode> = vec![];
@@ -115,7 +99,7 @@ impl Packetize for SubAck {
             data.extend_from_slice(VarU32(0).encode()?.as_ref());
         }
         for code in self.return_codes.clone().into_iter() {
-            data.push(code.into())
+            data.push(code as u8)
         }
 
         let fh = FixedHeader::new(PacketType::SubAck, VarU32(data.len().try_into()?))?;

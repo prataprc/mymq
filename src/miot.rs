@@ -3,9 +3,8 @@ use log::{debug, error, info, trace};
 use std::{collections::BTreeMap, net, sync::Arc, time};
 
 use crate::packet::{PacketRead, PacketWrite};
-use crate::queue::{Queue, QueueRx, QueueTx, SocketRd, SocketWt};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{v5, ClientID, Config, Shard};
+use crate::{queue, v5, ClientID, Config, Shard};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -13,6 +12,8 @@ type ThreadRx = Rx<Request, Result<Response>>;
 pub struct Miot {
     /// Human readable name for this miot thread.
     pub name: String,
+    /// Same as the shard-id.
+    pub miot_id: usize,
     prefix: String,
     config: Config,
     inner: Inner,
@@ -29,8 +30,8 @@ pub struct RunLoop {
     shard: Box<Shard>,
     /// Mio poller for asynchronous handling.
     poll: mio::Poll,
-    /// collection of all active collection of socket connections.
-    conns: BTreeMap<ClientID, Queue>,
+    /// collection of all active socket connections abstracted as queue.
+    conns: BTreeMap<ClientID, queue::Socket>,
     /// next available token for connections
     next_token: mio::Token,
     /// whether thread is closed.
@@ -42,6 +43,7 @@ impl Default for Miot {
         let config = Config::default();
         let mut def = Miot {
             name: format!("{}-miot-init", config.name),
+            miot_id: usize::default(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -72,10 +74,11 @@ impl Miot {
 
     /// Create a miot thread from configuration. Miot shall be in `Init` state, to start
     /// the miot thread call [Miot::spawn].
-    pub fn from_config(config: Config) -> Result<Miot> {
+    pub fn from_config(config: Config, miot_id: usize) -> Result<Miot> {
         let m = Miot::default();
         let mut val = Miot {
             name: m.name.clone(),
+            miot_id,
             prefix: String::default(),
             config: config.clone(),
             inner: Inner::Init,
@@ -87,17 +90,17 @@ impl Miot {
 
     pub fn spawn(self, shard: Shard) -> Result<Miot> {
         use crate::FIRST_TOKEN;
-        use mio::Waker;
 
         if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
             err!(InvalidInput, desc: "miot can be spawned only in init-state ")?;
         }
 
         let poll = mio::Poll::new()?;
-        let waker = Arc::new(Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
+        let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
         let miot = Miot {
             name: format!("{}-miot-main", self.config.name),
+            miot_id: self.miot_id,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -108,10 +111,11 @@ impl Miot {
                 closed: false,
             }),
         };
-        let thrd = Thread::spawn(&self.name, miot);
+        let thrd = Thread::spawn(&self.prefix, miot);
 
         let val = Miot {
             name: format!("{}-miot-handle", self.config.name),
+            miot_id: self.miot_id,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -128,20 +132,19 @@ impl Miot {
         client_id: ClientID,
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
-        rd_chan: QueueTx,
-        wt_chan: QueueRx,
-    ) -> Result<()> {
-        use Request::AddConnection;
-
+        upstream: queue::QueueTx,
+    ) -> Result<queue::QueueTx> {
+        let req = Request::AddConnection { client_id, conn, addr, upstream };
         match &self.inner {
             Inner::Handle(waker, thrd) => {
-                thrd.request(AddConnection { client_id, conn, addr, rd_chan, wt_chan })??;
                 waker.wake()?;
+                match thrd.request(req)?? {
+                    Response::Downstream(tx) => Ok(tx),
+                    _ => unreachable!(),
+                }
             }
             _ => unreachable!(),
         }
-
-        Ok(())
     }
 
     pub fn close_wait(mut self) -> Result<Miot> {
@@ -150,8 +153,8 @@ impl Miot {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(waker, thrd) => {
-                thrd.request(Request::Close)??;
                 waker.wake()?;
+                thrd.request(Request::Close)??;
                 thrd.close_wait()
             }
             _ => unreachable!(),
@@ -164,14 +167,14 @@ pub enum Request {
         client_id: ClientID,
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
-        rd_chan: QueueTx,
-        wt_chan: QueueRx,
+        upstream: queue::QueueTx,
     },
     Close,
 }
 
 pub enum Response {
     Ok,
+    Downstream(queue::QueueTx),
 }
 
 impl Threadable for Miot {
@@ -179,47 +182,34 @@ impl Threadable for Miot {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
+        use crate::REQ_CHANNEL_SIZE;
+
         info!("{} spawn ...", self.prefix);
 
-        let mut events = mio::Events::with_capacity(2);
-        let res = loop {
+        let mut events = mio::Events::with_capacity(REQ_CHANNEL_SIZE);
+        loop {
             let timeout: Option<time::Duration> = None;
-            match self.as_mut_poll().poll(&mut events, timeout) {
-                Ok(()) => (),
-                Err(err) => {
-                    break err!(IOError, try: Err(err), "{} poll error", self.prefix);
-                }
+            allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
+
+            let exit = self.mio_events(&rx, &events);
+            if exit {
+                break;
             }
 
-            match self.mio_events(&rx, &events) {
-                Ok(true) => break Ok(()),
-                Ok(false) => continue,
-                Err(err) => break Err(err),
-            };
-        };
-
-        match self.handle_close(Request::Close) {
-            Ok(Response::Ok) => (),
-            Err(err) => error!("{} thread pre-exit close failed {}", self.prefix, err),
+            // wake the shard
+            allow_panic!(self.prefix, self.as_shard().wake());
         }
 
-        match res {
-            Ok(()) => {
-                info!("{} thread normal exit...", self.prefix);
-            }
-            Err(err) => {
-                error!("{} fatal error, try restarting thread `{}`", self.prefix, err);
-                allow_panic!(self.as_shard().restart_miot());
-            }
-        }
+        self.handle_close(Request::Close);
+        info!("{} thread exit...", self.prefix);
 
         self
     }
 }
 
 impl Miot {
-    // return whether we are doing normal exit
-    fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> Result<bool> {
+    // return (exit,)
+    fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
             trace!("{} poll-event token:{}", self.prefix, event.token().0);
@@ -227,22 +217,23 @@ impl Miot {
         }
         debug!("{} polled {} events", self.prefix, count);
 
-        let res = loop {
-            match self.control_chan(rx)? {
-                (_empty, true) => break Ok(true),
-                (false, _disconnected) => break Ok(false),
-                (true, false) => todo!(),
+        let exit = loop {
+            // keep repeating until all control requests are drained.
+            match self.control_chan(rx) {
+                (_empty, true) => break true,
+                (true, _disconnected) => break false,
+                (false, false) => (),
             }
         };
 
-        self.read_conns()?;
-        self.write_conns()?;
+        self.read_conns();
+        self.write_conns();
 
-        res
+        exit
     }
 
     // Return (empty, disconnected)
-    fn control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
+    fn control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
         use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
         use Request::*;
 
@@ -263,21 +254,22 @@ impl Miot {
         for q in qs.into_iter() {
             match q {
                 (q @ AddConnection { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_add_connection(q)))?
+                    let resp = self.handle_add_connection(q);
+                    allow_panic!(self.prefix, tx.send(Ok(resp)));
                 }
                 (q @ Close, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_close(q)))?
+                    allow_panic!(self.prefix, tx.send(Ok(self.handle_close(q))));
                 }
                 (_, _) => unreachable!(),
             }
         }
 
-        Ok((empty, disconnected))
+        (empty, disconnected)
     }
 }
 
 impl Miot {
-    fn read_conns(&mut self) -> Result<()> {
+    fn read_conns(&mut self) {
         let (shard, conns, closed) = match &mut self.inner {
             Inner::Main(RunLoop { shard, conns, closed, .. }) => (shard, conns, *closed),
             _ => unreachable!(),
@@ -315,15 +307,17 @@ impl Miot {
                 packets = queue.rd.packets.drain(..).collect()
             }
             error!("{} removing queue {:?}", self.prefix, *client_id);
-            err!(IPCFail, try: shard.failed_connection(client_id, packets)).ok();
+            ignore_error!(
+                self.prefix,
+                "shard.failed_connection",
+                err!(IPCFail, try: shard.failed_connection(client_id, packets))
+            );
         }
-
-        Ok(())
     }
 
     // return packets from connection and send it upstream.
     // Disconnected, BadPacket, RxClosed
-    fn read_packets(prefix: &str, queue: &mut Queue) -> Result<()> {
+    fn read_packets(prefix: &str, queue: &mut queue::Socket) -> Result<()> {
         use crate::MSG_CHANNEL_SIZE;
 
         // before reading from socket, send remaining packets to shard.
@@ -351,7 +345,10 @@ impl Miot {
 
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
     // BadPacket, if data from connection has gone bad, same as Disconnected.
-    fn read_packet(prefix: &str, queue: &mut Queue) -> Result<Option<v5::Packet>> {
+    fn read_packet(
+        prefix: &str,
+        queue: &mut queue::Socket,
+    ) -> Result<Option<v5::Packet>> {
         use crate::MAX_SOCKET_RETRY;
         use std::mem;
 
@@ -390,7 +387,7 @@ impl Miot {
 
     // return (would_block,)
     // RxClosed, if the receiving end of the queue, in shard/session, has closed.
-    fn send_upstream(prefix: &str, queue: &mut Queue) -> Result<bool> {
+    fn send_upstream(prefix: &str, queue: &mut queue::Socket) -> Result<bool> {
         use std::sync::mpsc;
 
         let mut iter = {
@@ -399,7 +396,7 @@ impl Miot {
         };
         let res = loop {
             match iter.next() {
-                Some(packet) => match queue.rd.msg_tx.try_send(packet) {
+                Some(packet) => match queue.rd.tx.try_send(packet) {
                     Ok(()) => (),
                     Err(mpsc::TrySendError::Full(p)) => {
                         queue.rd.packets.push(p);
@@ -422,7 +419,7 @@ impl Miot {
         res
     }
 
-    fn write_conns(&mut self) -> Result<()> {
+    fn write_conns(&mut self) {
         use crate::MAX_FLUSH_RETRY;
 
         let (shard, conns, closed) = match &mut self.inner {
@@ -473,23 +470,25 @@ impl Miot {
             let _queue = conns.remove(&client_id);
             conns.remove(&client_id);
             error!("{} removing queue {:?}", self.prefix, *client_id);
-            err!(IPCFail, try: shard.failed_connection(client_id, vec![])).ok();
+            ignore_error!(
+                self.prefix,
+                "shard.failed_connection",
+                err!(IPCFail, try: shard.failed_connection(client_id, vec![]))
+            );
         }
-
-        Ok(())
     }
 
     // write packets to connection.
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
     // TxFinish, if the transmitting end of the queue, in shard/session, has closed.
-    fn write_packets(prefix: &str, queue: &mut Queue) -> Result<()> {
+    fn write_packets(prefix: &str, queue: &mut queue::Socket) -> Result<()> {
         use crate::MSG_CHANNEL_SIZE;
 
         // before reading from socket, send remaining packets to connection.
         let downstream_block = Self::write_downstream(prefix, queue)?;
         match downstream_block {
             true => Ok(()),
-            false => match rx_packets(&queue.wt.msg_rx, MSG_CHANNEL_SIZE) {
+            false => match rx_packets(&queue.wt.rx, MSG_CHANNEL_SIZE) {
                 (qs, _empty, true) => {
                     queue.wt.packets = qs;
                     err!(
@@ -509,7 +508,7 @@ impl Miot {
 
     // return (would_block,)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
-    fn write_downstream(prefix: &str, queue: &mut Queue) -> Result<bool> {
+    fn write_downstream(prefix: &str, queue: &mut queue::Socket) -> Result<bool> {
         use crate::{Packetize, MAX_SOCKET_RETRY};
         use std::mem;
 
@@ -570,12 +569,13 @@ impl Miot {
 }
 
 impl Miot {
-    fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
+    fn handle_add_connection(&mut self, req: Request) -> Response {
+        use crate::{MAX_PACKET_SIZE, MSG_CHANNEL_SIZE};
         use mio::Interest;
 
-        let (client_id, mut conn, addr, msg_tx, msg_rx) = match req {
-            Request::AddConnection { client_id, conn, addr, rd_chan, wt_chan } => {
-                (client_id, conn, addr, rd_chan, wt_chan)
+        let (client_id, mut conn, addr, tx) = match req {
+            Request::AddConnection { client_id, conn, addr, upstream } => {
+                (client_id, conn, addr, upstream)
             }
             _ => unreachable!(),
         };
@@ -588,64 +588,62 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        poll.registry().register(
-            &mut conn,
-            token,
-            Interest::READABLE | Interest::WRITABLE,
-        )?;
+        let interests = Interest::READABLE | Interest::WRITABLE;
+        allow_panic!(self.prefix, poll.registry().register(&mut conn, token, interests));
 
-        {
-            let rd = SocketRd {
-                pr: PacketRead::new(),
-                retries: 0,
-                msg_tx,
-                packets: Vec::default(),
-            };
-            let wt = SocketWt {
-                pw: PacketWrite::new(&[]),
-                retries: 0,
-                msg_rx,
-                packets: Vec::default(),
-                flush_retries: 0,
-            };
-            let id = client_id.clone();
-            let queue = Queue { client_id, conn, addr, token, rd, wt };
-            conns.insert(id, queue);
-        }
+        let (downstream, rx) = queue::queue_channel(MSG_CHANNEL_SIZE);
 
-        Ok(Response::Ok)
+        let rd = queue::Source {
+            pr: PacketRead::new(MAX_PACKET_SIZE), // TODO: use configurable values
+            retries: 0,
+            tx,
+            packets: Vec::default(),
+        };
+        let wt = queue::Sink {
+            pw: PacketWrite::new(&[], MAX_PACKET_SIZE), // TODO: use configurable values
+            retries: 0,
+            rx,
+            packets: Vec::default(),
+            flush_retries: 0,
+        };
+        let id = client_id.clone();
+        let queue = queue::Socket { client_id, conn, addr, token, rd, wt };
+        conns.insert(id, queue);
+
+        Response::Downstream(downstream)
     }
 
-    fn handle_close(&mut self, _req: Request) -> Result<Response> {
+    fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        let RunLoop { shard, poll, conns, closed, .. } = match &mut self.inner {
+        let RunLoop { shard, conns, closed, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
-        *closed = true;
 
-        info!("{} connections:{} ...", self.prefix, conns.len());
+        if *closed == false {
+            info!("{} connections:{} ...", self.prefix, conns.len());
 
-        let shard = mem::replace(shard, Box::new(Shard::default()));
-        mem::drop(shard);
+            let shard = mem::replace(shard, Box::new(Shard::default()));
+            mem::drop(shard);
 
-        let conns = mem::replace(conns, BTreeMap::default());
-        for (cid, queue) in conns.into_iter() {
-            info!("{} closing socket {:?} client-id:{:?}", self.prefix, queue.addr, *cid);
-            mem::drop(queue.conn);
+            let conns = mem::replace(conns, BTreeMap::default());
+            for (cid, queue) in conns.into_iter() {
+                info!(
+                    "{} closing socket {:?} client-id:{:?}",
+                    self.prefix, queue.addr, *cid
+                );
+                mem::drop(queue.conn);
+            }
+            *closed = true;
         }
-
-        let poll = mem::replace(poll, mio::Poll::new()?);
-        mem::drop(poll);
-
-        Ok(Response::Ok)
+        Response::Ok
     }
 }
 
 impl Miot {
     fn prefix(&self) -> String {
-        format!("{}", self.name)
+        format!("{}:{}", self.name, self.miot_id)
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
@@ -664,7 +662,7 @@ impl Miot {
 }
 
 /// Return (requests, empty, disconnected)
-fn rx_packets(rx: &QueueRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
+fn rx_packets(rx: &queue::QueueRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
     use std::sync::mpsc;
 
     let mut reqs = vec![];

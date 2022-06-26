@@ -6,6 +6,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::PubACLC";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
 pub enum PubReasonCode {
     Success = 0x00,
     NoMatchingSubscribers = 0x10,
@@ -34,7 +35,9 @@ impl TryFrom<u8> for PubReasonCode {
             0x92 => Ok(PubReasonCode::PacketIdNotFound),
             0x97 => Ok(PubReasonCode::QuotaExceeded),
             0x99 => Ok(PubReasonCode::PayloadFormatInvalid),
-            val => err!(ProtocolError, code: ProtocolError, "{} reason-code {}", PP, val),
+            val => {
+                err!(MalformedPacket, code: MalformedPacket, "{} reason-code {}", PP, val)
+            }
         }
     }
 }
@@ -106,7 +109,7 @@ impl Packetize for Pub {
             PacketType::PubRel => FixedHeader::new_pubrel(remlen)?,
             PacketType::PubRec => FixedHeader::new(PacketType::PubRec, remlen)?,
             PacketType::PubComp => FixedHeader::new(PacketType::PubComp, remlen)?,
-            packet_type => err!(InvalidInput, desc: "packet_type {:?}", packet_type)?,
+            packet_type => err!(ProtocolError, desc: "packet_type {:?}", packet_type)?,
         };
         data = insert_fixed_header(fh, data)?;
 

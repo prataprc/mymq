@@ -129,13 +129,27 @@ macro_rules! log_error {
 
 #[macro_export]
 macro_rules! allow_panic {
-    ($($args:expr),+) => {{
+    ($prefix:expr, $($args:expr),+) => {{
+        use log::error;
+
         match $($args),+ {
-            Ok(()) => (),
+            Ok(val) => val,
             Err(err) => {
-                error!("Now we are going to panic");
+                error!("{}, now we are going to panic", $prefix);
                 panic!("{}", err);
             }
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! ignore_error {
+    ($prefix:expr, $msg:expr, $($args:expr),+) => {{
+        use log::error;
+
+        match $($args),+ {
+            Ok(()) => (),
+            Err(err) => error!("{}, {}, ignoring error {}", $prefix, $msg, err),
         }
     }};
 }
@@ -234,8 +248,8 @@ impl Error {
     }
 
     /// Reason code as defined by `MQTT-spec`.
-    pub fn code(&self) -> Option<ReasonCode> {
-        self.code
+    pub fn code(&self) -> ReasonCode {
+        self.code.unwrap_or(ReasonCode::UnspecifiedError)
     }
 
     pub fn has(&self, kind: ErrorKind) -> bool {
@@ -254,8 +268,9 @@ impl Error {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
     NoError,
-    // general error
+    // error that leads to cluster shutdown
     Fatal,
+    // general error
     InvalidInput,
     FailConvert,
     // mqtt errors
@@ -316,6 +331,7 @@ impl fmt::Display for ErrorKind {
 
 /// ReasonCode defined by `MQTT-spec`, each variant defines error value.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
 pub enum ReasonCode {
     Success = 0x00, // NormalDisconnet, QoS0
     QoS1 = 0x1,
