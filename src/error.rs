@@ -142,18 +142,6 @@ macro_rules! allow_panic {
     }};
 }
 
-#[macro_export]
-macro_rules! ignore_error {
-    ($prefix:expr, $msg:expr, $($args:expr),+) => {{
-        use log::error;
-
-        match $($args),+ {
-            Ok(()) => (),
-            Err(err) => error!("{}, {}, ignoring error {}", $prefix, $msg, err),
-        }
-    }};
-}
-
 /// Error that is part of [Result] type.
 pub struct Error {
     pub(crate) kind: ErrorKind,

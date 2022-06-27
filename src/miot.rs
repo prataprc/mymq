@@ -281,19 +281,21 @@ impl Miot {
             debug!("{} processing read connections. closed:{}", self.prefix, closed);
         }
 
+        let err_kinds = [
+            ErrorKind::Disconnected,
+            ErrorKind::MalformedPacket,
+            ErrorKind::ProtocolError,
+        ];
+
         // if thread is closed, conns will be empty.
         let mut fail_queues = vec![];
         for (client_id, queue) in conns.iter_mut() {
             match Self::read_packets(&self.prefix, queue) {
                 Ok(()) => (),
                 Err(err) if err.kind() == ErrorKind::RxClosed => {
-                    // upstream queue, in shard/session is closed.
                     fail_queues.push((client_id.clone(), false));
                 }
-                Err(err) if err.kind() == ErrorKind::BadPacket => {
-                    fail_queues.push((client_id.clone(), true)); // connt has gone bad
-                }
-                Err(err) if err.kind() == ErrorKind::Disconnected => {
+                Err(err) if err_kinds.contains(&err.kind()) => {
                     fail_queues.push((client_id.clone(), true)); // connt has gone bad
                 }
                 Err(_err) => unreachable!(),
@@ -307,44 +309,53 @@ impl Miot {
                 packets = queue.rd.packets.drain(..).collect()
             }
             error!("{} removing queue {:?}", self.prefix, *client_id);
-            ignore_error!(
-                self.prefix,
-                "shard.failed_connection",
-                err!(IPCFail, try: shard.failed_connection(client_id, packets))
-            );
+            err!(IPCFail, try: shard.failed_connection(client_id, packets)).ok();
         }
     }
 
     // return packets from connection and send it upstream.
-    // Disconnected, BadPacket, RxClosed
+    // Disconnected, RxClosed
     fn read_packets(prefix: &str, queue: &mut queue::Socket) -> Result<()> {
-        use crate::MSG_CHANNEL_SIZE;
+        use crate::{packet::send_disconnect, ReasonCode as RC, MSG_CHANNEL_SIZE};
 
         // before reading from socket, send remaining packets to shard.
         let upstream_block = Self::send_upstream(prefix, queue)?;
         match upstream_block {
             true => Ok(()),
             false => loop {
-                match Self::read_packet(prefix, queue)? {
-                    Some(pkt) if queue.rd.packets.len() < MSG_CHANNEL_SIZE => {
+                match Self::read_packet(prefix, queue) {
+                    Ok(Some(pkt)) if queue.rd.packets.len() < MSG_CHANNEL_SIZE => {
                         queue.rd.packets.push(pkt);
                     }
-                    Some(pkt) => {
+                    Ok(Some(pkt)) => {
                         queue.rd.packets.push(pkt);
                         Self::send_upstream(prefix, queue)?;
                         break Ok(());
                     }
-                    None => {
+                    Ok(None) => {
                         Self::send_upstream(prefix, queue)?;
                         break Ok(());
                     }
+                    Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                        send_disconnect(prefix, RC::MalformedPacket, &queue.conn).ok();
+                        break Err(err);
+                    }
+                    Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                        send_disconnect(prefix, RC::ProtocolError, &queue.conn).ok();
+                        break Err(err);
+                    }
+                    Err(err) if err.kind() == ErrorKind::Disconnected => {
+                        break Err(err);
+                    }
+                    Err(_err) => unreachable!(),
                 }
             },
         }
     }
 
-    // Disconnected, if connection has gone bad or attempted maximum retries on socket.
-    // BadPacket, if data from connection has gone bad, same as Disconnected.
+    // Disconnected, and implies a bad connection.
+    // MalformedPacket, implies a DISCONNECT and socket close
+    // ProtocolError, implies DISCONNECT and socket close
     fn read_packet(
         prefix: &str,
         queue: &mut queue::Socket,
@@ -369,15 +380,9 @@ impl Miot {
                     queue.rd.retries
                 )?;
             } else {
-                match pr.parse() {
-                    Ok(pkt) => {
-                        pr = pr.reset();
-                        break Ok(Some(pkt));
-                    }
-                    Err(err) => err!(
-                        BadPacket, desc: "{} parse failed {}", prefix, err
-                    )?,
-                }
+                let pkt = pr.parse()?;
+                pr = pr.reset();
+                break Ok(Some(pkt));
             };
         };
 
@@ -470,11 +475,7 @@ impl Miot {
             let _queue = conns.remove(&client_id);
             conns.remove(&client_id);
             error!("{} removing queue {:?}", self.prefix, *client_id);
-            ignore_error!(
-                self.prefix,
-                "shard.failed_connection",
-                err!(IPCFail, try: shard.failed_connection(client_id, vec![]))
-            );
+            err!(IPCFail, try: shard.failed_connection(client_id, vec![])).ok();
         }
     }
 

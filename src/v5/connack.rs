@@ -24,6 +24,12 @@ impl DerefMut for ConnackFlags {
     }
 }
 
+impl Default for ConnackFlags {
+    fn default() -> ConnackFlags {
+        ConnackFlags(0)
+    }
+}
+
 impl Packetize for ConnackFlags {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
@@ -59,7 +65,7 @@ impl ConnackFlags {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
-pub enum ConnectReasonCode {
+pub enum ConnackReasonCode {
     Success = 0x00,
     UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
@@ -84,33 +90,33 @@ pub enum ConnectReasonCode {
     ExceedConnectionRate = 0x9f,
 }
 
-impl TryFrom<u8> for ConnectReasonCode {
+impl TryFrom<u8> for ConnackReasonCode {
     type Error = Error;
 
-    fn try_from(val: u8) -> Result<ConnectReasonCode> {
+    fn try_from(val: u8) -> Result<ConnackReasonCode> {
         match val {
-            0x00 => Ok(ConnectReasonCode::Success),
-            0x80 => Ok(ConnectReasonCode::UnspecifiedError),
-            0x81 => Ok(ConnectReasonCode::MalformedPacket),
-            0x82 => Ok(ConnectReasonCode::ProtocolError),
-            0x83 => Ok(ConnectReasonCode::ImplementationError),
-            0x84 => Ok(ConnectReasonCode::UnsupportedProtocolVersion),
-            0x85 => Ok(ConnectReasonCode::InvalidClientID),
-            0x86 => Ok(ConnectReasonCode::BadLogin),
-            0x87 => Ok(ConnectReasonCode::NotAuthorized),
-            0x88 => Ok(ConnectReasonCode::ServerUnavailable),
-            0x89 => Ok(ConnectReasonCode::ServerBusy),
-            0x8a => Ok(ConnectReasonCode::Banned),
-            0x8c => Ok(ConnectReasonCode::BadAuthenticationMethod),
-            0x90 => Ok(ConnectReasonCode::InvalidTopicName),
-            0x95 => Ok(ConnectReasonCode::PacketTooLarge),
-            0x97 => Ok(ConnectReasonCode::QuotaExceeded),
-            0x99 => Ok(ConnectReasonCode::PayloadFormatInvalid),
-            0x9a => Ok(ConnectReasonCode::RetainNotSupported),
-            0x9b => Ok(ConnectReasonCode::InvalidQoS),
-            0x9c => Ok(ConnectReasonCode::UseAnotherServer),
-            0x9d => Ok(ConnectReasonCode::ServerMoved),
-            0x9f => Ok(ConnectReasonCode::ExceedConnectionRate),
+            0x00 => Ok(ConnackReasonCode::Success),
+            0x80 => Ok(ConnackReasonCode::UnspecifiedError),
+            0x81 => Ok(ConnackReasonCode::MalformedPacket),
+            0x82 => Ok(ConnackReasonCode::ProtocolError),
+            0x83 => Ok(ConnackReasonCode::ImplementationError),
+            0x84 => Ok(ConnackReasonCode::UnsupportedProtocolVersion),
+            0x85 => Ok(ConnackReasonCode::InvalidClientID),
+            0x86 => Ok(ConnackReasonCode::BadLogin),
+            0x87 => Ok(ConnackReasonCode::NotAuthorized),
+            0x88 => Ok(ConnackReasonCode::ServerUnavailable),
+            0x89 => Ok(ConnackReasonCode::ServerBusy),
+            0x8a => Ok(ConnackReasonCode::Banned),
+            0x8c => Ok(ConnackReasonCode::BadAuthenticationMethod),
+            0x90 => Ok(ConnackReasonCode::InvalidTopicName),
+            0x95 => Ok(ConnackReasonCode::PacketTooLarge),
+            0x97 => Ok(ConnackReasonCode::QuotaExceeded),
+            0x99 => Ok(ConnackReasonCode::PayloadFormatInvalid),
+            0x9a => Ok(ConnackReasonCode::RetainNotSupported),
+            0x9b => Ok(ConnackReasonCode::InvalidQoS),
+            0x9c => Ok(ConnackReasonCode::UseAnotherServer),
+            0x9d => Ok(ConnackReasonCode::ServerMoved),
+            0x9f => Ok(ConnackReasonCode::ExceedConnectionRate),
             val => {
                 err!(MalformedPacket, code: MalformedPacket, "{} reason-code {}", PP, val)
             }
@@ -121,8 +127,26 @@ impl TryFrom<u8> for ConnectReasonCode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnAck {
     pub flags: ConnackFlags,
-    pub code: ConnectReasonCode,
+    pub code: ConnackReasonCode,
     pub properties: Option<ConnAckProperties>,
+}
+
+impl ConnAck {
+    pub fn from_reason_code(code: ReasonCode) -> ConnAck {
+        match code {
+            ReasonCode::MalformedPacket => ConnAck {
+                flags: ConnackFlags::default(),
+                code: ConnackReasonCode::try_from(code as u8).unwrap(),
+                properties: None,
+            },
+            ReasonCode::ProtocolError => ConnAck {
+                flags: ConnackFlags::default(),
+                code: ConnackReasonCode::try_from(code as u8).unwrap(),
+                properties: None,
+            },
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl Packetize for ConnAck {
@@ -134,7 +158,7 @@ impl Packetize for ConnAck {
 
         let (flags, n) = dec_field!(ConnackFlags, stream, n);
         let (code, n) = dec_field!(u8, stream, n);
-        let code = ConnectReasonCode::try_from(code)?;
+        let code = ConnackReasonCode::try_from(code)?;
         let (properties, n) = dec_props!(ConnAckProperties, stream, n);
 
         let val = ConnAck { flags, code, properties };

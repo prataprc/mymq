@@ -192,7 +192,7 @@ impl Threadable for Listener {
             }
             Err(err) => {
                 error!("{} fatal error, try restarting thread `{}`", self.prefix, err);
-                ignore_error!(self.prefix, "", self.as_cluster().restart_listener());
+                self.as_cluster().restart_listener().ok();
             }
         }
 

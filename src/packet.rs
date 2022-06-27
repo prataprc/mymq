@@ -1,4 +1,5 @@
-use std::io;
+use log::error;
+use std::{io, thread, time};
 
 use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -44,8 +45,8 @@ impl PacketRead {
 
     // return (self, retry, wouldblock),
     // Disconnected, and implies a bad connection.
-    // MalformedPacket from VarU32, implies a DISCONNECT-MalformedPacket.
-    // MalformedPacket from remaining_len, implies DISCONNECT-PacketTooLarge.
+    // MalformedPacket, implies a DISCONNECT and socket close
+    // ProtocolError, implies DISCONNECT and socket close
     pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool, bool)> {
         use PacketRead::{Fin, Header, Init, Remain};
 
@@ -320,6 +321,81 @@ impl PacketWrite {
                 PacketWrite::Init { data, max_size }
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+pub fn send_disconnect(
+    prefix: &str,
+    code: ReasonCode,
+    conn: &mio::net::TcpStream,
+) -> Result<()> {
+    use crate::{MAX_CONNECT_TIMEOUT, MAX_PACKET_SIZE, MAX_SOCKET_RETRY};
+
+    let dur = MAX_CONNECT_TIMEOUT / u64::try_from(MAX_SOCKET_RETRY).unwrap();
+    let dc = v5::Disconnect::from_reason_code(code);
+    let mut packetw = PacketWrite::new(dc.encode().unwrap().as_ref(), MAX_PACKET_SIZE);
+    let mut retries = 0;
+    loop {
+        let (val, retry, would_block) = match packetw.write(conn) {
+            Ok(args) => args,
+            Err(err) => {
+                error!("{} problem writing disconnect packet {}", prefix, err);
+                break Err(err);
+            }
+        };
+        packetw = val;
+
+        if would_block {
+            thread::sleep(time::Duration::from_millis(dur));
+        } else if retry && retries < MAX_SOCKET_RETRY {
+            retries += 1;
+        } else if retry {
+            break err!(
+                Disconnected,
+                desc: "{} failed writing disconnect after retries",
+                prefix
+            );
+        } else {
+            break Ok(());
+        }
+    }
+}
+
+// note that this can block as much as MAX_CONNECT_TIMEOUT.
+pub fn send_connack(
+    prefix: &str,
+    code: ReasonCode,
+    conn: &mio::net::TcpStream,
+) -> Result<()> {
+    use crate::{MAX_CONNECT_TIMEOUT, MAX_PACKET_SIZE, MAX_SOCKET_RETRY};
+
+    let dur = MAX_CONNECT_TIMEOUT / u64::try_from(MAX_SOCKET_RETRY).unwrap();
+    let dc = v5::ConnAck::from_reason_code(code);
+    let mut packetw = PacketWrite::new(dc.encode().unwrap().as_ref(), MAX_PACKET_SIZE);
+    let mut retries = 0;
+    loop {
+        let (val, retry, would_block) = match packetw.write(conn) {
+            Ok(args) => args,
+            Err(err) => {
+                error!("{} problem writing disconnect packet {}", prefix, err);
+                break Err(err);
+            }
+        };
+        packetw = val;
+
+        if would_block {
+            thread::sleep(time::Duration::from_millis(dur));
+        } else if retry && retries < MAX_SOCKET_RETRY {
+            retries += 1;
+        } else if retry {
+            break err!(
+                Disconnected,
+                desc: "{} failed writing disconnect after retries",
+                prefix
+            );
+        } else {
+            break Ok(());
         }
     }
 }

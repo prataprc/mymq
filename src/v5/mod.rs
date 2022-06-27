@@ -4,6 +4,9 @@ use arbitrary::Arbitrary;
 use crate::{util::advance, Blob, Packetize, Result, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode};
 
+// TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
+//       ProtocolError.
+
 #[macro_export]
 macro_rules! dec_field {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
