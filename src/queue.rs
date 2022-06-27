@@ -1,4 +1,4 @@
-use std::{net, sync::mpsc};
+use std::{net, sync::mpsc, time};
 
 use crate::packet::{PacketRead, PacketWrite};
 use crate::{v5, ClientID};
@@ -17,17 +17,55 @@ pub struct Socket {
 
 pub struct Source {
     pub pr: PacketRead,
-    pub retries: usize,
+    pub timeout: Option<time::Instant>,
     pub tx: QueueTx,
     pub packets: Vec<v5::Packet>,
 }
 
 pub struct Sink {
     pub pw: PacketWrite,
-    pub retries: usize,
+    pub timeout: Option<time::Instant>,
     pub rx: QueueRx,
     pub packets: Vec<v5::Packet>,
     pub flush_retries: usize,
+}
+
+impl Socket {
+    pub fn read_elapsed(&self, instant: &time::Instant) -> bool {
+        match &self.rd.timeout {
+            Some(timeout) if timeout < instant => false,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    pub fn write_elapsed(&self, instant: &time::Instant) -> bool {
+        match &self.wt.timeout {
+            Some(timeout) if timeout < instant => false,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    pub fn set_read_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+        if retry && self.rd.timeout.is_none() {
+            self.rd.timeout = timeout.map(|secs| {
+                time::Instant::now() + time::Duration::from_secs(secs as u64)
+            });
+        } else if retry == false {
+            self.rd.timeout = None;
+        }
+    }
+
+    pub fn set_write_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+        if retry && self.wt.timeout.is_none() {
+            self.wt.timeout = timeout.map(|secs| {
+                time::Instant::now() + time::Duration::from_secs(secs as u64)
+            });
+        } else if retry == false {
+            self.wt.timeout = None;
+        }
+    }
 }
 
 #[inline]

@@ -33,6 +33,18 @@ pub struct Config {
     /// * **Default**: [],
     /// * **Mutable**: No
     pub gods: Vec<ConfigNode>,
+    /// Read timeout on MQTT socket, in seconds. For every new packet this timeout
+    /// will kick in, and within the timeout period if a new packet is not completely
+    /// read, connection will be closed.
+    /// * **Default**: None,
+    /// * **Mutable**: No
+    pub mqtt_read_timeout: Option<u32>,
+    /// Write timeout on MQTT socket, in seconds. For every new packet this timeout
+    /// will kick in, and within the timeout period if a new packet is not completely
+    /// written, connection will be closed.
+    /// * **Default**: None,
+    /// * **Mutable**: No
+    pub mqtt_write_timeout: Option<u32>,
 }
 
 impl Default for Config {
@@ -43,6 +55,8 @@ impl Default for Config {
             num_shards: Some(1), // TODO: Some(usize::try_from(num_cpus::get()).unwrap()),
             port: Some(MQTT_PORT),
             gods: Vec::default(),
+            mqtt_read_timeout: None,
+            mqtt_write_timeout: None,
         }
     }
 }
