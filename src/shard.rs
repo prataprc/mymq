@@ -225,11 +225,11 @@ impl Shard {
         Ok(())
     }
 
-    pub fn failed_connection(&self, id: ClientID, ps: Vec<v5::Packet>) -> Result<()> {
+    pub fn failed_connection(&self, client_id: ClientID) -> Result<()> {
         match &self.inner {
             Inner::Tx(waker, tx) => {
                 waker.wake()?;
-                tx.post(Request::FailedConnection { client_id: id, packets: ps })?;
+                tx.post(Request::FailedConnection { client_id })?;
             }
             _ => unreachable!(),
         };
@@ -276,7 +276,6 @@ pub enum Request {
     },
     FailedConnection {
         client_id: ClientID,
-        packets: Vec<v5::Packet>,
     },
     Close,
 }
@@ -428,7 +427,7 @@ impl Shard {
                 miot_tx,
                 miot_rx,
             };
-            Session::from_args(args, pkt)
+            Session::from_args(args, self.config.clone(), pkt)
         };
         let subscribed_tx = session.to_subscribed_tx();
         sessions.insert(client_id.clone(), session);
@@ -470,8 +469,8 @@ impl Shard {
     }
 
     fn handle_failed_connection(&mut self, req: Request) {
-        let (client_id, packets) = match req {
-            Request::FailedConnection { client_id, packets } => (client_id, packets),
+        let client_id = match req {
+            Request::FailedConnection { client_id } => client_id,
             _ => unreachable!(),
         };
         let RunLoop { cluster, sessions, subscribers, .. } = match &mut self.inner {
@@ -482,8 +481,6 @@ impl Shard {
         subscribers.remove(&client_id);
         match sessions.remove(&client_id) {
             Some(session) => {
-                // TODO: handle the final batch of messages from this connection.
-                session.do_mqtt_packets(packets);
                 session.close();
             }
             None => (),

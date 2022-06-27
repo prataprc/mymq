@@ -47,7 +47,7 @@ const CRC32TAB: [u32; 256] = [
 ];
 
 pub fn client_to_shard<K: AsRef<[u8]>>(key: &K, nshards: usize) -> Result<u32> {
-    use crate::{util, MAX_SHARDS};
+    use crate::util;
 
     if util::is_power_of_2(nshards) {
         let key: &[u8] = key.as_ref();
@@ -59,7 +59,7 @@ pub fn client_to_shard<K: AsRef<[u8]>>(key: &K, nshards: usize) -> Result<u32> {
         }
 
         let nshards: u32 = nshards.try_into()?;
-        let hash = ((!crc) >> 16) & (MAX_SHARDS - 1) & (nshards - 1);
+        let hash = ((!crc) >> 16) & (nshards - 1);
         Ok(hash)
     } else {
         err!(InvalidInput, desc: "num. of shards must be power of two")

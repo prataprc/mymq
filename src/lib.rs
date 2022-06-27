@@ -10,6 +10,7 @@ mod error;
 mod chash;
 mod cluster;
 mod config;
+mod flush;
 mod handshake;
 mod listener;
 mod miot;
@@ -18,6 +19,7 @@ mod queue;
 mod session;
 mod shard;
 mod thread;
+mod timer;
 mod types;
 mod util;
 
@@ -31,26 +33,27 @@ pub use chash::ConsistentHash;
 pub use cluster::{Cluster, Node};
 pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
+pub use flush::Flush;
 pub use handshake::Handshake;
 pub use listener::Listener;
 pub use miot::Miot;
 pub use session::Session;
 pub use shard::Shard;
 pub use thread::{Thread, Threadable};
+pub use timer::Timer;
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
 use uuid::Uuid;
 
-use std::net;
+use std::{net, time};
 
-pub const MAX_NODES: usize = 1024;
-pub const MAX_SHARDS: u32 = 0x8000;
+pub const SLEEP_10MS: time::Duration = time::Duration::from_millis(10);
+
 pub const MAX_SESSIONS: usize = 1024 * 8;
 pub const MQTT_PORT: u16 = 1883;
 pub const MAX_SOCKET_RETRY: usize = 128;
 pub const MAX_FLUSH_RETRY: usize = 16;
-pub const MAX_CONNECT_TIMEOUT: u64 = 4000; // in milli-seconds.
 pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 
 pub const REQ_CHANNEL_SIZE: usize = 1024;

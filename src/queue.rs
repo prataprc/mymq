@@ -27,41 +27,36 @@ pub struct Sink {
     pub timeout: Option<time::Instant>,
     pub rx: QueueRx,
     pub packets: Vec<v5::Packet>,
-    pub flush_retries: usize,
 }
 
 impl Socket {
-    pub fn read_elapsed(&self, instant: &time::Instant) -> bool {
+    pub fn read_elapsed(&self) -> bool {
         match &self.rd.timeout {
-            Some(timeout) if timeout < instant => false,
-            Some(_) => true,
-            None => false,
+            Some(timeout) if timeout > &time::Instant::now() => true,
+            Some(_) | None => false,
         }
     }
 
-    pub fn write_elapsed(&self, instant: &time::Instant) -> bool {
+    pub fn write_elapsed(&self) -> bool {
         match &self.wt.timeout {
-            Some(timeout) if timeout < instant => false,
-            Some(_) => true,
-            None => false,
+            Some(timeout) if timeout > &time::Instant::now() => true,
+            Some(_) | None => false,
         }
     }
 
-    pub fn set_read_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+    pub fn set_read_timeout(&mut self, retry: bool, timeout: u32) {
         if retry && self.rd.timeout.is_none() {
-            self.rd.timeout = timeout.map(|secs| {
-                time::Instant::now() + time::Duration::from_secs(secs as u64)
-            });
+            self.rd.timeout =
+                Some(time::Instant::now() + time::Duration::from_secs(timeout as u64));
         } else if retry == false {
             self.rd.timeout = None;
         }
     }
 
-    pub fn set_write_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+    pub fn set_write_timeout(&mut self, retry: bool, timeout: u32) {
         if retry && self.wt.timeout.is_none() {
-            self.wt.timeout = timeout.map(|secs| {
-                time::Instant::now() + time::Duration::from_secs(secs as u64)
-            });
+            self.wt.timeout =
+                Some(time::Instant::now() + time::Duration::from_secs(timeout as u64));
         } else if retry == false {
             self.wt.timeout = None;
         }

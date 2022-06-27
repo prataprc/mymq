@@ -32,3 +32,11 @@ pub fn advance(stream: &[u8], n: usize) -> Result<&[u8]> {
 pub fn is_power_of_2(n: usize) -> bool {
     n != 0 && (n & (n - 1)) == 0
 }
+
+pub fn ceil_power_of_2(n: usize) -> usize {
+    let mut p = 1_usize;
+    while p < n {
+        p = p << 1;
+    }
+    p
+}

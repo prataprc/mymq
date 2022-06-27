@@ -287,6 +287,7 @@ impl Listener {
                     conn: Some(conn),
                     addr,
                     cluster: cluster.to_tx(),
+                    connect_timeout: self.config.connect_timeout(),
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
                 Ok(false)

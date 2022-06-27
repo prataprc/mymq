@@ -1,10 +1,10 @@
 use log::{debug, error, info, trace};
 
-use std::{collections::BTreeMap, net, sync::Arc, time};
+use std::{collections::BTreeMap, net, ops::Deref, sync::Arc, time};
 
 use crate::packet::{PacketRead, PacketWrite};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{queue, v5, ClientID, Config, Shard};
+use crate::{queue, v5, ClientID, Config, Flush, Packetize, Shard};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -15,9 +15,11 @@ pub struct Miot {
     /// Same as the shard-id.
     pub miot_id: usize,
     /// Read timeout on MQTT socket. Refer [Config::mqtt_read_timeout]
-    pub read_timeout: Option<u32>,
+    pub read_timeout: u32,
     /// Write timeout on MQTT socket. Refer [Config::mqtt_write_timeout]
-    pub write_timeout: Option<u32>,
+    pub write_timeout: u32,
+    /// Flush timeout for connection shutdown. Refer [Config::mqtt_flush_timeout]
+    pub flush_timeout: u32,
     prefix: String,
     config: Config,
     inner: Inner,
@@ -48,8 +50,9 @@ impl Default for Miot {
         let mut def = Miot {
             name: format!("{}-miot-init", config.name),
             miot_id: usize::default(),
-            read_timeout: config.mqtt_read_timeout,
-            write_timeout: config.mqtt_write_timeout,
+            read_timeout: config.mqtt_read_timeout(),
+            write_timeout: config.mqtt_write_timeout(),
+            flush_timeout: config.mqtt_flush_timeout(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -85,8 +88,9 @@ impl Miot {
         let mut val = Miot {
             name: m.name.clone(),
             miot_id,
-            read_timeout: config.mqtt_read_timeout,
-            write_timeout: config.mqtt_write_timeout,
+            read_timeout: config.mqtt_read_timeout(),
+            write_timeout: config.mqtt_write_timeout(),
+            flush_timeout: config.mqtt_flush_timeout(),
             prefix: String::default(),
             config: config.clone(),
             inner: Inner::Init,
@@ -111,6 +115,7 @@ impl Miot {
             miot_id: self.miot_id,
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
+            flush_timeout: self.flush_timeout,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -128,6 +133,7 @@ impl Miot {
             miot_id: self.miot_id,
             read_timeout: self.read_timeout,
             write_timeout: self.write_timeout,
+            flush_timeout: self.flush_timeout,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -293,126 +299,105 @@ impl Miot {
             debug!("{} processing read connections. closed:{}", self.prefix, closed);
         }
 
-        let err_kinds = [
-            ErrorKind::Disconnected,
-            ErrorKind::MalformedPacket,
-            ErrorKind::ProtocolError,
-        ];
-
         // if thread is closed, conns will be empty.
         let mut fail_queues = vec![];
         for (client_id, queue) in conns.iter_mut() {
-            match Self::read_packets(&self.prefix, self.read_timeout, queue) {
-                Ok(()) => (),
-                Err(err) if err.kind() == ErrorKind::RxClosed => {
-                    fail_queues.push((client_id.clone(), false));
-                }
-                Err(err) if err_kinds.contains(&err.kind()) => {
-                    fail_queues.push((client_id.clone(), true)); // connt has gone bad
-                }
-                Err(_err) => unreachable!(),
+            let prefix = format!("rconn:{}:{}", queue.addr, client_id.deref());
+            match Self::read_packets(&prefix, self.read_timeout, queue) {
+                Ok(_) => (),
+                Err(err) => fail_queues.push((client_id.clone(), err)),
             }
         }
 
-        for (client_id, up_flush) in fail_queues.into_iter() {
-            let mut queue = conns.remove(&client_id).unwrap();
-            let mut packets: Vec<v5::Packet> = Vec::default();
-            if up_flush {
-                packets = queue.rd.packets.drain(..).collect()
-            }
-            error!("{} removing queue {:?}", self.prefix, *client_id);
-            err!(IPCFail, try: shard.failed_connection(client_id, packets)).ok();
+        for (client_id, err) in fail_queues.into_iter() {
+            let queue = conns.remove(&client_id).unwrap();
+            let prefix = format!("rconn:{}:{}", queue.addr, *client_id);
+            error!("{} removing connection {} ...", prefix, err);
+            err!(IPCFail, try: shard.failed_connection(client_id)).ok();
+
+            let flush = Flush {
+                prefix,
+                err: Some(err),
+                queue,
+                flush_timeout: self.flush_timeout,
+            };
+            let _thrd = Thread::spawn_sync("flush", 1, flush);
         }
     }
 
-    // return packets from connection and send it upstream.
-    // Disconnected, RxClosed
+    // return (would_block,)
+    // Disconnected, MalformedPacket, ProtocolError, RxClosed
     fn read_packets(
         prefix: &str,
-        timeout: Option<u32>,
+        timeout: u32,
         queue: &mut queue::Socket,
-    ) -> Result<()> {
-        use crate::{packet::send_disconnect, ReasonCode as RC, MSG_CHANNEL_SIZE};
+    ) -> Result<bool> {
+        use crate::MSG_CHANNEL_SIZE;
 
-        let instant = time::Instant::now();
         // before reading from socket, send remaining packets to shard.
         let upstream_block = Self::send_upstream(prefix, queue)?;
         match upstream_block {
-            true => Ok(()),
+            true => Ok(true),
             false => loop {
-                match Self::read_packet(prefix, instant, timeout, queue) {
-                    Ok(Some(pkt)) if queue.rd.packets.len() < MSG_CHANNEL_SIZE => {
+                match Self::read_packet(prefix, timeout, queue)? {
+                    (Some(pkt), _) if queue.rd.packets.len() < MSG_CHANNEL_SIZE => {
                         queue.rd.packets.push(pkt);
                     }
-                    Ok(Some(pkt)) => {
+                    (Some(pkt), would_block) => {
                         queue.rd.packets.push(pkt);
                         Self::send_upstream(prefix, queue)?;
-                        break Ok(());
+                        break Ok(would_block);
                     }
-                    Ok(None) => {
+                    (None, would_block) => {
                         Self::send_upstream(prefix, queue)?;
-                        break Ok(());
+                        break Ok(would_block);
                     }
-                    Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                        send_disconnect(prefix, RC::MalformedPacket, &queue.conn).ok();
-                        break Err(err);
-                    }
-                    Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                        send_disconnect(prefix, RC::ProtocolError, &queue.conn).ok();
-                        break Err(err);
-                    }
-                    Err(err) if err.kind() == ErrorKind::Disconnected => {
-                        break Err(err);
-                    }
-                    Err(_err) => unreachable!(),
                 }
             },
         }
     }
 
+    // return (packet,would_block)
     // Disconnected, and implies a bad connection.
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
     fn read_packet(
         prefix: &str,
-        instant: time::Instant,
-        timeout: Option<u32>,
+        timeout: u32,
         queue: &mut queue::Socket,
-    ) -> Result<Option<v5::Packet>> {
+    ) -> Result<(Option<v5::Packet>, bool)> {
+        use crate::packet::PacketRead::{Fin, Header, Init, Remain};
         use std::mem;
 
-        let mut pr = mem::replace(&mut queue.rd.pr, PacketRead::default());
-        let res = loop {
-            let (val, retry, would_block) = pr.read(&queue.conn)?;
-            pr = val;
+        let pr = mem::replace(&mut queue.rd.pr, PacketRead::default());
 
-            queue.set_read_timeout(retry, timeout);
-
-            if would_block {
-                break Ok(None);
-            } else if retry && queue.read_elapsed(&instant) {
-                err!(
-                    Disconnected,
-                    desc: "{} fail after {:?}",
-                    prefix,
-                    queue.rd.timeout
-                )?;
-            } else if retry {
-                trace!("{} read retrying for {}", prefix, queue.addr);
-            } else {
+        let (mut pr, would_block) = pr.read(&queue.conn)?;
+        let pkt = match &pr {
+            Init { .. } | Header { .. } | Remain { .. } if !queue.read_elapsed() => {
+                trace!("{} read retrying", prefix);
+                queue.set_read_timeout(true, timeout);
+                None
+            }
+            Init { .. } | Header { .. } | Remain { .. } => {
+                queue.set_read_timeout(false, timeout);
+                err!(Disconnected, desc: "{} fail after {:?}", prefix, queue.rd.timeout)?
+            }
+            Fin { .. } => {
+                queue.set_read_timeout(false, timeout);
                 let pkt = pr.parse()?;
                 pr = pr.reset();
-                break Ok(Some(pkt));
-            };
+                Some(pkt)
+            }
+            PacketRead::None => unreachable!(),
         };
 
         let _pr_none = mem::replace(&mut queue.rd.pr, pr);
-        res
+        Ok((pkt, would_block))
     }
 
     // return (would_block,)
     // RxClosed, if the receiving end of the queue, in shard/session, has closed.
-    fn send_upstream(prefix: &str, queue: &mut queue::Socket) -> Result<bool> {
+    pub fn send_upstream(prefix: &str, queue: &mut queue::Socket) -> Result<bool> {
         use std::sync::mpsc;
 
         let mut iter = {
@@ -445,8 +430,6 @@ impl Miot {
     }
 
     fn write_conns(&mut self) {
-        use crate::MAX_FLUSH_RETRY;
-
         let (shard, conns, closed) = match &mut self.inner {
             Inner::Main(RunLoop { shard, conns, closed, .. }) => (shard, conns, *closed),
             _ => unreachable!(),
@@ -458,77 +441,56 @@ impl Miot {
             debug!("{} processing write connections, closed:{}", self.prefix, closed);
         }
 
-        let prefix = &self.prefix;
-        let (instant, timeout) = (time::Instant::now(), self.write_timeout);
         // if thread is closed conns will be empty.
         let mut fail_queues = vec![];
         for (client_id, queue) in conns.iter_mut() {
-            match Self::write_packets(prefix, instant, timeout, queue) {
-                Ok(()) => (),
-                Err(err) if err.kind() == ErrorKind::TxFinish => {
-                    match Self::write_downstream(prefix, instant, timeout, queue) {
-                        Ok(false) => fail_queues.push(client_id.clone()),
-                        Ok(true) if queue.wt.flush_retries < MAX_FLUSH_RETRY => {
-                            queue.wt.flush_retries += 1;
-                        }
-                        Ok(true) => {
-                            error!(
-                                "{} flush retry failed after {}, ignoring {} packets",
-                                prefix,
-                                queue.wt.flush_retries,
-                                queue.wt.packets.len()
-                            );
-                            fail_queues.push(client_id.clone())
-                        }
-                        Err(err) if err.kind() == ErrorKind::Disconnected => {
-                            fail_queues.push(client_id.clone())
-                        }
-                        Err(_err) => unreachable!(),
-                    }
-                }
-                Err(err) if err.kind() == ErrorKind::Disconnected => {
-                    fail_queues.push(client_id.clone());
-                }
-                Err(_err) => unreachable!(),
+            let prefix = format!("wconn:{}:{}", queue.addr, client_id.deref());
+            match Self::write_packets(&prefix, self.write_timeout, queue) {
+                Ok(_) => (),
+                Err(err) => fail_queues.push((client_id.clone(), err)),
             }
         }
 
-        for client_id in fail_queues.into_iter() {
-            let _queue = conns.remove(&client_id);
-            conns.remove(&client_id);
-            error!("{} removing queue {:?}", prefix, *client_id);
-            err!(IPCFail, try: shard.failed_connection(client_id, vec![])).ok();
+        for (client_id, err) in fail_queues.into_iter() {
+            let queue = conns.remove(&client_id).unwrap();
+            let prefix = format!("wconn:{}:{}", queue.addr, *client_id);
+            error!("{} removing connection {} ...", prefix, err);
+            err!(IPCFail, try: shard.failed_connection(client_id)).ok();
+
+            let flush = Flush {
+                prefix,
+                err: Some(err),
+                queue,
+                flush_timeout: self.flush_timeout,
+            };
+            let _thrd = Thread::spawn_sync("flush", 1, flush);
         }
     }
 
-    // write packets to connection.
+    // write packets to connection, return (would_block,)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
     // TxFinish, if the transmitting end of the queue, in shard/session, has closed.
     fn write_packets(
         prefix: &str,
-        instant: time::Instant,
-        timeout: Option<u32>,
+        timeout: u32,
         queue: &mut queue::Socket,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use crate::MSG_CHANNEL_SIZE;
 
         // before reading from socket, send remaining packets to connection.
-        let downstream_block = Self::write_downstream(prefix, instant, timeout, queue)?;
-        match downstream_block {
-            true => Ok(()),
+        let would_block = Self::flush_packets(prefix, timeout, queue)?;
+        match would_block {
+            true => Ok(true),
             false => match rx_packets(&queue.wt.rx, MSG_CHANNEL_SIZE) {
                 (qs, _empty, true) => {
-                    queue.wt.packets = qs;
-                    err!(
-                        TxFinish,
-                        desc: "{} upstream tx-channel finished", prefix
-                    )?;
-                    Ok(())
+                    queue.wt.packets.extend_from_slice(&qs);
+                    Self::flush_packets(prefix, timeout, queue)?;
+                    err!(TxFinish, desc: "{} upstream finished", prefix)
                 }
                 (qs, _empty, _disconnected) => {
-                    queue.wt.packets = qs;
-                    Self::write_downstream(prefix, instant, timeout, queue)?;
-                    Ok(())
+                    queue.wt.packets.extend_from_slice(&qs);
+                    Self::flush_packets(prefix, timeout, queue)?;
+                    Ok(false)
                 }
             },
         }
@@ -536,70 +498,77 @@ impl Miot {
 
     // return (would_block,)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
-    fn write_downstream(
+    pub fn flush_packets(
         prefix: &str,
-        instant: time::Instant,
-        timeout: Option<u32>,
+        timeout: u32,
         queue: &mut queue::Socket,
     ) -> Result<bool> {
-        use crate::Packetize;
         use std::mem;
 
-        let mut iter = {
-            let packets: Vec<v5::Packet> = queue.wt.packets.drain(..).collect();
-            packets.into_iter()
-        };
         let mut pw = mem::replace(&mut queue.wt.pw, PacketWrite::default());
+        let mut iter = {
+            let iter = queue.wt.packets.drain(..);
+            iter.collect::<Vec<v5::Packet>>().into_iter()
+        };
         let would_block = loop {
+            if Self::write_packet(prefix, timeout, queue)? {
+                break true;
+            }
+
             match iter.next() {
                 Some(packet) => {
                     let blob = match packet.encode() {
                         Ok(blob) => blob,
                         Err(err) => {
-                            error!(
-                                "{} skipping packet {:?} to {:?} : {}",
-                                prefix,
-                                packet.to_packet_type(),
-                                *queue.client_id,
-                                err
-                            );
+                            let pt = packet.to_packet_type();
+                            error!("{} skipping packet {:?} : {}", prefix, pt, err);
                             continue;
                         }
                     };
-
                     pw = pw.reset(blob.as_ref());
-                    let would_block = loop {
-                        let (val, retry, would_block) = pw.write(&mut queue.conn)?;
-                        pw = val;
-
-                        queue.set_write_timeout(retry, timeout);
-
-                        if would_block {
-                            break true;
-                        } else if retry && queue.write_elapsed(&instant) {
-                            err!(
-                                Disconnected,
-                                desc: "{} fail after {:?}",
-                                prefix,
-                                queue.wt.timeout
-                            )?;
-                        } else if retry {
-                            trace!("{} write retrying for {}", prefix, queue.addr);
-                        } else {
-                            break false;
-                        }
-                    };
-
-                    if would_block {
-                        break true;
-                    }
                 }
                 None => break false,
             }
         };
 
-        let _pw = mem::replace(&mut queue.wt.pw, pw);
+        iter.for_each(|p| queue.wt.packets.push(p));
+        let _pw_none = mem::replace(&mut queue.wt.pw, pw);
+
         Ok(would_block)
+    }
+
+    // return (would_block,)
+    // Disconnected, if connection has gone bad or attempted maximum retries on socket.
+    fn write_packet(
+        prefix: &str,
+        timeout: u32,
+        queue: &mut queue::Socket,
+    ) -> Result<bool> {
+        use crate::packet::PacketWrite::{Fin, Init, Remain};
+        use std::mem;
+
+        let pw = mem::replace(&mut queue.wt.pw, PacketWrite::default());
+
+        let (pw, _would_block) = pw.write(&queue.conn)?;
+        let res = match &pw {
+            Init { .. } | Remain { .. } if !queue.write_elapsed() => {
+                trace!("{} write retrying", prefix);
+                queue.set_write_timeout(true, timeout);
+                Ok(true)
+            }
+            Init { .. } | Remain { .. } => {
+                queue.set_write_timeout(false, timeout);
+                err!(Disconnected, desc: "{} fail after {:?}", prefix, queue.wt.timeout)
+            }
+            Fin { .. } => {
+                queue.set_write_timeout(false, timeout);
+                Ok(false)
+            }
+            PacketWrite::None => unreachable!(),
+        };
+
+        let _pw_none = mem::replace(&mut queue.wt.pw, pw);
+        res
     }
 }
 
@@ -639,7 +608,6 @@ impl Miot {
             timeout: None,
             rx,
             packets: Vec::default(),
-            flush_retries: 0,
         };
         let id = client_id.clone();
         let queue = queue::Socket { client_id, conn, addr, token, rd, wt };
@@ -697,7 +665,7 @@ impl Miot {
 }
 
 /// Return (requests, empty, disconnected)
-fn rx_packets(rx: &queue::QueueRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
+pub fn rx_packets(rx: &queue::QueueRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
     use std::sync::mpsc;
 
     let mut reqs = vec![];

@@ -53,8 +53,8 @@ impl Default for Cluster {
         let config = Config::default();
         let mut def = Cluster {
             name: config.name.to_string(),
-            max_nodes: config.max_nodes.unwrap(),
-            num_shards: config.num_shards.unwrap(),
+            max_nodes: config.max_nodes(),
+            num_shards: config.num_shards(),
             port: config.port.unwrap(),
             gods: Vec::default(),
             prefix: String::default(),
@@ -89,16 +89,17 @@ impl Cluster {
     /// the cluster call [Cluster::spawn]
     pub fn from_config(config: Config) -> Result<Cluster> {
         let def = Cluster::default();
-        let val = Cluster {
+        let mut val = Cluster {
             name: format!("{}-cluster-init", config.name),
-            max_nodes: config.max_nodes.unwrap_or(def.max_nodes),
-            num_shards: config.num_shards.unwrap_or(def.num_shards),
+            max_nodes: config.max_nodes(),
+            num_shards: config.num_shards(),
             port: config.port.unwrap_or(def.port),
             gods: Vec::default(),
             prefix: def.prefix.clone(),
             config,
             inner: Inner::Init,
         };
+        val.prefix = val.prefix();
 
         Ok(val)
     }
@@ -112,15 +113,13 @@ impl Cluster {
     where
         N: 'static + Send + NodeStore,
     {
-        use crate::{util, MAX_NODES, MAX_SHARDS};
+        use crate::util;
         use std::mem;
 
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "cluster can be spawned only in init-state ")?;
         }
-        if self.num_shards > (MAX_SHARDS as usize) {
-            err!(InvalidInput, desc: "num. of shards too large {}", self.num_shards)?;
-        } else if self.num_shards == 0 {
+        if self.num_shards == 0 {
             err!(InvalidInput, desc: "num_shards can't be ZERO")?;
         } else if !util::is_power_of_2(self.num_shards) {
             err!(
@@ -128,9 +127,6 @@ impl Cluster {
                 desc: "num. of shards must be power of 2 {}",
                 self.num_shards
             )?;
-        }
-        if self.max_nodes > MAX_NODES {
-            err!(InvalidInput, desc: "num. of nodes too large {}", self.max_nodes)?;
         }
 
         let gods = mem::replace(&mut self.gods, Vec::default());
