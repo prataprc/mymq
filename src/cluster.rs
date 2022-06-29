@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, net, path, sync::mpsc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::Hostable;
-use crate::{rebalance, v5, ClientID, Config, ConfigNode, Listener, Shard};
+use crate::{rebalance, v5, ClientID, Config, ConfigNode, Listener, Shard, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 pub type AppTx = mpsc::SyncSender<String>;
@@ -34,6 +34,8 @@ enum Inner {
 
 pub struct RunLoop {
     state: ClusterState,
+    /// List of subscribed topicfilters across all the sessions, local to this node.
+    topic_filters: TopicTrie,
     /// Rebalancing algorithm,
     rebalancer: rebalance::Rebalancer,
     /// Listener thread for MQTT connections from remote/local clients.
@@ -146,6 +148,7 @@ impl Cluster {
             state: SingleState { config: self.config.clone(), node },
         };
 
+        let topic_filters = TopicTrie::new();
         let cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
             max_nodes: self.max_nodes,
@@ -153,7 +156,14 @@ impl Cluster {
             port: self.port,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop { state, rebalancer, listener, shards, app_tx }),
+            inner: Inner::Main(RunLoop {
+                state,
+                topic_filters,
+                rebalancer,
+                listener,
+                shards,
+                app_tx,
+            }),
         };
         let thrd = Thread::spawn(&self.prefix, cluster);
 
@@ -412,7 +422,7 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let RunLoop { rebalancer, shards, .. } = match &mut self.inner {
+        let RunLoop { rebalancer, shards, topic_filters, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -421,7 +431,8 @@ impl Cluster {
         let (shard_uuid, subscribed_tx) = {
             let shard_num = rebalancer.session_parition(&*client_id);
             let shard = shards.get_mut(&shard_num).unwrap();
-            let subscribed_tx = shard.add_session(conn, addr, pkt)?;
+            let topic_filters = topic_filters.clone();
+            let subscribed_tx = shard.add_session(conn, addr, pkt, topic_filters)?;
             (shard.uuid.clone(), subscribed_tx)
         };
 

@@ -4,7 +4,7 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5, ClientID, Cluster, Config, Miot, Session, Shardable};
+use crate::{queue, v5, ClientID, Cluster, Config, Miot, Session, Shardable, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -180,11 +180,17 @@ impl Shard {
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
         pkt: v5::Connect,
+        topic_filters: TopicTrie,
     ) -> Result<queue::QueueTx> {
         match &self.inner {
             Inner::Handle(waker, thrd) => {
                 waker.wake()?;
-                match thrd.request(Request::AddSession { conn, addr, pkt })?? {
+                match thrd.request(Request::AddSession {
+                    conn,
+                    addr,
+                    pkt,
+                    topic_filters,
+                })?? {
                     Response::SubscribedTx(tx) => Ok(tx),
                     _ => unreachable!(),
                 }
@@ -258,6 +264,7 @@ pub enum Request {
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
         pkt: v5::Connect,
+        topic_filters: TopicTrie,
     },
     BookSession {
         client_id: ClientID,
@@ -396,8 +403,10 @@ impl Shard {
     fn handle_add_session(&mut self, req: Request) -> Response {
         use crate::{queue::queue_channel, session::SessionArgs, MSG_CHANNEL_SIZE};
 
-        let (conn, addr, pkt) = match req {
-            Request::AddSession { conn, addr, pkt } => (conn, addr, pkt),
+        let (conn, addr, pkt, topic_filters) = match req {
+            Request::AddSession { conn, addr, pkt, topic_filters } => {
+                (conn, addr, pkt, topic_filters)
+            }
             _ => unreachable!(),
         };
         let RunLoop { sessions, subscribers, miot, .. } = match &mut self.inner {
@@ -418,8 +427,9 @@ impl Shard {
                 client_id: client_id.clone(),
                 miot_tx,
                 miot_rx,
+                topic_filters,
             };
-            Session::from_args(args, self.config.clone(), pkt)
+            Session::start(args, self.config.clone(), pkt)
         };
         let subscribed_tx = session.to_subscribed_tx();
         sessions.insert(client_id.clone(), session);

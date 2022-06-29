@@ -21,6 +21,7 @@ mod session;
 mod shard;
 mod thread;
 mod timer;
+mod ttrie;
 mod types;
 mod util;
 
@@ -42,6 +43,7 @@ pub use session::Session;
 pub use shard::Shard;
 pub use thread::{Thread, Threadable};
 pub use timer::Timer;
+pub use ttrie::TopicTrie;
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
@@ -64,6 +66,9 @@ pub const MAX_PACKET_SIZE: usize = 1024 * 1024; // default is 1MB.
 
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Type alias for PacketID.
+pub type PacketID = u16;
 
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
 /// following error-kind: `ProtocolError`, `PacketEncode`, `PacketDecode`,
