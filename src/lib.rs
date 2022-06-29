@@ -7,7 +7,7 @@
 
 #[macro_use]
 mod error;
-mod chash;
+// mod chash; TODO
 mod cluster;
 mod config;
 mod flush;
@@ -16,6 +16,7 @@ mod listener;
 mod miot;
 mod packet;
 mod queue;
+mod rebalance;
 mod session;
 mod shard;
 mod thread;
@@ -29,7 +30,7 @@ pub mod v5;
 #[cfg(any(feature = "fuzzy", test))]
 pub mod fuzzy;
 
-pub use chash::ConsistentHash;
+// pub use chash::ConsistentHash; TODO
 pub use cluster::{Cluster, Node};
 pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
@@ -44,9 +45,7 @@ pub use timer::Timer;
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
-use uuid::Uuid;
-
-use std::{net, time};
+use std::{net, path, time};
 
 pub const SLEEP_10MS: time::Duration = time::Duration::from_millis(10);
 
@@ -84,20 +83,12 @@ pub trait Hostable {
     fn uuid(&self) -> uuid::Uuid;
 
     fn weight(&self) -> u16;
+
+    fn path(&self) -> path::PathBuf;
 }
 
 pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
-}
-
-pub trait NodeStore {
-    fn len(&self) -> usize;
-
-    fn get(&self, uuid: &Uuid) -> Option<&Node>;
-
-    fn insert(&self, uuid: Uuid, node: Node);
-
-    fn remove(&self, uuid: &Uuid);
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`

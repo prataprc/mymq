@@ -1,28 +1,25 @@
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use uuid::Uuid;
 
 use std::{collections::BTreeMap, net, path, sync::mpsc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{v5, ClientID, Config, ConfigNode, Listener, Shard};
+use crate::Hostable;
+use crate::{rebalance, v5, ClientID, Config, ConfigNode, Listener, Shard};
 use crate::{Error, ErrorKind, Result};
-use crate::{Hostable, NodeStore};
+
+pub type AppTx = mpsc::SyncSender<String>;
 
 /// Cluster is the global configuration state for multi-node MQTT cluster.
-///
-/// TODO: at some point in time this shall be integrated with consensus protocol for
-/// lossless replication and fault-tolerance.
 pub struct Cluster {
     /// Refer [Config::name]
     pub name: String,
     /// Refer [Config::max_nodes]
     pub max_nodes: usize,
     /// Refer [Config::num_shards]
-    pub num_shards: usize,
+    pub num_shards: u32,
     /// Refer [Config::port]
     pub port: u16,
-    /// Refer [Config::gods]
-    pub gods: Vec<God>,
     prefix: String,
     config: Config,
     inner: Inner,
@@ -36,16 +33,36 @@ enum Inner {
 }
 
 pub struct RunLoop {
-    /// God nodes, participate in cluster consensus.
-    gods: Vec<God>,
-    /// Nodes storage, TODO: we intend to handle very large number of nodes.
-    nodes: Box<dyn NodeStore + 'static + Send>,
+    state: ClusterState,
+    /// Rebalancing algorithm,
+    rebalancer: rebalance::Rebalancer,
     /// Listener thread for MQTT connections from remote/local clients.
     listener: Listener,
     /// Total number of shards within this node.
-    shards: BTreeMap<Uuid, Shard>,
+    shards: BTreeMap<u32, Shard>,
     /// Channel to interface with application.
     app_tx: mpsc::SyncSender<String>,
+}
+
+enum ClusterState {
+    /// Cluster is single-node.
+    SingleNode { state: SingleState },
+    /// Cluster has its gods&nodes state updated, and in the processin of working out
+    /// rebalancing.
+    Elastic { state: MultiState },
+    /// Cluster is stable.
+    Stable { state: MultiState },
+}
+
+struct MultiState {
+    config: Config,
+    nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
+    topology: Vec<rebalance::Topology>,
+}
+
+struct SingleState {
+    config: Config,
+    node: Node,
 }
 
 impl Default for Cluster {
@@ -56,7 +73,6 @@ impl Default for Cluster {
             max_nodes: config.max_nodes(),
             num_shards: config.num_shards(),
             port: config.port.unwrap(),
-            gods: Vec::default(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -94,7 +110,6 @@ impl Cluster {
             max_nodes: config.max_nodes(),
             num_shards: config.num_shards(),
             port: config.port.unwrap_or(def.port),
-            gods: Vec::default(),
             prefix: def.prefix.clone(),
             config,
             inner: Inner::Init,
@@ -104,17 +119,8 @@ impl Cluster {
         Ok(val)
     }
 
-    // should supply a restart location from disk.
-    pub fn restart() -> Result<Cluster> {
-        todo!()
-    }
-
-    pub fn spawn<N>(mut self, nodes: N, tx: mpsc::SyncSender<String>) -> Result<Cluster>
-    where
-        N: 'static + Send + NodeStore,
-    {
+    pub fn spawn(self, node: Node, app_tx: AppTx) -> Result<Cluster> {
         use crate::util;
-        use std::mem;
 
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "cluster can be spawned only in init-state ")?;
@@ -129,25 +135,25 @@ impl Cluster {
             )?;
         }
 
-        let gods = mem::replace(&mut self.gods, Vec::default());
-        let shards = BTreeMap::default();
+        let rebalancer = rebalance::Rebalancer {
+            num_shards: self.num_shards,
+            algo: rebalance::Algorithm::SingleNode,
+        };
         let listener = Listener::default();
+        let shards = BTreeMap::default();
+
+        let state = ClusterState::SingleNode {
+            state: SingleState { config: self.config.clone(), node },
+        };
 
         let cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
             port: self.port,
-            gods: Vec::default(),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop {
-                gods,
-                nodes: Box::new(nodes),
-                listener,
-                shards,
-                app_tx: tx,
-            }),
+            inner: Inner::Main(RunLoop { state, rebalancer, listener, shards, app_tx }),
         };
         let thrd = Thread::spawn(&self.prefix, cluster);
 
@@ -156,7 +162,6 @@ impl Cluster {
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
             port: self.port,
-            gods: Vec::default(),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(thrd),
@@ -166,7 +171,7 @@ impl Cluster {
             for shard_id in 0..self.num_shards {
                 let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = Shard::from_config(config, shard_id)?.spawn(clust_tx)?;
-                shards.insert(shard.uuid, shard);
+                shards.insert(shard_id, shard);
             }
 
             let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
@@ -196,7 +201,6 @@ impl Cluster {
             max_nodes: self.max_nodes,
             num_shards: self.num_shards,
             port: self.port,
-            gods: Vec::default(),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner,
@@ -207,7 +211,7 @@ impl Cluster {
 pub enum Request {
     Set {
         listener: Listener,
-        shards: BTreeMap<Uuid, Shard>,
+        shards: BTreeMap<u32, Shard>,
     },
     AddNodes {
         nodes: Vec<Node>,
@@ -318,12 +322,8 @@ impl Threadable for Cluster {
         use Request::*;
 
         info!(
-            "{} spawn max_nodes:{} num_shards:{} port:{} gods:{} ...",
-            self.prefix,
-            self.max_nodes,
-            self.num_shards,
-            self.port,
-            self.gods.len(),
+            "{} spawn max_nodes:{} num_shards:{} port:{} ...",
+            self.prefix, self.max_nodes, self.num_shards, self.port,
         );
 
         let mut closed = false;
@@ -398,64 +398,12 @@ impl Cluster {
         Ok(Response::Ok)
     }
 
-    fn handle_add_nodes(&mut self, req: Request) -> Result<Response> {
-        let run_loop = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-
-        let mut nodes = match req {
-            Request::AddNodes { nodes } => nodes,
-            _ => unreachable!(),
-        };
-
-        let n = nodes.len() + run_loop.nodes.len();
-        if n > self.max_nodes {
-            err!(InvalidInput, desc: "num. of nodes too large {}", n)?;
-        }
-        // validate whether nodes are already present.
-        for node in nodes.iter() {
-            let uuid = node.uuid;
-            match run_loop.nodes.get(&uuid) {
-                Some(_) => err!(InvalidInput, desc: "node {} already present", uuid)?,
-                None => (),
-            }
-        }
-
-        for node in nodes.drain(..) {
-            run_loop.nodes.insert(node.uuid, node)
-        }
-
-        Ok(Response::Ok)
+    fn handle_add_nodes(&mut self, _req: Request) -> Result<Response> {
+        todo!()
     }
 
-    fn handle_remove_nodes(&mut self, req: Request) -> Result<Response> {
-        let run_loop = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-
-        let uuids = match req {
-            Request::RemoveNodes { uuids } => uuids,
-            _ => unreachable!(),
-        };
-
-        if uuids.len() >= run_loop.nodes.len() {
-            err!(InvalidInput, desc: "cannot remove all the nodes {}", uuids.len())?;
-        }
-        // validate whether nodes are already missing.
-        for uuid in uuids.iter() {
-            match run_loop.nodes.get(uuid) {
-                Some(_) => (),
-                None => warn!("node {} is missing", uuid),
-            }
-        }
-
-        for uuid in uuids.iter() {
-            run_loop.nodes.remove(uuid);
-        }
-
-        Ok(Response::Ok)
+    fn handle_remove_nodes(&mut self, _req: Request) -> Result<Response> {
+        todo!()
     }
 
     fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
@@ -464,24 +412,20 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let shards = match &mut self.inner {
-            Inner::Main(RunLoop { shards, .. }) => shards,
+        let RunLoop { rebalancer, shards, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
         let client_id = pkt.payload.client_id.clone();
-        let shard_uuid = {
-            let mut ss = shards
-                .iter()
-                .map(|(u, s)| (*u, s.num_sessions()))
-                .collect::<Vec<(Uuid, usize)>>();
-            ss.sort_by_key(|s| s.1);
-            ss.first().unwrap().0
+        let (shard_uuid, subscribed_tx) = {
+            let shard_num = rebalancer.session_parition(&*client_id);
+            let shard = shards.get_mut(&shard_num).unwrap();
+            let subscribed_tx = shard.add_session(conn, addr, pkt)?;
+            (shard.uuid.clone(), subscribed_tx)
         };
-        let shard = shards.get_mut(&shard_uuid).unwrap();
-        let subscribed_tx = shard.add_session(conn, addr, pkt)?;
 
-        for (_, shard) in shards.iter().filter(|(uuid, _)| uuid != &&shard_uuid) {
+        for (_, shard) in shards.iter().filter(|(_, s)| s.uuid != shard_uuid) {
             shard.book_session(client_id.clone(), subscribed_tx.clone())?;
         }
 
@@ -508,15 +452,12 @@ impl Cluster {
     fn handle_close(&mut self, _: Request) -> Result<Response> {
         use std::mem;
 
-        let RunLoop { nodes, listener, shards, .. } = match &mut self.inner {
+        let RunLoop { listener, shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        let (n, m) = (nodes.len(), shards.len());
-        info!("Cluster::close, there are {} nodes and {} shards", n, m);
-
-        // TODO: is there any explicit clean up to be done for Node ?
+        info!("{}, closing {} shards hosted", self.prefix, shards.len());
 
         *listener = mem::replace(listener, Listener::default()).close_wait()?;
 
@@ -543,37 +484,37 @@ impl Cluster {
     }
 }
 
-// TODO: we are yet to understand the scope of god-nodes. For now, they will be part
-// of a consensus cirlce and decide addition/deletion of nodes, called god-nodes,
-// from consensus circle. And also addition/deletion of federated-nodes.
-pub struct God {
-    pub address: net::SocketAddr,
-    pub uuid: Uuid,
-}
-
 /// Represents a Node in the cluster. `address` is the socket-address in which the
 /// Node is listening for MQTT. Application must provide a valid address, other fields
 /// like `weight` and `uuid` shall be assigned a meaningful default.
 #[derive(Clone)]
 pub struct Node {
-    /// Refer to [ConfigNode::mqtt_address].
-    pub mqtt_address: net::SocketAddr, // listen address
+    /// Unique id of the node.
+    pub uuid: Uuid,
     /// Refer to [ConfigNode::path]
     pub path: path::PathBuf,
     /// Refer to [ConfigNode::weight]
     pub weight: u16,
-    /// Unique id of the node.
-    pub uuid: Uuid,
+    /// Refer to [ConfigNode::mqtt_address].
+    pub mqtt_address: net::SocketAddr, // listen address
 }
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Node) -> bool {
+        self.uuid == other.uuid
+    }
+}
+
+impl Eq for Node {}
 
 impl Default for Node {
     fn default() -> Node {
-        let cn = ConfigNode::default();
+        let config = ConfigNode::default();
         Node {
-            mqtt_address: cn.mqtt_address.clone(),
-            path: cn.path.clone(),
-            weight: cn.weight.unwrap(),
-            uuid: cn.uuid.unwrap().parse().unwrap(),
+            mqtt_address: config.mqtt_address.clone(),
+            path: config.path.clone(),
+            weight: config.weight.unwrap(),
+            uuid: config.uuid.unwrap().parse().unwrap(),
         }
     }
 }
@@ -606,5 +547,9 @@ impl Hostable for Node {
 
     fn weight(&self) -> u16 {
         self.weight
+    }
+
+    fn path(&self) -> path::PathBuf {
+        self.path.clone()
     }
 }

@@ -63,6 +63,14 @@ impl Socket {
     }
 }
 
+pub struct Inbound {
+    //
+}
+
+pub struct Outbound {
+    //
+}
+
 #[inline]
 pub fn queue_channel(size: usize) -> (QueueTx, QueueRx) {
     mpsc::sync_channel(size)

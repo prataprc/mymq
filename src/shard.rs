@@ -1,7 +1,6 @@
 use log::{debug, error, info, trace};
 use uuid::Uuid;
 
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::{collections::BTreeMap, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
@@ -14,11 +13,9 @@ pub struct Shard {
     /// Human readable name for shard.
     pub name: String,
     /// Shard id, must unique withing the [Cluster].
-    pub shard_id: usize,
+    pub shard_id: u32,
     /// Unique id for this shard. All shards in a cluster MUST be unique.
     pub uuid: Uuid,
-    /// Active count of sessions maintained by this shard.
-    pub n_sessions: AtomicUsize, // used by cluster as well.
     prefix: String,
     config: Config,
     inner: Inner,
@@ -57,9 +54,8 @@ impl Default for Shard {
         let config = Config::default();
         let mut def = Shard {
             name: format!("{}-shard-init", config.name),
-            shard_id: usize::default(),
+            shard_id: u32::default(),
             uuid: Uuid::new_v4(),
-            n_sessions: AtomicUsize::new(0),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -95,13 +91,12 @@ impl Drop for Shard {
 impl Shard {
     const WAKE_TOKEN: mio::Token = mio::Token(1);
 
-    pub fn from_config(config: Config, shard_id: usize) -> Result<Shard> {
+    pub fn from_config(config: Config, shard_id: u32) -> Result<Shard> {
         let def = Shard::default();
         let mut val = Shard {
             name: def.name.clone(),
             shard_id,
             uuid: def.uuid,
-            n_sessions: AtomicUsize::new(0),
             prefix: def.prefix.clone(),
             config: config.clone(),
             inner: Inner::Init,
@@ -123,7 +118,6 @@ impl Shard {
             name: format!("{}-shard-main", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            n_sessions: AtomicUsize::new(0),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -141,7 +135,6 @@ impl Shard {
             name: format!("{}-shard-handle", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            n_sessions: AtomicUsize::new(0),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -173,7 +166,6 @@ impl Shard {
             name: format!("{}-shard-tx", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            n_sessions: AtomicUsize::new(0),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner,
@@ -433,7 +425,6 @@ impl Shard {
         sessions.insert(client_id.clone(), session);
         subscribers.insert(client_id.clone(), subscribed_tx.clone());
 
-        self.n_sessions.fetch_add(1, SeqCst);
         Response::SubscribedTx(subscribed_tx)
     }
 
@@ -524,10 +515,6 @@ impl Shard {
 }
 
 impl Shard {
-    pub fn num_sessions(&self) -> usize {
-        self.n_sessions.load(SeqCst)
-    }
-
     fn prefix(&self) -> String {
         format!("{}:{}", self.name, self.shard_id)
     }

@@ -13,7 +13,7 @@ pub struct Miot {
     /// Human readable name for this miot thread.
     pub name: String,
     /// Same as the shard-id.
-    pub miot_id: usize,
+    pub miot_id: u32,
     /// Read timeout on MQTT socket. Refer [Config::mqtt_read_timeout]
     pub read_timeout: u32,
     /// Write timeout on MQTT socket. Refer [Config::mqtt_write_timeout]
@@ -49,7 +49,7 @@ impl Default for Miot {
         let config = Config::default();
         let mut def = Miot {
             name: format!("{}-miot-init", config.name),
-            miot_id: usize::default(),
+            miot_id: u32::default(),
             read_timeout: config.mqtt_read_timeout(),
             write_timeout: config.mqtt_write_timeout(),
             flush_timeout: config.mqtt_flush_timeout(),
@@ -83,7 +83,7 @@ impl Miot {
 
     /// Create a miot thread from configuration. Miot shall be in `Init` state, to start
     /// the miot thread call [Miot::spawn].
-    pub fn from_config(config: Config, miot_id: usize) -> Result<Miot> {
+    pub fn from_config(config: Config, miot_id: u32) -> Result<Miot> {
         let m = Miot::default();
         let mut val = Miot {
             name: m.name.clone(),

@@ -24,10 +24,8 @@ pub struct Session {
     /// Inbound channel from other sessions.
     rx: queue::QueueRx,
 
-    /// Subscribe ack timeout. Refer [Config::subscribe_ack_timeout].
-    subscribe_ack_timeout: Option<u32>,
-    /// Publish ack timeout.  [Config::publish_ack_timeout].
-    publish_ack_timeout: Option<u32>,
+    //inb: queue::Inbound,
+    //out: queue::Outbound,
     config: Config,
 }
 
@@ -44,8 +42,6 @@ impl Session {
             tx,
             rx,
 
-            subscribe_ack_timeout: config.subscribe_ack_timeout,
-            publish_ack_timeout: config.publish_ack_timeout,
             config,
         }
     }

@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use std::{fmt, result};
+use std::{fmt, hash, result};
 
 use crate::Hostable;
 use crate::{Error, ErrorKind, Result};
@@ -11,23 +11,23 @@ use crate::{Error, ErrorKind, Result};
 // TODO: Do we have a requirement that client can compute the client->shard and
 //       shard->node mapping without consulting the cluster ?
 
-pub struct ConsistentHash {
-    conodes: Vec<(Uuid, u32)>, // (uuid, weighed-hash)
-}
-
-impl fmt::Debug for ConsistentHash {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        for n in self.conodes.iter() {
-            write!(f, "node-hash-{}: 0x{:8x}", n.0, n.1)?;
-        }
-        Ok(())
-    }
+pub struct ConsistentHash<H>
+where
+    H: hash::Hasher,
+{
+    conodes: Vec<(Uuid, u32)>, // (uuid, weight)
+    hasher: H,
 }
 
 impl ConsistentHash {
-    pub fn from_nodes<T: Hostable>(nodes: &[T]) -> Result<ConsistentHash> {
+    pub fn from_hasher(hasher: H) -> Result<ConsistentHash> {
+        ConsistentHash { conodes: Vec::default(), hasher }
+    }
+
+    pub fn from_nodes<T: Hostable>(nodes: &[T], hasher: H) -> Result<ConsistentHash> {
         match nodes.first() {
             Some(node) => {
+                let mut ch = Self::from_hasher();
                 let (uuid, weight) = (node.uuid(), node.weight());
                 let conodes = circle_of_hash(uuid, hash(uuid), weight);
                 let mut ch = ConsistentHash { conodes };
@@ -68,6 +68,13 @@ impl ConsistentHash {
         }
 
         Ok(self)
+    }
+
+    fn print_nodes(&self) {
+        for n in self.conodes.iter() {
+            println!(f, "node-hash-{}: 0x{:8x}", n.0, n.1)?;
+        }
+        Ok(())
     }
 }
 

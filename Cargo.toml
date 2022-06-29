@@ -18,12 +18,13 @@ uuid = { version = "1.1.2", features = ["v4"] }
 num_cpus = "1.13.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.5.9"
-chrono = "0.4.19"
+cityhash-rs = "1.0.0"
 mio = { version = "0.8.4", features = ["os-poll", "net"] }
 
 arbitrary = { version = "1.1.0", features = ["derive"], optional = true }
 structopt = { version = "0.3.26", default-features = false, optional = true }
 env_logger = { version = "0.9", optional = true }
+chrono = { version = "0.4.19", optional = true}
 
 [dev-dependencies]
 arbitrary = { version = "1.1.0", features = ["derive"] }
@@ -31,5 +32,5 @@ arbitrary = { version = "1.1.0", features = ["derive"] }
 [features]
 backtrace = []
 fuzzy = ["arbitrary"]
-mqcl = ["structopt", "env_logger"]
+mqcl = ["structopt", "env_logger", "chrono"]
 play = ["structopt", "env_logger"]

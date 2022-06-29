@@ -111,7 +111,7 @@ pub struct PublishProperties {
     pub topic_alias: Option<u16>,
     pub response_topic: Option<TopicName>,
     pub correlation_data: Option<Vec<u8>>,
-    pub subscribtion_identifier: Option<VarU32>,
+    pub subscribtion_identifier: Vec<VarU32>,
     pub content_type: Option<String>,
     pub user_properties: Vec<UserProperty>,
 }
@@ -132,8 +132,9 @@ impl Packetize for PublishProperties {
             let (property, m) = dec_field!(Property, stream, n);
             n = m;
 
+            let dup_ok = [PropertyType::UserProp, PropertyType::SubscriptionIdentifier];
             let pt = property.to_property_type();
-            if pt != PropertyType::UserProp && dups[pt as usize] {
+            if dup_ok.contains(&pt) && dups[pt as usize] {
                 err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
@@ -149,7 +150,7 @@ impl Packetize for PublishProperties {
                 TopicAlias(val) => props.topic_alias = Some(val),
                 ResponseTopic(val) => props.response_topic = Some(val),
                 CorrelationData(val) => props.correlation_data = Some(val),
-                SubscriptionIdentifier(val) => props.subscribtion_identifier = Some(val),
+                SubscriptionIdentifier(val) => props.subscribtion_identifier.push(val),
                 ContentType(val) => props.content_type = Some(val),
                 UserProp(val) => props.user_properties.push(val),
                 _ => {
@@ -174,9 +175,11 @@ impl Packetize for PublishProperties {
         enc_prop!(opt: data, TopicAlias, self.topic_alias);
         enc_prop!(opt: data, ResponseTopic, &self.response_topic);
         enc_prop!(opt: data, CorrelationData, &self.correlation_data);
-        enc_prop!(opt: data, SubscriptionIdentifier, self.subscribtion_identifier);
         enc_prop!(opt: data, ContentType, &self.content_type);
 
+        for subid in self.subscribtion_identifier.iter() {
+            enc_prop!(data, SubscriptionIdentifier, subid);
+        }
         for uprop in self.user_properties.iter() {
             enc_prop!(data, UserProp, uprop);
         }
