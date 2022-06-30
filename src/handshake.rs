@@ -22,7 +22,7 @@ impl Threadable for Handshake {
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         let now = time::Instant::now();
-        info!("{} new connection at {:?}", self.prefix, now);
+        info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
 
         let max_size = self.config.mqtt_max_packet_size();
         let mut packetr = PacketRead::new(max_size);

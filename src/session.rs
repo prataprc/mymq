@@ -10,8 +10,8 @@ use crate::{queue, v5, ClientID, Config, TopicFilter, TopicTrie};
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
     pub client_id: ClientID,
-    pub miot_tx: queue::QueueTx,
-    pub miot_rx: queue::QueueRx,
+    pub tx: queue::QueueTx,
+    pub rx: queue::QueueRx,
     pub topic_filters: TopicTrie,
 }
 
@@ -19,13 +19,8 @@ pub struct Session {
     /// Remote socket address.
     addr: net::SocketAddr,
     /// Outbound channel to Miot thread.
-    miot_tx: queue::QueueTx,
-    /// Inbound channel from Miot thread.
-    miot_rx: queue::QueueRx,
-    /// A clone of this Tx channel will be added to every shard in this node. Other
-    /// sessions can send messages to this session.
     tx: queue::QueueTx,
-    /// Inbound channel from other sessions.
+    /// Inbound channel from Miot thread.
     rx: queue::QueueRx,
     config: Config,
 
@@ -78,13 +73,10 @@ impl Session {
             cout,
         };
 
-        let (tx, rx) = queue::queue_channel(MSG_CHANNEL_SIZE);
         Session {
             addr: args.addr,
-            miot_tx: args.miot_tx,
-            miot_rx: args.miot_rx,
-            tx,
-            rx,
+            tx: args.tx,
+            rx: args.rx,
             config,
 
             state,
@@ -95,16 +87,12 @@ impl Session {
         }
     }
 
-    pub fn to_subscribed_tx(&self) -> queue::QueueTx {
-        self.tx.clone()
-    }
-
     pub fn close(mut self) -> Self {
         use std::mem;
 
-        let (tx, rx) = queue::queue_channel(1);
-        mem::drop(mem::replace(&mut self.miot_tx, tx));
-        mem::drop(mem::replace(&mut self.miot_rx, rx));
+        let (tx, rx) = queue::queue_channel(1); // DUMMY channels
+        mem::drop(mem::replace(&mut self.tx, tx));
+        mem::drop(mem::replace(&mut self.rx, rx));
 
         self
     }

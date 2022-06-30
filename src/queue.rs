@@ -4,8 +4,8 @@ use std::{net, sync::mpsc, time};
 use crate::packet::{PacketRead, PacketWrite};
 use crate::{v5, ClientID, PacketID};
 
-pub type QueueTx = mpsc::SyncSender<v5::Packet>;
-pub type QueueRx = mpsc::Receiver<v5::Packet>;
+pub type QueueTx = mpsc::SyncSender<Message>;
+pub type QueueRx = mpsc::Receiver<Message>;
 
 pub struct Socket {
     pub client_id: ClientID,
@@ -19,14 +19,14 @@ pub struct Socket {
 pub struct Source {
     pub pr: PacketRead,
     pub timeout: Option<time::Instant>,
-    pub tx: QueueTx,
+    pub session_tx: QueueTx,
     pub packets: Vec<v5::Packet>,
 }
 
 pub struct Sink {
     pub pw: PacketWrite,
     pub timeout: Option<time::Instant>,
-    pub rx: QueueRx,
+    pub session_rx: QueueRx,
     pub packets: Vec<v5::Packet>,
 }
 

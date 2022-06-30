@@ -52,26 +52,19 @@ pub struct Rebalancer {
 impl Rebalancer {
     /// Clients are mapped to shards using ClientID, so that a client will always
     /// map to the same shard no matter where or when it is computed.
-    pub fn session_parition<U: AsRef<[u8]>>(&self, id: &U) -> u32 {
+    pub fn session_parition<U: AsRef<[u8]>>(id: &U, num_shards: u32) -> u32 {
         let id: &[u8] = id.as_ref();
         let hash = cityhash_rs::cityhash_110_128(id);
         let hash = (hash & 0xFFFFFFFFFFFFFFFF) ^ ((hash >> 64) & 0xFFFFFFFFFFFFFFFF);
         let hash = ((hash & 0xFFFFFFFF) ^ ((hash >> 32) & 0xFFFFFFFF)) as u32;
-        hash & (self.config.num_shards() - 1)
+        hash & (num_shards - 1)
     }
 
-    /// Add new set of nodes into the cluster. Return a new topology. Subsequently use
+    /// Rebalance topology for supplied set of nodes. Subsequently use
     /// [diff_topology] passing in the old and new topology to identify the migrating
     /// shards.
-    pub fn add_nodes(&self, ns: &[Node], topl: Vec<Topology>) -> Vec<Topology> {
-        self.algo.add_nodes(ns, topl)
-    }
-
-    /// Remove an existing set of nodes from the cluster. Return a new topology.
-    /// Subsequently use [diff_topology] passing in the old and new topology to
-    /// identify the migrating shards.
-    pub fn del_nodes(&self, ns: &[Node], topl: Vec<Topology>) -> Vec<Topology> {
-        self.algo.del_nodes(ns, topl)
+    pub fn rebalance(&self, nodes: &[Node], old: Vec<Topology>) -> Vec<Topology> {
+        self.algo.rebalance(&self.config, nodes, old)
     }
 }
 
@@ -80,15 +73,18 @@ pub enum Algorithm {
 }
 
 impl Algorithm {
-    fn add_nodes(&self, _nodes: &[Node], topl: Vec<Topology>) -> Vec<Topology> {
+    fn rebalance(&self, c: &Config, nodes: &[Node], _: Vec<Topology>) -> Vec<Topology> {
         match self {
-            Algorithm::SingleNode => topl,
-        }
-    }
-
-    fn del_nodes(&self, _nodes: &[Node], topl: Vec<Topology>) -> Vec<Topology> {
-        match self {
-            Algorithm::SingleNode => topl,
+            Algorithm::SingleNode => {
+                let node = &nodes[0];
+                (0..c.num_shards())
+                    .map(|shard| Topology {
+                        shard,
+                        master: node.clone(),
+                        replicas: vec![],
+                    })
+                    .collect()
+            }
         }
     }
 }

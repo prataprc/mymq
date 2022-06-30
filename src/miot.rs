@@ -127,6 +127,16 @@ impl Miot {
     }
 }
 
+pub enum Request {
+    AddConnection {
+        client_id: ClientID,
+        conn: mio::net::TcpStream,
+        addr: net::SocketAddr,
+        upstream: queue::QueueTx,
+    },
+    Close,
+}
+
 // calls to interface with listener-thread, and shall wake the thread
 impl Miot {
     pub fn add_connection(
@@ -162,16 +172,6 @@ impl Miot {
             _ => unreachable!(),
         }
     }
-}
-
-pub enum Request {
-    AddConnection {
-        client_id: ClientID,
-        conn: mio::net::TcpStream,
-        addr: net::SocketAddr,
-        upstream: queue::QueueTx,
-    },
-    Close,
 }
 
 pub enum Response {
@@ -563,7 +563,7 @@ impl Miot {
         use crate::MSG_CHANNEL_SIZE;
         use mio::Interest;
 
-        let (client_id, mut conn, addr, tx) = match req {
+        let (client_id, mut conn, addr, session_tx) = match req {
             Request::AddConnection { client_id, conn, addr, upstream } => {
                 (client_id, conn, addr, upstream)
             }
@@ -581,18 +581,20 @@ impl Miot {
         let interests = Interest::READABLE | Interest::WRITABLE;
         allow_panic!(self.prefix, poll.registry().register(&mut conn, token, interests));
 
-        let (downstream, rx) = queue::queue_channel(MSG_CHANNEL_SIZE);
+        // This queue is wired up with miot-thread. This queue carries queue::Messages,
+        // and there is a separate queue for every session.
+        let (downstream, session_rx) = queue::queue_channel(MSG_CHANNEL_SIZE);
 
         let rd = queue::Source {
             pr: PacketRead::new(self.config.mqtt_max_packet_size()),
             timeout: None,
-            tx,
+            session_tx,
             packets: Vec::default(),
         };
         let wt = queue::Sink {
             pw: PacketWrite::new(&[], self.config.mqtt_max_packet_size()),
             timeout: None,
-            rx,
+            session_rx,
             packets: Vec::default(),
         };
         let id = client_id.clone();

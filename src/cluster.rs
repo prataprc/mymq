@@ -6,9 +6,11 @@ use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{rebalance, v5, ClientID, Config, ConfigNode, Listener, Shard, TopicTrie};
-use crate::{util, Hostable};
+use crate::{queue, rebalance, util, v5};
+use crate::{ClientID, Config, ConfigNode, Hostable, Listener, Shard, TopicTrie};
 use crate::{Error, ErrorKind, Result};
+
+// TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -50,26 +52,6 @@ pub struct RunLoop {
     app_tx: mpsc::SyncSender<String>,
     /// thread is already closed.
     closed: bool,
-}
-
-enum ClusterState {
-    /// Cluster is single-node.
-    SingleNode { state: SingleState },
-    /// Cluster is in the process of updating its gods&nodes, and working out rebalance.
-    Elastic { state: MultiState },
-    /// Cluster is stable.
-    Stable { state: MultiState },
-}
-
-struct MultiState {
-    config: Config,
-    nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
-    topology: Vec<rebalance::Topology>,
-}
-
-struct SingleState {
-    config: Config,
-    node: Node,
 }
 
 impl Default for Cluster {
@@ -151,12 +133,16 @@ impl Cluster {
             config: self.config.clone(),
             algo: rebalance::Algorithm::SingleNode,
         };
+
+        let state = {
+            let topology = rebalancer.rebalance(&vec![node.clone()], vec![]);
+            ClusterState::SingleNode {
+                state: SingleNode { config: self.config.clone(), node, topology },
+            }
+        };
+
         let listener = Listener::default();
         let shards = BTreeMap::default();
-
-        let state = ClusterState::SingleNode {
-            state: SingleState { config: self.config.clone(), node },
-        };
 
         let topic_filters = TopicTrie::new();
         let cluster = Cluster {
@@ -184,10 +170,18 @@ impl Cluster {
         };
         {
             let mut shards = BTreeMap::default();
+            let mut shard_queues = BTreeMap::default();
             for shard_id in 0..self.config.num_shards() {
                 let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = Shard::from_config(config, shard_id)?.spawn(clust_tx)?;
+                shard_queues.insert(shard.shard_id, shard.to_queue_tx());
                 shards.insert(shard_id, shard);
+            }
+
+            for shard in shards.iter() {
+                let iter = shard_queues.iter().map(|id, s| (id, s.to_queue_tx()));
+                let shard_queues = BTreeMap::from_iter(iter);
+                shard.set_shard_queues(shard_queues);
             }
 
             let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
@@ -233,16 +227,13 @@ pub enum Request {
     RemoveNodes {
         uuids: Vec<Uuid>,
     },
-    RestartChild {
-        name: &'static str,
-    },
     AddConnection {
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
         pkt: v5::Connect,
     },
-    RemoveConnection {
-        client_id: ClientID,
+    RestartChild {
+        name: &'static str,
     },
     Close,
 }
@@ -290,35 +281,11 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn remove_connection(&self, client_id: ClientID) -> Result<()> {
-        match &self.inner {
-            Inner::Tx(waker, tx) => {
-                waker.wake()?;
-                tx.request(Request::RemoveConnection { client_id })??
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
     pub fn restart_listener(&self) -> Result<()> {
         match &self.inner {
             Inner::Tx(waker, tx) => {
                 waker.wake()?;
                 tx.post(Request::RestartChild { name: "listener" })?
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
-    pub fn failed_shard(&self) -> Result<()> {
-        match &self.inner {
-            Inner::Tx(waker, tx) => {
-                waker.wake()?;
-                tx.post(Request::RestartChild { name: "shard" })?
             }
             _ => unreachable!(),
         };
@@ -458,9 +425,6 @@ impl Cluster {
                 (q @ AddConnection { .. }, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_add_connection(q)))?;
                 }
-                (q @ RemoveConnection { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_remove_connection(q)))?;
-                }
                 (q @ Close, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_close(q)))?;
                 }
@@ -501,7 +465,9 @@ impl Cluster {
     }
 
     fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
-        let (conn, addr, pkt) = match req {
+        use crate::shard::AddSessionArgs;
+
+        let (conn, addr, connect) = match req {
             Request::AddConnection { conn, addr, pkt } => (conn, addr, pkt),
             _ => unreachable!(),
         };
@@ -511,35 +477,28 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let client_id = pkt.payload.client_id.clone();
-        let (shard_uuid, subscribed_tx) = {
-            let shard_num = rebalancer.session_parition(&*client_id);
-            let shard = shards.get_mut(&shard_num).unwrap();
+        let client_id = connect.payload.client_id.clone();
+        let shard_num = rebalance::Rebalancer::session_parition(
+            &*client_id,
+            self.config.num_shards(),
+        );
+
+        let shard = match shards.get_mut(&shard_num) {
+            Some(shard) => shard,
+            None => {
+                // multi-node cluster, look at the topology and redirect client using
+                // connack::server_reference, and close the connection.
+                todo!()
+            }
+        };
+        info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_num);
+
+        // Add session to the shard.
+        let args = {
             let topic_filters = topic_filters.clone();
-            let subscribed_tx = shard.add_session(conn, addr, pkt, topic_filters)?;
-            (shard.uuid.clone(), subscribed_tx)
-        };
-
-        for (_, shard) in shards.iter().filter(|(_, s)| s.uuid != shard_uuid) {
-            shard.book_session(client_id.clone(), subscribed_tx.clone())?;
+            AddSessionArgs { conn, addr, pkt: connect, topic_filters }
         }
-
-        Ok(Response::Ok)
-    }
-
-    fn handle_remove_connection(&mut self, req: Request) -> Result<Response> {
-        let client_id = match req {
-            Request::RemoveConnection { client_id } => client_id,
-            _ => unreachable!(),
-        };
-        let RunLoop { shards, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-
-        for (_, shard) in shards.iter() {
-            shard.unbook_session(client_id.clone())?;
-        }
+        shard.add_session(args);
 
         Ok(Response::Ok)
     }
@@ -657,5 +616,40 @@ impl Hostable for Node {
 
     fn path(&self) -> path::PathBuf {
         self.path.clone()
+    }
+}
+
+enum ClusterState {
+    /// Cluster is single-node.
+    SingleNode { state: SingleNode },
+    /// Cluster is in the process of updating its gods&nodes, and working out rebalance.
+    Elastic { state: MultiNode },
+    /// Cluster is stable.
+    Stable { state: MultiNode },
+}
+
+struct MultiNode {
+    config: Config,
+    nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
+    topology: Vec<rebalance::Topology>, // list of shards mapped to node.
+}
+
+struct SingleNode {
+    config: Config,
+    node: Node,
+    topology: Vec<rebalance::Topology>,
+}
+
+impl ClusterState {
+    /// Return the list of shard-numbers that are hosted in this node.
+    fn shards_in_node(&self, node: &Uuid) -> Vec<u32> {
+        use ClusterState::*;
+
+        let topology = match self {
+            SingleNode { state } if node == &state.node.uuid => &state.topology,
+            Stable { state } => &state.topology,
+            _ => unreachable!(), // TODO: meaningful return.
+        };
+        topology.iter().filter(|t| node == &t.master.uuid).map(|t| t.shard).collect()
     }
 }
