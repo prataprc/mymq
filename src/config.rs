@@ -18,7 +18,7 @@ pub struct Config {
     /// federated nodes.
     /// * **Default**: [Config::DEF_MAX_NODES].
     /// * **Mutable**: No
-    pub max_nodes: Option<usize>,
+    pub max_nodes: Option<u32>,
 
     /// Fixed number of shards, of session/connections, that can exist in this cluster.
     /// Shards are assigned to nodes.
@@ -69,17 +69,25 @@ pub struct Config {
     /// * **Mutable**: No
     pub mqtt_flush_timeout: Option<u32>,
 
+    // TODO
     /// Subscribe ack timeout, in secs, after receiving a subscribe/un-subscribe
     /// message, broker immediately sends corresponding ACK. If outbound queue to the
     /// client is full, tthis timeout will kick in. If broker cannot send an ACK
     /// within that timeout, session/connection shall be closed.
     pub subscribe_ack_timeout: Option<u32>,
 
+    // TODO
     /// Publish ack timeout, in secs, after receiving a publish message, with QoS-0 or
     /// QoS-1, broker immediately sends corresponding ACK. If outbound queue to the
     /// client is full, tthis timeout will kick in. If broker cannot send an ACK
     /// within that timeout, session/connection shall be closed.
     pub publish_ack_timeout: Option<u32>,
+
+    /// Maximum packet size allowed by the broker, this shall be communicated with
+    /// remote client during handshake.
+    /// * **Default**: [Config::DEF_MQTT_MAX_PACKET_SIZE]
+    /// * **Mutable**: No
+    pub mqtt_max_packet_size: Option<u32>,
 }
 
 impl Default for Config {
@@ -97,6 +105,7 @@ impl Default for Config {
             mqtt_read_timeout: Some(Self::DEF_MQTT_READ_TIMEOUT),
             mqtt_write_timeout: Some(Self::DEF_MQTT_WRITE_TIMEOUT),
             mqtt_flush_timeout: Some(Self::DEF_MQTT_FLUSH_TIMEOUT),
+            mqtt_max_packet_size: Some(Self::DEF_MQTT_MAX_PACKET_SIZE),
             subscribe_ack_timeout: None,
             publish_ack_timeout: None,
         }
@@ -105,7 +114,7 @@ impl Default for Config {
 
 impl Config {
     /// Refer to [Config::max_nodes]
-    const DEF_MAX_NODES: usize = 1;
+    const DEF_MAX_NODES: u32 = 1;
     /// Refer to [Config::connect_timeout]
     const DEF_CONNECT_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::mqtt_read_timeout]
@@ -114,6 +123,8 @@ impl Config {
     const DEF_MQTT_WRITE_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::mqtt_flush_timeout]
     const DEF_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
+    /// Refer to [Config::mqtt_max_packet_size]
+    const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -123,7 +134,7 @@ impl Config {
         load_toml(loc)
     }
 
-    pub fn max_nodes(&self) -> usize {
+    pub fn max_nodes(&self) -> u32 {
         self.max_nodes.unwrap_or(Self::DEF_MAX_NODES)
     }
 
@@ -148,6 +159,14 @@ impl Config {
 
     pub fn mqtt_flush_timeout(&self) -> u32 {
         self.mqtt_flush_timeout.unwrap_or(Self::DEF_MQTT_FLUSH_TIMEOUT)
+    }
+
+    pub fn mqtt_max_packet_size(&self) -> u32 {
+        match self.mqtt_max_packet_size {
+            Some(val) if val > 268435456 => panic!("mqtt_max_packet_size is {}", val),
+            Some(val) => val,
+            None => Self::DEF_MQTT_FLUSH_TIMEOUT,
+        }
     }
 }
 

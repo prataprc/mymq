@@ -286,6 +286,7 @@ impl Listener {
                     prefix: format!("{}:handshake:{}", self.prefix, addr),
                     conn: Some(conn),
                     addr,
+                    config: self.config.clone(),
                     cluster: cluster.to_tx(),
                     connect_timeout: self.config.connect_timeout(),
                 };

@@ -1,24 +1,27 @@
 //! The premises for rebalancer is that:
 //!
-//! * A Cluster shall be made up of nodes, to host one or more shards.
-//! * The complete set of all sessions shall be divided into shards.
+//! * A Cluster shall be made up of nodes, capable of hosting one or more shards.
 //! * Number of shards are fixed when creating a cluster, and cannot change there after.
 //! * Number of shards must be power of 2.
+//! * MQTT is a state-ful protocol, hence on the broker side, there shall be one `Session`
+//!   for each client, identified by ClientID.
+//! * Given the ClientID and number of shards, mapping of `Session` to `Shard` is computed
+//!   with ZERO knowledge.
 //! * There should atleast be as many shards as the CPU cores in a node.
 //! * There shall be `one-master` and `zero-or-more-replicas` for each shard.
-//! * Shard mapping to node is open-ended, Rebalancer can experiment with several
+//! * Shard to node mapping is open-ended, Rebalancer can experiment with several
 //!   algorithms, but the end result shall be that, shards, both master and its replicas,
 //!   shall be distributed across nodes.
 //!
 //! The scope of Rebalancer is:
 //!
-//! * Assign session to shard.
+//! * Assign session to shard, computed only using ClientID and num_shards.
 //! * Assign a node for master shard.
 //! * Assign ZERO or more node for replica shards.
 //!
 //! **Topology**
 //!
-//! Topology is distribution of shard's master and replicas across the nodes. For each
+//! Topology is distribution of shard's master and replicas across the cluster. For each
 //! shard, there shall be a [Topology] discription. After every rebalance, whether
 //! gracefull or fail-over, a new Topology shall be created that involves minimum
 //! shard migration.

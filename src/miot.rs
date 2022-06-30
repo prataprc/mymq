@@ -14,12 +14,6 @@ pub struct Miot {
     pub name: String,
     /// Same as the shard-id.
     pub miot_id: u32,
-    /// Read timeout on MQTT socket. Refer [Config::mqtt_read_timeout]
-    pub read_timeout: u32,
-    /// Write timeout on MQTT socket. Refer [Config::mqtt_write_timeout]
-    pub write_timeout: u32,
-    /// Flush timeout for connection shutdown. Refer [Config::mqtt_flush_timeout]
-    pub flush_timeout: u32,
     prefix: String,
     config: Config,
     inner: Inner,
@@ -50,9 +44,6 @@ impl Default for Miot {
         let mut def = Miot {
             name: format!("{}-miot-init", config.name),
             miot_id: u32::default(),
-            read_timeout: config.mqtt_read_timeout(),
-            write_timeout: config.mqtt_write_timeout(),
-            flush_timeout: config.mqtt_flush_timeout(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -88,9 +79,6 @@ impl Miot {
         let mut val = Miot {
             name: m.name.clone(),
             miot_id,
-            read_timeout: config.mqtt_read_timeout(),
-            write_timeout: config.mqtt_write_timeout(),
-            flush_timeout: config.mqtt_flush_timeout(),
             prefix: String::default(),
             config: config.clone(),
             inner: Inner::Init,
@@ -113,9 +101,6 @@ impl Miot {
         let miot = Miot {
             name: format!("{}-miot-main", self.config.name),
             miot_id: self.miot_id,
-            read_timeout: self.read_timeout,
-            write_timeout: self.write_timeout,
-            flush_timeout: self.flush_timeout,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -131,9 +116,6 @@ impl Miot {
         let val = Miot {
             name: format!("{}-miot-handle", self.config.name),
             miot_id: self.miot_id,
-            read_timeout: self.read_timeout,
-            write_timeout: self.write_timeout,
-            flush_timeout: self.flush_timeout,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -300,10 +282,11 @@ impl Miot {
         }
 
         // if thread is closed, conns will be empty.
+        let read_timeout = self.config.mqtt_read_timeout();
         let mut fail_queues = vec![];
         for (client_id, queue) in conns.iter_mut() {
             let prefix = format!("rconn:{}:{}", queue.addr, client_id.deref());
-            match Self::read_packets(&prefix, self.read_timeout, queue) {
+            match Self::read_packets(&prefix, read_timeout, queue) {
                 Ok(_) => (),
                 Err(err) => fail_queues.push((client_id.clone(), err)),
             }
@@ -319,7 +302,7 @@ impl Miot {
                 prefix,
                 err: Some(err),
                 queue,
-                flush_timeout: self.flush_timeout,
+                config: self.config.clone(),
             };
             let _thrd = Thread::spawn_sync("flush", 1, flush);
         }
@@ -442,10 +425,11 @@ impl Miot {
         }
 
         // if thread is closed conns will be empty.
+        let write_timeout = self.config.mqtt_write_timeout();
         let mut fail_queues = vec![];
         for (client_id, queue) in conns.iter_mut() {
             let prefix = format!("wconn:{}:{}", queue.addr, client_id.deref());
-            match Self::write_packets(&prefix, self.write_timeout, queue) {
+            match Self::write_packets(&prefix, write_timeout, queue) {
                 Ok(_) => (),
                 Err(err) => fail_queues.push((client_id.clone(), err)),
             }
@@ -461,7 +445,7 @@ impl Miot {
                 prefix,
                 err: Some(err),
                 queue,
-                flush_timeout: self.flush_timeout,
+                config: self.config.clone(),
             };
             let _thrd = Thread::spawn_sync("flush", 1, flush);
         }
@@ -574,7 +558,7 @@ impl Miot {
 
 impl Miot {
     fn handle_add_connection(&mut self, req: Request) -> Response {
-        use crate::{MAX_PACKET_SIZE, MSG_CHANNEL_SIZE};
+        use crate::MSG_CHANNEL_SIZE;
         use mio::Interest;
 
         let (client_id, mut conn, addr, tx) = match req {
@@ -598,13 +582,13 @@ impl Miot {
         let (downstream, rx) = queue::queue_channel(MSG_CHANNEL_SIZE);
 
         let rd = queue::Source {
-            pr: PacketRead::new(MAX_PACKET_SIZE), // TODO: use configurable values
+            pr: PacketRead::new(self.config.mqtt_max_packet_size()),
             timeout: None,
             tx,
             packets: Vec::default(),
         };
         let wt = queue::Sink {
-            pw: PacketWrite::new(&[], MAX_PACKET_SIZE), // TODO: use configurable values
+            pw: PacketWrite::new(&[], self.config.mqtt_max_packet_size()),
             timeout: None,
             rx,
             packets: Vec::default(),

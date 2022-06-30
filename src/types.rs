@@ -7,9 +7,6 @@ use crate::util::{self, advance};
 use crate::Packetize;
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-// TODO: there is a protocol limit for packet size, provide a way for applications
-//       to set a limit for packet size.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub enum MqttProtocol {

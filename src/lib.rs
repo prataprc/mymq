@@ -59,10 +59,6 @@ pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 
 pub const REQ_CHANNEL_SIZE: usize = 1024;
 pub const MSG_CHANNEL_SIZE: usize = 1024;
-pub const MAX_PACKET_SIZE: usize = 1024 * 1024; // default is 1MB.
-
-// TODO: restrict packet size to maximum allowed for each session or use
-//       protocol-limitation
 
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;

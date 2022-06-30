@@ -5,6 +5,7 @@ use crate::{queue, v5, ClientID, Config, TopicFilter, TopicTrie};
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 // set to 0.
+// TODO Revisit 2.2.1 Packet Identifier
 
 pub struct SessionArgs {
     pub addr: net::SocketAddr,

@@ -6,10 +6,6 @@ use crate::Hostable;
 use crate::{Error, ErrorKind, Result};
 
 // Challenges in having consistent hashing.
-// TODO: How random is the uuid ? Because we intend to use uuid to generate hash.
-// TODO: how random can the hash value be ?
-// TODO: Do we have a requirement that client can compute the client->shard and
-//       shard->node mapping without consulting the cluster ?
 
 pub struct ConsistentHash<H>
 where

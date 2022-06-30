@@ -4,13 +4,14 @@ use std::{net, thread, time};
 
 use crate::packet::{send_connack, PacketRead};
 use crate::thread::{Rx, Threadable};
-use crate::{v5, Cluster, MAX_PACKET_SIZE, SLEEP_10MS};
+use crate::{v5, Cluster, Config, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode as RC};
 
 pub struct Handshake {
     pub prefix: String,
     pub conn: Option<mio::net::TcpStream>,
     pub addr: net::SocketAddr,
+    pub config: Config,
     pub cluster: Cluster,
     pub connect_timeout: u32,
 }
@@ -23,7 +24,8 @@ impl Threadable for Handshake {
         let now = time::Instant::now();
         info!("{} new connection at {:?}", self.prefix, now);
 
-        let mut packetr = PacketRead::new(MAX_PACKET_SIZE);
+        let max_size = self.config.mqtt_max_packet_size();
+        let mut packetr = PacketRead::new(max_size);
         let (conn, addr) = (self.conn.take().unwrap(), self.addr);
         let timeout = now + time::Duration::from_secs(self.connect_timeout as u64);
         let prefix = self.prefix.clone();
@@ -33,12 +35,14 @@ impl Threadable for Handshake {
                 Ok((val, _would_block)) => val,
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                     error!("{}, fail read, error {}", prefix, err);
-                    send_connack(&prefix, timeout, RC::MalformedPacket, &conn).ok();
+                    send_connack(&prefix, timeout, max_size, RC::MalformedPacket, &conn)
+                        .ok();
                     break;
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
                     error!("{}, fail read, error {}", prefix, err);
-                    send_connack(&prefix, timeout, RC::ProtocolError, &conn).ok();
+                    send_connack(&prefix, timeout, max_size, RC::ProtocolError, &conn)
+                        .ok();
                     break;
                 }
                 Err(_err) => unreachable!(),
@@ -66,17 +70,38 @@ impl Threadable for Handshake {
                     Ok(pkt) => {
                         let pt = pkt.to_packet_type();
                         error!("{}, unexpect {:?} on new connection", prefix, pt);
-                        send_connack(&prefix, timeout, RC::ProtocolError, &conn).ok();
+                        send_connack(
+                            &prefix,
+                            timeout,
+                            max_size,
+                            RC::ProtocolError,
+                            &conn,
+                        )
+                        .ok();
                         break;
                     }
                     Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                         error!("{}, fail parse, error {}", prefix, err);
-                        send_connack(&prefix, timeout, RC::MalformedPacket, &conn).ok();
+                        send_connack(
+                            &prefix,
+                            timeout,
+                            max_size,
+                            RC::MalformedPacket,
+                            &conn,
+                        )
+                        .ok();
                         break;
                     }
                     Err(err) if err.kind() == ErrorKind::ProtocolError => {
                         error!("{}, fail parse, error {}", prefix, err);
-                        send_connack(&prefix, timeout, RC::ProtocolError, &conn).ok();
+                        send_connack(
+                            &prefix,
+                            timeout,
+                            max_size,
+                            RC::ProtocolError,
+                            &conn,
+                        )
+                        .ok();
                         break;
                     }
                     Err(_err) => unreachable!(),

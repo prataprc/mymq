@@ -15,7 +15,7 @@ pub struct Cluster {
     /// Refer [Config::name]
     pub name: String,
     /// Refer [Config::max_nodes]
-    pub max_nodes: usize,
+    pub max_nodes: u32,
     /// Refer [Config::num_shards]
     pub num_shards: u32,
     /// Refer [Config::port]

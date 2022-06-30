@@ -35,8 +35,11 @@ impl Default for PacketRead {
 }
 
 impl PacketRead {
-    pub fn new(max_size: usize) -> PacketRead {
-        PacketRead::Init { data: Vec::with_capacity(max_size), max_size }
+    pub fn new(max_size: u32) -> PacketRead {
+        PacketRead::Init {
+            data: Vec::with_capacity(max_size as usize),
+            max_size: max_size as usize,
+        }
     }
 
     // return (self,would_block)
@@ -239,10 +242,10 @@ impl Default for PacketWrite {
 }
 
 impl PacketWrite {
-    pub fn new(buf: &[u8], max_size: usize) -> PacketWrite {
-        let mut data = Vec::with_capacity(max_size);
+    pub fn new(buf: &[u8], max_size: u32) -> PacketWrite {
+        let mut data = Vec::with_capacity(max_size as usize);
         data.extend_from_slice(buf);
-        PacketWrite::Init { data, max_size }
+        PacketWrite::Init { data, max_size: max_size as usize }
     }
 
     // return (self,would_block)
@@ -310,13 +313,14 @@ impl PacketWrite {
 pub fn send_disconnect(
     prefix: &str,
     timeout: time::Instant,
+    max_size: u32,
     code: ReasonCode,
     conn: &mio::net::TcpStream,
 ) -> Result<()> {
-    use crate::{MAX_PACKET_SIZE, SLEEP_10MS};
+    use crate::SLEEP_10MS;
 
     let dc = v5::Disconnect::from_reason_code(code);
-    let mut packetw = PacketWrite::new(dc.encode().unwrap().as_ref(), MAX_PACKET_SIZE);
+    let mut packetw = PacketWrite::new(dc.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,
@@ -344,13 +348,14 @@ pub fn send_disconnect(
 pub fn send_connack(
     prefix: &str,
     timeout: time::Instant,
+    max_size: u32,
     code: ReasonCode,
     conn: &mio::net::TcpStream,
 ) -> Result<()> {
-    use crate::{MAX_PACKET_SIZE, SLEEP_10MS};
+    use crate::SLEEP_10MS;
 
     let cack = v5::ConnAck::from_reason_code(code);
-    let mut packetw = PacketWrite::new(cack.encode().unwrap().as_ref(), MAX_PACKET_SIZE);
+    let mut packetw = PacketWrite::new(cack.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,
