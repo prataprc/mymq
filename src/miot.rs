@@ -21,15 +21,17 @@ pub struct Miot {
 
 pub enum Inner {
     Init,
+    // Help by Shard.
     Handle(Arc<mio::Waker>, Thread<Miot, Request, Result<Response>>),
     Main(RunLoop),
 }
 
 pub struct RunLoop {
+    /// Mio poller for asynchronous handling, aggregate events from remote client and
+    /// thread-waker.
+    poll: mio::Poll,
     /// Shard instance that is paired with this miot thread.
     shard: Box<Shard>,
-    /// Mio poller for asynchronous handling.
-    poll: mio::Poll,
     /// collection of all active socket connections abstracted as queue.
     conns: BTreeMap<ClientID, queue::Socket>,
     /// next available token for connections
@@ -182,11 +184,11 @@ impl Threadable for Miot {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::REQ_CHANNEL_SIZE;
+        use crate::POLL_EVENTS_SIZE;
 
         info!("{} spawn ...", self.prefix);
 
-        let mut events = mio::Events::with_capacity(REQ_CHANNEL_SIZE);
+        let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
@@ -219,7 +221,7 @@ impl Miot {
 
         let exit = loop {
             // keep repeating until all control requests are drained.
-            match self.control_chan(rx) {
+            match self.drain_control_chan(rx) {
                 (_empty, true) => break true,
                 (true, _disconnected) => break false,
                 (false, false) => (),
@@ -233,8 +235,8 @@ impl Miot {
     }
 
     // Return (empty, disconnected)
-    fn control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
-        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
         let closed = match &self.inner {
@@ -242,7 +244,7 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
+        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);

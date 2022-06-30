@@ -23,18 +23,21 @@ pub struct Shard {
 
 pub enum Inner {
     Init,
+    // Held by Cluster.
     Handle(Arc<mio::Waker>, Thread<Shard, Request, Result<Response>>),
+    // Help by Miot.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     Main(RunLoop),
 }
 
 pub struct RunLoop {
+    /// Mio poller for asynchronous handling, all events are from consensus port and
+    /// thread-waker.
+    poll: mio::Poll,
     /// Cluster::Tx to communicate back to cluster.
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
     cluster: Box<Cluster>,
-    /// Mio poller for asynchronous handling.
-    poll: mio::Poll,
     /// Collection of sessions and corresponding clients managed by this shard.
     /// Shall be dropped after close_wait call, when the thread returns, will be empty.
     sessions: BTreeMap<ClientID, Session>,
@@ -289,12 +292,11 @@ impl Threadable for Shard {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::REQ_CHANNEL_SIZE;
         use std::time;
 
         info!("{} spawn ...", self.prefix);
 
-        let mut events = mio::Events::with_capacity(REQ_CHANNEL_SIZE);
+        let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
@@ -324,7 +326,7 @@ impl Shard {
 
         loop {
             // keep repeating until all control requests are drained.
-            match self.control_chan(rx) {
+            match self.drain_control_chan(rx) {
                 (_empty, true) => break true,
                 (true, _disconnected) => break false,
                 (false, false) => (),
@@ -334,8 +336,8 @@ impl Shard {
 }
 
 impl Shard {
-    fn control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
-        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
         let closed = match &self.inner {
@@ -343,7 +345,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
+        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);

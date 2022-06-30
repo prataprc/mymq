@@ -88,6 +88,11 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_MAX_PACKET_SIZE]
     /// * **Mutable**: No
     pub mqtt_max_packet_size: Option<u32>,
+
+    /// MQTT packets are drainded from queues and connections in batches, so that
+    /// all queues will get evenly processed. This parameter defines the batch size
+    /// while draining the message queues.
+    pub mqtt_msg_batch_size: Option<u32>,
 }
 
 impl Default for Config {
@@ -106,6 +111,7 @@ impl Default for Config {
             mqtt_write_timeout: Some(Self::DEF_MQTT_WRITE_TIMEOUT),
             mqtt_flush_timeout: Some(Self::DEF_MQTT_FLUSH_TIMEOUT),
             mqtt_max_packet_size: Some(Self::DEF_MQTT_MAX_PACKET_SIZE),
+            mqtt_msg_batch_size: Some(Self::DEF_MQTT_MSG_BATCH_SIZE),
             subscribe_ack_timeout: None,
             publish_ack_timeout: None,
         }
@@ -125,6 +131,8 @@ impl Config {
     const DEF_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
     /// Refer to [Config::mqtt_max_packet_size]
     const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
+    /// Refer to [Config::mqtt_msg_batch_size]
+    const DEF_MQTT_MSG_BATCH_SIZE: u32 = 1024; // default is 1MB.
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -166,6 +174,14 @@ impl Config {
             Some(val) if val > 268435456 => panic!("mqtt_max_packet_size is {}", val),
             Some(val) => val,
             None => Self::DEF_MQTT_FLUSH_TIMEOUT,
+        }
+    }
+
+    pub fn mqtt_msg_batch_size(&self) -> u32 {
+        match self.mqtt_msg_batch_size {
+            Some(val) if val > 268435456 => panic!("mqtt_msg_batch_size is {}", val),
+            Some(val) => val,
+            None => Self::DEF_MQTT_MSG_BATCH_SIZE,
         }
     }
 }

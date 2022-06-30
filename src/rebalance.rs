@@ -10,8 +10,9 @@
 //! * There should atleast be as many shards as the CPU cores in a node.
 //! * There shall be `one-master` and `zero-or-more-replicas` for each shard.
 //! * Shard to node mapping is open-ended, Rebalancer can experiment with several
-//!   algorithms, but the end result shall be that, shards, both master and its replicas,
-//!   shall be distributed across nodes.
+//!   algorithms, but the end result shall be that:
+//!   * Shards, both master and its replicas, shall be distributed evenly across nodes.
+//!   * All shards hosted by the same node, shall have same master/replica topology.
 //!
 //! The scope of Rebalancer is:
 //!
@@ -33,7 +34,7 @@
 //! * Demotion of master shard as replica-shard.
 //! * Promotion of replica-shard as master-shard.
 
-use crate::Node;
+use crate::{Config, Node};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Topology {
@@ -44,7 +45,7 @@ pub struct Topology {
 
 /// Implement rebalancing-algorithm, refer to module documentation.
 pub struct Rebalancer {
-    pub num_shards: u32,
+    pub config: Config,
     pub algo: Algorithm,
 }
 
@@ -56,7 +57,7 @@ impl Rebalancer {
         let hash = cityhash_rs::cityhash_110_128(id);
         let hash = (hash & 0xFFFFFFFFFFFFFFFF) ^ ((hash >> 64) & 0xFFFFFFFFFFFFFFFF);
         let hash = ((hash & 0xFFFFFFFF) ^ ((hash >> 32) & 0xFFFFFFFF)) as u32;
-        hash & (self.num_shards - 1)
+        hash & (self.config.num_shards() - 1)
     }
 
     /// Add new set of nodes into the cluster. Return a new topology. Subsequently use

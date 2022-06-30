@@ -21,12 +21,14 @@ pub struct Listener {
 
 pub enum Inner {
     Init,
+    // Held by Cluster
     Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
     Main(RunLoop),
 }
 
 pub struct RunLoop {
-    /// Mio poller for asynchronous handling, aggregate events from server and waker.
+    /// Mio poller for asynchronous handling, aggregate events from server and
+    /// thread-waker.
     poll: mio::Poll,
     /// MQTT server listening on `port`.
     server: Option<mio::net::TcpListener>,
@@ -68,7 +70,8 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    /// Poll register token for waker event, OTP calls made to this thread will trigger.
+    /// Poll register token for waker event, OTP calls made to this thread shall trigger
+    /// this event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
     /// Poll register for server TcpStream.
     pub const TOKEN_SERVER: mio::Token = mio::Token(2);
@@ -163,11 +166,9 @@ impl Threadable for Listener {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::REQ_CHANNEL_SIZE;
+        info!("{}, spawn thread port:{} ...", self.prefix, self.port);
 
-        info!("{} spawn port:{} ...", self.prefix, self.port);
-
-        let mut events = Events::with_capacity(REQ_CHANNEL_SIZE);
+        let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
         let res = loop {
             let timeout: Option<time::Duration> = None;
             match self.as_mut_poll().poll(&mut events, timeout) {
@@ -178,20 +179,19 @@ impl Threadable for Listener {
             };
 
             match self.mio_events(&rx, &events) {
+                // Exit or not.
                 Ok(true) => break Ok(()),
                 Ok(false) => (),
                 Err(err) => break Err(err),
             };
         };
 
-        self.handle_close(Request::Close); // handle_close should handle repeat close.
+        self.handle_close(Request::Close); // handle_close should be idempotent call.
 
         match res {
-            Ok(()) => {
-                info!("{} thread normal exit...", self.prefix);
-            }
+            Ok(()) => info!("{}, thread exit ...", self.prefix),
             Err(err) => {
-                error!("{} fatal error, try restarting thread `{}`", self.prefix, err);
+                error!("{}, thread exit, try restarting thread `{}`", self.prefix, err);
                 self.as_cluster().restart_listener().ok();
             }
         }
@@ -208,13 +208,13 @@ impl Listener {
         let res = 'outer: loop {
             match iter.next() {
                 Some(event) => {
-                    trace!("{} poll-event token:{}", self.prefix, event.token().0);
+                    trace!("{}, poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
 
                     match event.token() {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
-                            match self.control_chan(rx)? {
+                            match self.drain_control_chan(rx)? {
                                 (_empty, true) => break 'outer Ok(true),
                                 (true, _disconnected) => break,
                                 (false, false) => (),
@@ -234,13 +234,13 @@ impl Listener {
             }
         };
 
-        debug!("{} polled and got {} events", self.prefix, count);
+        debug!("{}, polled and got {} events", self.prefix, count);
         res
     }
 
     // Return (empty, disconnected)
-    fn control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
-        use crate::{thread::pending_requests, REQ_CHANNEL_SIZE};
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
+        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
         let closed = match &self.inner {
@@ -248,7 +248,7 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, REQ_CHANNEL_SIZE);
+        let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
@@ -295,7 +295,7 @@ impl Listener {
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(true),
             Err(err) => {
-                err!(IOError, try: Err(err), "{} server accept error", self.prefix)
+                err!(IOError, try: Err(err), "{}, connection accept error", self.prefix)
             }
         }
     }
@@ -328,7 +328,7 @@ impl Listener {
     }
 
     fn prefix(&self) -> String {
-        format!("{}:{}", self.name, self.server_address())
+        format!("{}:listener:{}", self.name, self.server_address())
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
