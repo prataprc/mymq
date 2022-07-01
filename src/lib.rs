@@ -59,7 +59,6 @@ pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 
 pub const POLL_EVENTS_SIZE: usize = 1024;
 pub const CONTROL_CHAN_SIZE: usize = 1024;
-pub const MSG_CHANNEL_SIZE: usize = 1024;
 
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -6,11 +6,12 @@ use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, rebalance, util, v5};
-use crate::{ClientID, Config, ConfigNode, Hostable, Listener, Shard, TopicTrie};
+use crate::{rebalance, util, v5};
+use crate::{Config, ConfigNode, Hostable, Listener, Shard, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
+// TODO: Review `as` type-casting for numbers.
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -174,12 +175,12 @@ impl Cluster {
             for shard_id in 0..self.config.num_shards() {
                 let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = Shard::from_config(config, shard_id)?.spawn(clust_tx)?;
-                shard_queues.insert(shard.shard_id, shard.to_queue_tx());
+                shard_queues.insert(shard.shard_id, shard.to_msg_tx());
                 shards.insert(shard_id, shard);
             }
 
-            for shard in shards.iter() {
-                let iter = shard_queues.iter().map(|id, s| (id, s.to_queue_tx()));
+            for (_shard_id, shard) in shards.iter() {
+                let iter = shard_queues.iter().map(|(id, s)| (*id, s.to_msg_tx()));
                 let shard_queues = BTreeMap::from_iter(iter);
                 shard.set_shard_queues(shard_queues);
             }
@@ -472,18 +473,18 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let RunLoop { rebalancer, shards, topic_filters, .. } = match &mut self.inner {
+        let RunLoop { shards, topic_filters, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
         let client_id = connect.payload.client_id.clone();
-        let shard_num = rebalance::Rebalancer::session_parition(
+        let shard_id = rebalance::Rebalancer::session_parition(
             &*client_id,
             self.config.num_shards(),
         );
 
-        let shard = match shards.get_mut(&shard_num) {
+        let shard = match shards.get_mut(&shard_id) {
             Some(shard) => shard,
             None => {
                 // multi-node cluster, look at the topology and redirect client using
@@ -491,13 +492,13 @@ impl Cluster {
                 todo!()
             }
         };
-        info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_num);
+        info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_id);
 
         // Add session to the shard.
         let args = {
             let topic_filters = topic_filters.clone();
             AddSessionArgs { conn, addr, pkt: connect, topic_filters }
-        }
+        };
         shard.add_session(args);
 
         Ok(Response::Ok)

@@ -28,14 +28,14 @@ pub enum Inner {
     // Held by Miot, Session(s).
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     // Held by all Shard threads.
-    QueueTx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
+    MsgTx(Arc<mio::Waker>, queue::MsgTx),
     Main(RunLoop),
 }
 
 pub struct Handle {
     waker: Arc<mio::Waker>,
     thrd: Thread<Shard, Request, Result<Response>>,
-    queue_tx: queue::QueueTx,
+    msg_tx: queue::MsgTx,
 }
 
 pub struct RunLoop {
@@ -55,9 +55,9 @@ pub struct RunLoop {
     miot: Miot,
     /// Every shard has an input queue for queue::Message, which receives all locally
     /// hopping MQTT messages for sessions managed by this shard.
-    queue_rx: queue::QueueRx,
-    /// Corresponding Tx handle for all other shards.
-    shard_queues: BTreeMap<u32, queue::QueueTx>,
+    msg_rx: queue::MsgRx,
+    /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
+    shard_queues: BTreeMap<u32, Shard>,
     /// whether thread is closed.
     closed: bool,
 }
@@ -96,6 +96,7 @@ impl Drop for Shard {
                 panic!("{} invalid drop ...", self.prefix);
             }
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
+            Inner::MsgTx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
         }
     }
@@ -120,7 +121,7 @@ impl Shard {
     }
 
     pub fn spawn(self, cluster: Cluster) -> Result<Shard> {
-        if matches!(&self.inner, Inner::Handle(_handle) | Inner::Main(_)) {
+        if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
 
@@ -130,9 +131,9 @@ impl Shard {
         // This is the local queue that carries queue::Message from one local-session
         // to another local-session. Note that the queue is shared by all the sessions
         // in this shard, hence the queue-capacity is correspondingly large.
-        let (queue_tx, queue_rx) = {
+        let (msg_tx, msg_rx) = {
             let size = self.config.mqtt_msg_batch_size() * self.config.num_shards();
-            qeueue::queue_channel(size)
+            queue::msg_channel(size as usize)
         };
         let shard = Shard {
             name: format!("{}-shard-main", self.config.name),
@@ -145,7 +146,7 @@ impl Shard {
                 poll,
                 sessions: BTreeMap::default(),
                 miot: Miot::default(),
-                queue_rx,
+                msg_rx,
                 shard_queues: BTreeMap::default(),
                 closed: false,
             }),
@@ -158,14 +159,14 @@ impl Shard {
             uuid: self.uuid,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
-            inner: Inner::Handle(Handle { waker, thrd, queue_tx }),
+            inner: Inner::Handle(Handle { waker, thrd, msg_tx }),
         };
         {
             let (config, miot_id) = (self.config.clone(), self.shard_id);
             let miot = Miot::from_config(config, miot_id)?.spawn(shard.to_tx())?;
             match &shard.inner {
-                Inner::Handle(Handle { waker, thrd, ..}) => {
-                    thrd.waker.wake();
+                Inner::Handle(Handle { waker, thrd, .. }) => {
+                    waker.wake();
                     thrd.request(Request::SetMiot(miot))??;
                 }
                 _ => unreachable!(),
@@ -179,7 +180,7 @@ impl Shard {
         trace!("{} cloning tx ...", self.prefix);
 
         let inner = match &self.inner {
-            Inner::Handle(Handle { waker, thrd, ..}) => {
+            Inner::Handle(Handle { waker, thrd, .. }) => {
                 Inner::Tx(Arc::clone(waker), thrd.to_tx())
             }
             Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
@@ -196,12 +197,12 @@ impl Shard {
         }
     }
 
-    pub fn to_queue_tx(&self) -> Self {
+    pub fn to_msg_tx(&self) -> Self {
         trace!("{} cloning tx ...", self.prefix);
 
         let inner = match &self.inner {
-            Inner::Handle(Handle {waker, queue_tx, ..}) => {
-                Inner::QueueTx(Arc::clone(waker), queue_tx.clone())
+            Inner::Handle(Handle { waker, msg_tx, .. }) => {
+                Inner::MsgTx(Arc::clone(waker), msg_tx.clone())
             }
             _ => unreachable!(),
         };
@@ -222,15 +223,13 @@ pub struct AddSessionArgs {
     pub addr: net::SocketAddr,
     pub pkt: v5::Connect,
     pub topic_filters: TopicTrie,
-};
+}
 
 pub enum Request {
     SetMiot(Miot),
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
-    FailedConnection {
-        client_id: ClientID,
-    },
+    FailedConnection { client_id: ClientID },
     Close,
 }
 
@@ -240,24 +239,28 @@ pub enum Response {
 
 // calls to interfacw with cluster-thread.
 impl Shard {
-    pub fn set_shard_queues(&self, shards) -> Result<()> {
+    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) -> Result<()> {
         match &self.inner {
-            Inner::Handle(Handle{waker, thrd, ..}) => {
+            Inner::Handle(Handle { waker, thrd, .. }) => {
                 waker.wake()?;
                 thrd.request(Request::SetShardQueues(shards))??;
             }
             _ => unreachable!(),
         }
+
+        Ok(())
     }
 
     pub fn add_session(&self, args: AddSessionArgs) -> Result<()> {
         match &self.inner {
-            Inner::Handle(Handle{waker, thrd, ..}) => {
+            Inner::Handle(Handle { waker, thrd, .. }) => {
                 waker.wake()?;
                 thrd.request(Request::AddSession(args))??;
             }
             _ => unreachable!(),
         }
+
+        Ok(())
     }
 
     pub fn failed_connection(&self, client_id: ClientID) -> Result<()> {
@@ -274,7 +277,7 @@ impl Shard {
 
     pub fn wake(&self) -> Result<()> {
         match &self.inner {
-            Inner::Handle(Handle{ waker, .. }) => {
+            Inner::Handle(Handle { waker, .. }) => {
                 err!(IOError, try: waker.wake(), "shard-wake")
             }
             Inner::Tx(waker, _) => err!(IOError, try: waker.wake(), "shard-wake"),
@@ -423,12 +426,10 @@ impl Shard {
     }
 
     fn handle_add_session(&mut self, req: Request) -> Response {
-        use crate::{session::SessionArgs, MSG_CHANNEL_SIZE};
+        use crate::session::SessionArgs;
 
-        let AddSessionArgs{ conn, addr, pkt, topic_filters } = match req {
+        let AddSessionArgs { conn, addr, pkt, topic_filters } = match req {
             Request::AddSession(args) => args,
-                (conn, addr, pkt, topic_filters)
-            }
             _ => unreachable!(),
         };
         let RunLoop { sessions, miot, .. } = match &mut self.inner {
@@ -438,12 +439,12 @@ impl Shard {
 
         // This queue is wired up with miot-thread. This queue carries queue::Messages,
         // and there is a separate queue for every session.
-        let (upstream, rx) = {
-            let size = self.config.mqtt_msg_batch_size();
-            queue::queue_channel(size)
+        let (upstream, session_rx) = {
+            let size = self.config.mqtt_msg_batch_size() as usize;
+            queue::pkt_channel(size)
         };
         let client_id = pkt.payload.client_id.clone();
-        let tx = {
+        let miot_tx = {
             let res = miot.add_connection(client_id.clone(), conn, addr, upstream);
             allow_panic!(self.prefix, res)
         };
@@ -452,8 +453,8 @@ impl Shard {
             let args = SessionArgs {
                 addr,
                 client_id: client_id.clone(),
-                tx,
-                rx,
+                miot_tx,
+                session_rx,
                 topic_filters,
             };
             Session::start(args, self.config.clone(), pkt)
@@ -468,16 +469,17 @@ impl Shard {
             Request::FailedConnection { client_id } => client_id,
             _ => unreachable!(),
         };
-        let RunLoop { cluster, sessions, .. } = match &mut self.inner {
+        let RunLoop { sessions, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
         match sessions.remove(&client_id) {
-            Some(session) => session.close(),
+            Some(session) => {
+                session.close();
+            }
             None => (),
-        }
-        allow_panic!(self.prefix, cluster.remove_connection(client_id));
+        };
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {

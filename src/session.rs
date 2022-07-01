@@ -10,8 +10,8 @@ use crate::{queue, v5, ClientID, Config, TopicFilter, TopicTrie};
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
     pub client_id: ClientID,
-    pub tx: queue::QueueTx,
-    pub rx: queue::QueueRx,
+    pub miot_tx: queue::PktTx,
+    pub session_rx: queue::PktRx,
     pub topic_filters: TopicTrie,
 }
 
@@ -19,9 +19,9 @@ pub struct Session {
     /// Remote socket address.
     addr: net::SocketAddr,
     /// Outbound channel to Miot thread.
-    tx: queue::QueueTx,
+    miot_tx: queue::PktTx,
     /// Inbound channel from Miot thread.
-    rx: queue::QueueRx,
+    session_rx: queue::PktRx,
     config: Config,
 
     state: SessionState,
@@ -55,8 +55,6 @@ struct Subscription {
 
 impl Session {
     pub fn start(args: SessionArgs, config: Config, _pkt: v5::Connect) -> Session {
-        use crate::MSG_CHANNEL_SIZE;
-
         let cinp = queue::ClientInp {
             seqno: 0,
             index: BTreeMap::default(),
@@ -75,8 +73,8 @@ impl Session {
 
         Session {
             addr: args.addr,
-            tx: args.tx,
-            rx: args.rx,
+            miot_tx: args.miot_tx,
+            session_rx: args.session_rx,
             config,
 
             state,
@@ -90,9 +88,9 @@ impl Session {
     pub fn close(mut self) -> Self {
         use std::mem;
 
-        let (tx, rx) = queue::queue_channel(1); // DUMMY channels
-        mem::drop(mem::replace(&mut self.tx, tx));
-        mem::drop(mem::replace(&mut self.rx, rx));
+        let (tx, rx) = queue::pkt_channel(1); // DUMMY channels
+        mem::drop(mem::replace(&mut self.miot_tx, tx));
+        mem::drop(mem::replace(&mut self.session_rx, rx));
 
         self
     }
