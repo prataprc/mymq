@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, net, ops::Deref, sync::Arc, time};
 
 use crate::packet::{MQTTRead, MQTTWrite};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{queue, v5, ClientID, Config, Flush, Packetize, Shard};
+use crate::{queue, v5, ClientID, Config, Packetize, Shard};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -299,16 +299,7 @@ impl Miot {
             error!("{} removing connection {} ...", self.prefix, err);
 
             let socket = conns.remove(&client_id).unwrap();
-            let prefix = format!("rconn:{}:{}", socket.addr, *client_id);
-            err!(IPCFail, try: shard.failed_connection(client_id)).ok();
-
-            let flush = Flush {
-                prefix,
-                err: Some(err),
-                socket,
-                config: self.config.clone(),
-            };
-            let _thrd = Thread::spawn_sync("flush", 1, flush);
+            err!(IPCFail, try: shard.failed_connection(socket, err)).ok();
         }
     }
 
@@ -444,15 +435,7 @@ impl Miot {
             let socket = conns.remove(&client_id).unwrap();
             let prefix = format!("wconn:{}:{}", socket.addr, *client_id);
             error!("{} removing connection {} ...", prefix, err);
-            err!(IPCFail, try: shard.failed_connection(client_id)).ok();
-
-            let flush = Flush {
-                prefix,
-                err: Some(err),
-                socket,
-                config: self.config.clone(),
-            };
-            let _thrd = Thread::spawn_sync("flush", 1, flush);
+            err!(IPCFail, try: shard.failed_connection(socket, err)).ok();
         }
     }
 

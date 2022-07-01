@@ -13,7 +13,6 @@ pub struct Handshake {
     pub addr: net::SocketAddr,
     pub config: Config,
     pub cluster: Cluster,
-    pub connect_timeout: u32,
 }
 
 impl Threadable for Handshake {
@@ -25,9 +24,11 @@ impl Threadable for Handshake {
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
 
         let max_size = self.config.mqtt_max_packet_size();
+        let connect_timeout = self.config.connect_timeout();
+
         let mut packetr = MQTTRead::new(max_size);
         let (conn, addr) = (self.conn.take().unwrap(), self.addr);
-        let timeout = now + time::Duration::from_secs(self.connect_timeout as u64);
+        let timeout = now + time::Duration::from_secs(connect_timeout as u64);
         let prefix = self.prefix.clone();
 
         let (code, connack, pkt_connect) = loop {

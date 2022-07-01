@@ -169,32 +169,22 @@ impl Threadable for Listener {
         info!("{}, spawn thread port:{} ...", self.prefix, self.port);
 
         let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
-        let res = loop {
+        loop {
             let timeout: Option<time::Duration> = None;
-            match self.as_mut_poll().poll(&mut events, timeout) {
-                Ok(()) => (),
-                Err(err) => {
-                    break err!(IOError, try: Err(err), "{} poll error", self.prefix)
-                }
-            };
+            allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
                 // Exit or not.
-                Ok(true) => break Ok(()),
+                Ok(true) => break,
                 Ok(false) => (),
-                Err(err) => break Err(err),
+                Err(err) if err.kind() == ErrorKind::IPCFail => {
+                    panic!("{} err: {}", self.prefix, err)
+                }
+                Err(err) => unreachable!("unexpected error {}", err),
             };
-        };
-
-        self.handle_close(Request::Close); // handle_close should be idempotent call.
-
-        match res {
-            Ok(()) => info!("{}, thread exit ...", self.prefix),
-            Err(err) => {
-                error!("{}, thread exit, try restarting thread `{}`", self.prefix, err);
-                self.as_cluster().restart_listener().ok();
-            }
         }
+
+        info!("{}, thread exit ...", self.prefix);
 
         self
     }
@@ -202,13 +192,14 @@ impl Threadable for Listener {
 
 impl Listener {
     // return (exit,)
+    // IPCFail on local channel communication.
     fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> Result<bool> {
         let mut count = 0_usize;
         let mut iter = events.iter();
         let res = 'outer: loop {
             match iter.next() {
                 Some(event) => {
-                    trace!("{}, poll-event token:{}", self.prefix, event.token().0);
+                    trace!("{}r poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
 
                     match event.token() {
@@ -222,9 +213,8 @@ impl Listener {
                         },
                         Self::TOKEN_SERVER => loop {
                             match self.accept_conn() {
-                                Ok(true) => break,
-                                Ok(false) => (),
-                                Err(err) => break 'outer Err(err),
+                                true => break,
+                                false => (),
                             };
                         },
                         _ => unreachable!(),
@@ -239,6 +229,7 @@ impl Listener {
     }
 
     // Return (empty, disconnected)
+    // IPCFail on local channel communication.
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
@@ -248,7 +239,7 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
+        let (mut qs, empty, mut disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
@@ -260,6 +251,7 @@ impl Listener {
         for q in qs.into_iter() {
             match q {
                 (q @ Close, Some(tx)) => {
+                    disconnected = true;
                     err!(IPCFail, try: tx.send(Ok(self.handle_close(q))))?
                 }
                 (_, _) => unreachable!(),
@@ -270,7 +262,7 @@ impl Listener {
     }
 
     // Return (would_block,)
-    fn accept_conn(&mut self) -> Result<bool> {
+    fn accept_conn(&mut self) -> bool {
         use crate::Handshake;
         use std::io;
 
@@ -288,14 +280,14 @@ impl Listener {
                     addr,
                     config: self.config.clone(),
                     cluster: cluster.to_tx(),
-                    connect_timeout: self.config.connect_timeout(),
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
-                Ok(false)
+                false
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
             Err(err) => {
-                err!(IOError, try: Err(err), "{}, connection accept error", self.prefix)
+                error!("{}, connection accept error, {}", self.prefix, err);
+                false
             }
         }
     }
@@ -334,13 +326,6 @@ impl Listener {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
-            _ => unreachable!(),
-        }
-    }
-
-    fn as_cluster(&self) -> &Cluster {
-        match &self.inner {
-            Inner::Main(RunLoop { cluster, .. }) => cluster,
             _ => unreachable!(),
         }
     }

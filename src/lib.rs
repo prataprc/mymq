@@ -35,7 +35,7 @@ pub mod fuzzy;
 pub use cluster::{Cluster, Node};
 pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
-pub use flush::Flush;
+pub use flush::Flusher;
 pub use handshake::Handshake;
 pub use listener::Listener;
 pub use miot::Miot;

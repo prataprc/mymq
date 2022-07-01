@@ -4,7 +4,8 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5, ClientID, Cluster, Config, Miot, Session, Shardable, TopicTrie};
+use crate::{queue, v5};
+use crate::{ClientID, Cluster, Config, Flusher, Miot, Session, Shardable, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -42,10 +43,12 @@ pub struct RunLoop {
     /// Mio poller for asynchronous handling, all events are from consensus port and
     /// thread-waker.
     poll: mio::Poll,
-    /// Cluster::Tx to communicate back to cluster.
+    /// Cluster::Tx handle to communicate back to cluster.
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
     cluster: Box<Cluster>,
+    /// Flusher::Tx handle to communicate with flusher.
+    flusher: Flusher,
     /// Inner::Handle to corresponding miot-thread.
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
@@ -56,6 +59,7 @@ pub struct RunLoop {
     msg_rx: queue::MsgRx,
     /// Collection of sessions and corresponding clients managed by this shard.
     /// Shall be dropped after close_wait call, when the thread returns, will be empty.
+    // TODO: remove session only when Session::session_rx channel has disconnected.
     sessions: BTreeMap<ClientID, Session>,
     /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
@@ -106,6 +110,12 @@ impl Drop for Shard {
     }
 }
 
+pub struct SpawnArgs {
+    pub cluster: Cluster,
+    pub flusher: Flusher,
+    pub topic_filters: TopicTrie,
+}
+
 impl Shard {
     const WAKE_TOKEN: mio::Token = mio::Token(1);
 
@@ -124,7 +134,7 @@ impl Shard {
         Ok(val)
     }
 
-    pub fn spawn(self, cluster: Cluster, topic_filters: TopicTrie) -> Result<Shard> {
+    pub fn spawn(self, args: SpawnArgs) -> Result<Shard> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
@@ -147,13 +157,14 @@ impl Shard {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
-                cluster: Box::new(cluster),
+                cluster: Box::new(args.cluster),
+                flusher: args.flusher,
                 miot: Miot::default(),
 
                 msg_rx,
                 sessions: BTreeMap::default(),
                 shard_queues: BTreeMap::default(),
-                topic_filters,
+                topic_filters: args.topic_filters,
 
                 closed: false,
             }),
@@ -194,14 +205,16 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        Shard {
+        let mut shard = Shard {
             name: format!("{}-shard-tx", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner,
-        }
+        };
+        shard.prefix = self.prefix();
+        shard
     }
 
     pub fn to_msg_tx(&self) -> Self {
@@ -235,7 +248,7 @@ pub enum Request {
     SetMiot(Miot),
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
-    FailedConnection { client_id: ClientID },
+    FailedConnection { socket: queue::Socket, err: Error },
     Close,
 }
 
@@ -269,11 +282,11 @@ impl Shard {
         Ok(())
     }
 
-    pub fn failed_connection(&self, client_id: ClientID) -> Result<()> {
+    pub fn failed_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
         match &self.inner {
             Inner::Tx(waker, tx) => {
                 waker.wake()?;
-                tx.post(Request::FailedConnection { client_id })?;
+                tx.post(Request::FailedConnection { socket, err })?;
             }
             _ => unreachable!(),
         };
@@ -470,21 +483,17 @@ impl Shard {
     }
 
     fn handle_failed_connection(&mut self, req: Request) {
-        let client_id = match req {
-            Request::FailedConnection { client_id } => client_id,
+        let (socket, err) = match req {
+            Request::FailedConnection { socket, err } => (socket, err),
             _ => unreachable!(),
         };
-        let RunLoop { sessions, .. } = match &mut self.inner {
+        let RunLoop { flusher, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        match sessions.remove(&client_id) {
-            Some(session) => {
-                session.close();
-            }
-            None => (),
-        };
+        // NOTE: Session shall be removed when session_rx says disconnected.
+        err!(IPCFail, try: flusher.flush_connection_err(socket, err)).ok();
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {

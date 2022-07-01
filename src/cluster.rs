@@ -7,11 +7,13 @@ use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{rebalance, util, v5};
-use crate::{Config, ConfigNode, Hostable, Listener, Shard, TopicTrie};
+use crate::{Config, ConfigNode, Flusher, Hostable, Listener, Shard, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
 // TODO: Review `as` type-casting for numbers.
+// TODO: Validate and document all thread handles, cluster, listener, flusher, shard,
+//       miot.
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -44,6 +46,8 @@ pub struct RunLoop {
     poll: mio::Poll,
     /// Listener thread for MQTT connections from remote/local clients.
     listener: Listener,
+    /// Flusher thread for MQTT connections from remote/local clients.
+    flusher: Flusher,
     /// Total number of shards within this node.
     shards: BTreeMap<u32, Shard>,
     /// Channel to interface with application.
@@ -147,6 +151,8 @@ impl Cluster {
         };
 
         let listener = Listener::default();
+        let flusher = Flusher::from_config(self.config.clone())?.spawn()?;
+        let flusher_tx = flusher.to_tx();
         let shards = BTreeMap::default();
 
         let topic_filters = TopicTrie::new();
@@ -159,6 +165,7 @@ impl Cluster {
 
                 poll,
                 listener,
+                flusher,
                 shards,
                 app_tx,
 
@@ -180,9 +187,15 @@ impl Cluster {
             let mut shards = BTreeMap::default();
             let mut shard_queues = BTreeMap::default();
             for shard_id in 0..self.config.num_shards() {
-                let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
-                let shard = Shard::from_config(config, shard_id)?
-                    .spawn(clust_tx, topic_filters.clone())?;
+                let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
+                let shard = {
+                    let args = crate::shard::SpawnArgs {
+                        cluster: cluster_tx,
+                        flusher: flusher_tx.to_tx(),
+                        topic_filters: topic_filters.clone(),
+                    };
+                    Shard::from_config(config, shard_id)?.spawn(args)?
+                };
                 shard_queues.insert(shard.shard_id, shard.to_msg_tx());
                 shards.insert(shard_id, shard);
             }
@@ -241,9 +254,6 @@ pub enum Request {
         addr: net::SocketAddr,
         pkt: v5::Connect,
     },
-    RestartChild {
-        name: &'static str,
-    },
     Close,
 }
 
@@ -283,18 +293,6 @@ impl Cluster {
             Inner::Tx(waker, tx) => {
                 waker.wake()?;
                 tx.request(Request::AddConnection { conn, addr, pkt })??
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
-    pub fn restart_listener(&self) -> Result<()> {
-        match &self.inner {
-            Inner::Tx(waker, tx) => {
-                waker.wake()?;
-                tx.post(Request::RestartChild { name: "listener" })?
             }
             _ => unreachable!(),
         };
@@ -438,7 +436,6 @@ impl Cluster {
                 (q @ RemoveNodes { .. }, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_remove_nodes(q)))?;
                 }
-                (RestartChild { name: "listener" }, None) => todo!(),
                 (q @ AddConnection { .. }, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_add_connection(q)))?;
                 }
@@ -519,7 +516,7 @@ impl Cluster {
     fn handle_close(&mut self, _: Request) -> Result<Response> {
         use std::mem;
 
-        let RunLoop { listener, shards, closed, .. } = match &mut self.inner {
+        let RunLoop { listener, flusher, shards, closed, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -528,6 +525,7 @@ impl Cluster {
             info!("{}, closing {} shards hosted", self.prefix, shards.len());
 
             *listener = mem::replace(listener, Listener::default()).close_wait()?;
+            *flusher = mem::replace(flusher, Flusher::default()).close_wait()?;
 
             let hshards = mem::replace(shards, BTreeMap::default());
             for (uuid, shard) in hshards.into_iter() {
