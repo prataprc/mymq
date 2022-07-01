@@ -38,19 +38,23 @@ enum Inner {
 pub struct RunLoop {
     // Consensus state.
     state: ClusterState,
+
     /// Mio pooler for asynchronous handling, aggregate events from consensus port and
     /// waker.
     poll: mio::Poll,
-    /// List of subscribed topicfilters across all the sessions, local to this node.
-    topic_filters: TopicTrie,
-    /// Rebalancing algorithm.
-    rebalancer: rebalance::Rebalancer,
     /// Listener thread for MQTT connections from remote/local clients.
     listener: Listener,
     /// Total number of shards within this node.
     shards: BTreeMap<u32, Shard>,
     /// Channel to interface with application.
     app_tx: mpsc::SyncSender<String>,
+
+    /// Rebalancing algorithm.
+    rebalancer: rebalance::Rebalancer,
+    /// List of subscribed topicfilters across all the sessions, local to this node.
+    // TODO: Should we make this part of the ClusterState ?
+    topic_filters: TopicTrie,
+
     /// thread is already closed.
     closed: bool,
 }
@@ -152,12 +156,15 @@ impl Cluster {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 state,
+
                 poll,
-                topic_filters,
-                rebalancer,
                 listener,
                 shards,
                 app_tx,
+
+                rebalancer,
+                topic_filters: topic_filters.clone(),
+
                 closed: false,
             }),
         };
@@ -174,7 +181,8 @@ impl Cluster {
             let mut shard_queues = BTreeMap::default();
             for shard_id in 0..self.config.num_shards() {
                 let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
-                let shard = Shard::from_config(config, shard_id)?.spawn(clust_tx)?;
+                let shard = Shard::from_config(config, shard_id)?
+                    .spawn(clust_tx, topic_filters.clone())?;
                 shard_queues.insert(shard.shard_id, shard.to_msg_tx());
                 shards.insert(shard_id, shard);
             }
@@ -182,7 +190,7 @@ impl Cluster {
             for (_shard_id, shard) in shards.iter() {
                 let iter = shard_queues.iter().map(|(id, s)| (*id, s.to_msg_tx()));
                 let shard_queues = BTreeMap::from_iter(iter);
-                shard.set_shard_queues(shard_queues);
+                shard.set_shard_queues(shard_queues)?;
             }
 
             let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
@@ -344,7 +352,15 @@ impl Threadable for Cluster {
             };
         };
 
-        self.handle_close(Request::Close); // handle_close should be idempotent call.
+        // handle_close should be idempotent call.
+        match self.handle_close(Request::Close) {
+            Ok(Response::Ok) => (),
+            Err(err) => {
+                let msg = format!("handle_close, fatal error, {}", err.to_string());
+                allow_panic!(self.prefix, self.as_app_tx().send(msg));
+            }
+            _ => unreachable!(),
+        }
 
         match res {
             Ok(()) => info!("{}, thread exit ...", self.prefix),
@@ -473,7 +489,7 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let RunLoop { shards, topic_filters, .. } = match &mut self.inner {
+        let RunLoop { shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -495,11 +511,7 @@ impl Cluster {
         info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_id);
 
         // Add session to the shard.
-        let args = {
-            let topic_filters = topic_filters.clone();
-            AddSessionArgs { conn, addr, pkt: connect, topic_filters }
-        };
-        shard.add_session(args);
+        shard.add_session(AddSessionArgs { conn, addr, pkt: connect })?;
 
         Ok(Response::Ok)
     }

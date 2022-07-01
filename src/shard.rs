@@ -46,18 +46,22 @@ pub struct RunLoop {
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
     cluster: Box<Cluster>,
-    /// Collection of sessions and corresponding clients managed by this shard.
-    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
-    sessions: BTreeMap<ClientID, Session>,
     /// Inner::Handle to corresponding miot-thread.
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
     miot: Miot,
+
     /// Every shard has an input queue for queue::Message, which receives all locally
     /// hopping MQTT messages for sessions managed by this shard.
     msg_rx: queue::MsgRx,
+    /// Collection of sessions and corresponding clients managed by this shard.
+    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
+    sessions: BTreeMap<ClientID, Session>,
     /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
+    /// MVCC clone of Cluster::topic_filters
+    topic_filters: TopicTrie,
+
     /// whether thread is closed.
     closed: bool,
 }
@@ -120,7 +124,7 @@ impl Shard {
         Ok(val)
     }
 
-    pub fn spawn(self, cluster: Cluster) -> Result<Shard> {
+    pub fn spawn(self, cluster: Cluster, topic_filters: TopicTrie) -> Result<Shard> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
@@ -142,12 +146,15 @@ impl Shard {
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
-                cluster: Box::new(cluster),
                 poll,
-                sessions: BTreeMap::default(),
+                cluster: Box::new(cluster),
                 miot: Miot::default(),
+
                 msg_rx,
+                sessions: BTreeMap::default(),
                 shard_queues: BTreeMap::default(),
+                topic_filters,
+
                 closed: false,
             }),
         };
@@ -166,7 +173,7 @@ impl Shard {
             let miot = Miot::from_config(config, miot_id)?.spawn(shard.to_tx())?;
             match &shard.inner {
                 Inner::Handle(Handle { waker, thrd, .. }) => {
-                    waker.wake();
+                    waker.wake()?;
                     thrd.request(Request::SetMiot(miot))??;
                 }
                 _ => unreachable!(),
@@ -222,7 +229,6 @@ pub struct AddSessionArgs {
     pub conn: mio::net::TcpStream,
     pub addr: net::SocketAddr,
     pub pkt: v5::Connect,
-    pub topic_filters: TopicTrie,
 }
 
 pub enum Request {
@@ -428,7 +434,7 @@ impl Shard {
     fn handle_add_session(&mut self, req: Request) -> Response {
         use crate::session::SessionArgs;
 
-        let AddSessionArgs { conn, addr, pkt, topic_filters } = match req {
+        let AddSessionArgs { conn, addr, pkt } = match req {
             Request::AddSession(args) => args,
             _ => unreachable!(),
         };
@@ -437,7 +443,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        // This queue is wired up with miot-thread. This queue carries queue::Messages,
+        // This queue is wired up with miot-thread. This queue carries queue::Packet,
         // and there is a separate queue for every session.
         let (upstream, session_rx) = {
             let size = self.config.mqtt_msg_batch_size() as usize;
@@ -455,7 +461,6 @@ impl Shard {
                 client_id: client_id.clone(),
                 miot_tx,
                 session_rx,
-                topic_filters,
             };
             Session::start(args, self.config.clone(), pkt)
         };

@@ -2,7 +2,7 @@ use log::{debug, error, info, trace};
 
 use std::{collections::BTreeMap, net, ops::Deref, sync::Arc, time};
 
-use crate::packet::{PacketRead, PacketWrite};
+use crate::packet::{MQTTRead, MQTTWrite};
 use crate::thread::{Rx, Thread, Threadable};
 use crate::{queue, v5, ClientID, Config, Flush, Packetize, Shard};
 use crate::{Error, ErrorKind, Result};
@@ -32,10 +32,12 @@ pub struct RunLoop {
     poll: mio::Poll,
     /// Shard instance that is paired with this miot thread.
     shard: Box<Shard>,
+
     /// collection of all active socket connections abstracted as queue.
     conns: BTreeMap<ClientID, queue::Socket>,
     /// next available token for connections
     next_token: mio::Token,
+
     /// whether thread is closed.
     closed: bool,
 }
@@ -283,7 +285,7 @@ impl Miot {
             debug!("{} processing read connections. closed:{}", self.prefix, closed);
         }
 
-        // if thread is closed, conns will be empty.
+        // if thread is closed, conns shall be empty.
         let mut fail_queues = vec![];
         for (client_id, socket) in conns.iter_mut() {
             let prefix = format!("rconn:{}:{}", socket.addr, client_id.deref());
@@ -294,9 +296,10 @@ impl Miot {
         }
 
         for (client_id, err) in fail_queues.into_iter() {
+            error!("{} removing connection {} ...", self.prefix, err);
+
             let socket = conns.remove(&client_id).unwrap();
             let prefix = format!("rconn:{}:{}", socket.addr, *client_id);
-            error!("{} removing connection {} ...", prefix, err);
             err!(IPCFail, try: shard.failed_connection(client_id)).ok();
 
             let flush = Flush {
@@ -350,11 +353,11 @@ impl Miot {
         config: &Config,
         socket: &mut queue::Socket,
     ) -> Result<(Option<v5::Packet>, bool)> {
-        use crate::packet::PacketRead::{Fin, Header, Init, Remain};
+        use crate::packet::MQTTRead::{Fin, Header, Init, Remain};
         use std::mem;
 
         let timeout = config.mqtt_read_timeout();
-        let pr = mem::replace(&mut socket.rd.pr, PacketRead::default());
+        let pr = mem::replace(&mut socket.rd.pr, MQTTRead::default());
 
         let (mut pr, would_block) = pr.read(&socket.conn)?;
         let pkt = match &pr {
@@ -373,7 +376,7 @@ impl Miot {
                 pr = pr.reset();
                 Some(pkt)
             }
-            PacketRead::None => unreachable!(),
+            MQTTRead::None => unreachable!(),
         };
 
         let _pr_none = mem::replace(&mut socket.rd.pr, pr);
@@ -491,7 +494,7 @@ impl Miot {
     ) -> Result<bool> {
         use std::mem;
 
-        let mut pw = mem::replace(&mut socket.wt.pw, PacketWrite::default());
+        let mut pw = mem::replace(&mut socket.wt.pw, MQTTWrite::default());
         let mut iter = {
             let iter = socket.wt.packets.drain(..);
             iter.collect::<Vec<v5::Packet>>().into_iter()
@@ -530,11 +533,11 @@ impl Miot {
         config: &Config,
         socket: &mut queue::Socket,
     ) -> Result<bool> {
-        use crate::packet::PacketWrite::{Fin, Init, Remain};
+        use crate::packet::MQTTWrite::{Fin, Init, Remain};
         use std::mem;
 
         let timeout = config.mqtt_write_timeout();
-        let pw = mem::replace(&mut socket.wt.pw, PacketWrite::default());
+        let pw = mem::replace(&mut socket.wt.pw, MQTTWrite::default());
 
         let (pw, _would_block) = pw.write(&socket.conn)?;
         let res = match &pw {
@@ -551,7 +554,7 @@ impl Miot {
                 socket.set_write_timeout(false, timeout);
                 Ok(false)
             }
-            PacketWrite::None => unreachable!(),
+            MQTTWrite::None => unreachable!(),
         };
 
         let _pw_none = mem::replace(&mut socket.wt.pw, pw);
@@ -581,19 +584,21 @@ impl Miot {
         let interests = Interest::READABLE | Interest::WRITABLE;
         allow_panic!(self.prefix, poll.registry().register(&mut conn, token, interests));
 
-        // This queue is wired up with miot-thread. This queue carries queue::Messages,
+        // This queue is wired up with miot-thread. This queue carries queue::Packet,
         // and there is a separate queue for every session.
-        let msg_batch_size = self.config.mqtt_msg_batch_size() as usize;
-        let (downstream, miot_rx) = queue::pkt_channel(msg_batch_size);
+        let (downstream, miot_rx) = {
+            let msg_batch_size = self.config.mqtt_msg_batch_size() as usize;
+            queue::pkt_channel(msg_batch_size)
+        };
 
         let rd = queue::Source {
-            pr: PacketRead::new(self.config.mqtt_max_packet_size()),
+            pr: MQTTRead::new(self.config.mqtt_max_packet_size()),
             timeout: None,
             session_tx,
             packets: Vec::default(),
         };
         let wt = queue::Sink {
-            pw: PacketWrite::new(&[], self.config.mqtt_max_packet_size()),
+            pw: MQTTWrite::new(&[], self.config.mqtt_max_packet_size()),
             timeout: None,
             miot_rx,
             packets: Vec::default(),

@@ -1,5 +1,6 @@
 use std::sync::{atomic::AtomicPtr, Arc};
 
+// <TopicFilter, (ClientID, shard_id)
 pub struct TopicTrie {
     inner: Arc<AtomicPtr<Inner>>,
 }

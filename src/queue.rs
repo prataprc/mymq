@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::{net, sync::mpsc, time};
 
-use crate::packet::{PacketRead, PacketWrite};
+use crate::packet::{MQTTRead, MQTTWrite};
 use crate::{v5, ClientID, PacketID};
 
 pub type MsgTx = mpsc::SyncSender<Message>;
@@ -20,14 +20,14 @@ pub struct Socket {
 }
 
 pub struct Source {
-    pub pr: PacketRead,
+    pub pr: MQTTRead,
     pub timeout: Option<time::Instant>,
     pub session_tx: PktTx,
     pub packets: Vec<v5::Packet>,
 }
 
 pub struct Sink {
-    pub pw: PacketWrite,
+    pub pw: MQTTWrite,
     pub timeout: Option<time::Instant>,
     pub miot_rx: PktRx,
     pub packets: Vec<v5::Packet>,

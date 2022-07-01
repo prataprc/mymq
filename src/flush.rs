@@ -4,7 +4,7 @@ use std::{thread, time};
 
 use crate::thread::{Rx, Threadable};
 use crate::{queue, Config, SLEEP_10MS};
-use crate::{Error, ReasonCode};
+use crate::{Error, ErrorKind, ReasonCode};
 
 pub struct Flush {
     pub prefix: String,
@@ -33,7 +33,8 @@ impl Threadable for Flush {
                 Ok(true /*would_block*/) if time::Instant::now() > timeout => break,
                 Ok(true) => thread::sleep(SLEEP_10MS),
                 Ok(false) => break,
-                Err(_) => break,
+                Err(err) if err.kind() == ErrorKind::RxClosed => break,
+                Err(err) => unreachable!("{}", err),
             }
         }
 
@@ -44,15 +45,19 @@ impl Threadable for Flush {
                 Ok(false) => match rx_packets(&self.socket.wt.miot_rx, msg_batch_size) {
                     (qs, _empty, false) => {
                         self.socket.wt.packets.extend_from_slice(&qs);
-                        trace!("{} flush read from upstream", self.prefix);
+                        trace!("{} flush packets from upstream", self.prefix);
                     }
                     (qs, _empty, true) => {
                         self.socket.wt.packets.extend_from_slice(&qs);
-                        info!("{} upstream finished", self.prefix);
+                        info!("{} flush last batch, upstream finished", self.prefix);
                         break;
                     }
                 },
-                Err(err) => error!("{} flush_packets {}", self.prefix, err),
+                Err(err) if err.kind() == ErrorKind::Disconnected => {
+                    error!("{} stop flushing, socket disconnected {}", self.prefix, err);
+                    break;
+                }
+                Err(err) => unreachable!("unexpected err: {}", err),
             }
         }
 

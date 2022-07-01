@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net;
 
-use crate::{queue, v5, ClientID, Config, TopicFilter, TopicTrie};
+use crate::{queue, v5, ClientID, Config, TopicFilter};
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 // set to 0.
@@ -12,7 +12,6 @@ pub struct SessionArgs {
     pub client_id: ClientID,
     pub miot_tx: queue::PktTx,
     pub session_rx: queue::PktRx,
-    pub topic_filters: TopicTrie,
 }
 
 pub struct Session {
@@ -26,8 +25,6 @@ pub struct Session {
 
     state: SessionState,
 
-    // a clone of Cluster::topic_filters
-    topic_filters: TopicTrie,
     // inbound queue from client.
     cinp: queue::ClientInp,
     // A Periodic Message::LocalAck shall be sent to other sessions. Every incoming
@@ -79,7 +76,6 @@ impl Session {
 
             state,
 
-            topic_filters: args.topic_filters,
             cinp,
             timestamp: BTreeMap::default(),
         }

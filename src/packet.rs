@@ -4,7 +4,7 @@ use std::{io, thread, time};
 use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-pub enum PacketRead {
+pub enum MQTTRead {
     None,
     Init {
         data: Vec<u8>,
@@ -28,15 +28,15 @@ pub enum PacketRead {
     },
 }
 
-impl Default for PacketRead {
-    fn default() -> PacketRead {
-        PacketRead::None
+impl Default for MQTTRead {
+    fn default() -> MQTTRead {
+        MQTTRead::None
     }
 }
 
-impl PacketRead {
-    pub fn new(max_size: u32) -> PacketRead {
-        PacketRead::Init {
+impl MQTTRead {
+    pub fn new(max_size: u32) -> MQTTRead {
+        MQTTRead::Init {
             data: Vec::with_capacity(max_size as usize),
             max_size: max_size as usize,
         }
@@ -47,16 +47,16 @@ impl PacketRead {
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
     pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool)> {
-        use PacketRead::{Fin, Header, Init, Remain};
+        use MQTTRead::{Fin, Header, Init, Remain};
 
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc: "PacketRead::Init"),
+                Ok(0) => err!(Disconnected, desc: "MQTTRead::Init"),
                 Ok(1) => {
                     data.push(scratch[0]);
                     let byte1 = scratch[0];
-                    Ok((PacketRead::Header { byte1, data, max_size }, false))
+                    Ok((MQTTRead::Header { byte1, data, max_size }, false))
                 }
                 Ok(n) => {
                     data.extend_from_slice(&scratch[..n]);
@@ -72,18 +72,18 @@ impl PacketRead {
                             data.reserve(pkt_len);
                             unsafe { data.set_len(pkt_len) };
                             let start = n;
-                            Ok((PacketRead::Remain { data, start, fh, max_size }, false))
+                            Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
                         }
-                        None => Ok((PacketRead::Header { byte1, data, max_size }, false)),
+                        None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketRead::Init { data, max_size }, true))
+                    Ok((MQTTRead::Init { data, max_size }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Init"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Init"),
             },
             Header { byte1, mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  "PacketRead::Header"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header"),
                 Ok(n) => {
                     data.extend_from_slice(&scratch[..n]);
                     let start = data.len();
@@ -97,37 +97,37 @@ impl PacketRead {
                             let fh = v5::FixedHeader { byte1, remaining_len };
                             data.reserve(pkt_len);
                             unsafe { data.set_len(pkt_len) };
-                            Ok((PacketRead::Remain { data, start, fh, max_size }, false))
+                            Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
                         }
-                        None => Ok((PacketRead::Header { byte1, data, max_size }, false)),
+                        None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketRead::Header { byte1, data, max_size }, true))
+                    Ok((MQTTRead::Header { byte1, data, max_size }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Header"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Header"),
             },
             Remain { mut data, start, fh, max_size } => {
                 match stream.read(&mut data[start..]) {
-                    Ok(0) => err!(Disconnected, desc:  "PacketRead::Remain"),
+                    Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain"),
                     Ok(n) if (start + n) == data.len() => {
-                        Ok((PacketRead::Fin { data, fh, max_size }, false))
+                        Ok((MQTTRead::Fin { data, fh, max_size }, false))
                     }
                     Ok(n) if (start + n) < data.len() => {
                         let start = start + n;
-                        Ok((PacketRead::Remain { data, start, fh, max_size }, false))
+                        Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        Ok((PacketRead::Remain { data, start, fh, max_size }, true))
+                        Ok((MQTTRead::Remain { data, start, fh, max_size }, true))
                     }
-                    Err(err) => err!(Disconnected, try: Err(err), "PacketRead::Remain"),
+                    Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Remain"),
                     Ok(_) => unreachable!(),
                 }
             }
             Fin { data, fh, max_size } => {
-                Ok((PacketRead::Fin { data, fh, max_size }, false))
+                Ok((MQTTRead::Fin { data, fh, max_size }, false))
             }
-            PacketRead::None => unreachable!(),
+            MQTTRead::None => unreachable!(),
         }
     }
 
@@ -135,7 +135,7 @@ impl PacketRead {
     // ProtocolError, implies DISCONNECT and socket close
     pub fn parse(&self) -> Result<v5::Packet> {
         let (pkt, n, m) = match self {
-            PacketRead::Fin { data, fh, .. } => match fh.unwrap()?.0 {
+            MQTTRead::Fin { data, fh, .. } => match fh.unwrap()?.0 {
                 v5::PacketType::Connect => {
                     let (pkt, n) = v5::Connect::decode(&data)?;
                     (v5::Packet::Connect(pkt), n, data.len())
@@ -201,7 +201,7 @@ impl PacketRead {
         };
 
         if n != m {
-            err!(MalformedPacket, code: MalformedPacket, "PacketRead::Fin {}!={}", n, m)
+            err!(MalformedPacket, code: MalformedPacket, "MQTTRead::Fin {}!={}", n, m)
         } else {
             Ok(pkt)
         }
@@ -209,16 +209,16 @@ impl PacketRead {
 
     pub fn reset(self) -> Self {
         match self {
-            PacketRead::Fin { mut data, max_size, .. } => {
+            MQTTRead::Fin { mut data, max_size, .. } => {
                 data.truncate(0);
-                PacketRead::Init { data, max_size }
+                MQTTRead::Init { data, max_size }
             }
             _ => unreachable!(),
         }
     }
 }
 
-pub enum PacketWrite {
+pub enum MQTTWrite {
     None,
     Init {
         data: Vec<u8>,
@@ -235,75 +235,75 @@ pub enum PacketWrite {
     },
 }
 
-impl Default for PacketWrite {
-    fn default() -> PacketWrite {
-        PacketWrite::None
+impl Default for MQTTWrite {
+    fn default() -> MQTTWrite {
+        MQTTWrite::None
     }
 }
 
-impl PacketWrite {
-    pub fn new(buf: &[u8], max_size: u32) -> PacketWrite {
+impl MQTTWrite {
+    pub fn new(buf: &[u8], max_size: u32) -> MQTTWrite {
         let mut data = Vec::with_capacity(max_size as usize);
         data.extend_from_slice(buf);
-        PacketWrite::Init { data, max_size: max_size as usize }
+        MQTTWrite::Init { data, max_size: max_size as usize }
     }
 
     // return (self,would_block)
     // errors shall be folded as Disconnected, and implies a bad connection.
     pub fn write<W: io::Write>(self, mut stream: W) -> Result<(Self, bool)> {
-        use PacketWrite::{Fin, Init, Remain};
+        use MQTTWrite::{Fin, Init, Remain};
 
         match self {
             // silently ignore if the packet size is more that requested.
             Init { data, max_size } if data.len() > max_size => {
-                Ok((PacketWrite::Fin { data, max_size }, false))
+                Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Init { data, max_size } => match stream.write(&data) {
-                Ok(0) => err!(Disconnected, desc:  "PacketWrite::Init"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Init"),
                 Ok(n) if n == data.len() => {
-                    Ok((PacketWrite::Fin { data, max_size }, false))
+                    Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
                 Ok(n) if n < data.len() => {
-                    Ok((PacketWrite::Remain { data, start: n, max_size }, false))
+                    Ok((MQTTWrite::Remain { data, start: n, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-                    Ok((PacketWrite::Remain { data, start: 0, max_size }, false))
+                    Ok((MQTTWrite::Remain { data, start: 0, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketWrite::Remain { data, start: 0, max_size }, true))
+                    Ok((MQTTWrite::Remain { data, start: 0, max_size }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketWrite::Init"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTWrite::Init"),
                 Ok(_) => unreachable!(),
             },
             Remain { data, start, max_size } => match stream.write(&data[start..]) {
-                Ok(0) => err!(Disconnected, desc:  "PacketWrite::Remain"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Remain"),
                 Ok(n) if (start + n) == data.len() => {
-                    Ok((PacketWrite::Fin { data, max_size }, false))
+                    Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
                 Ok(n) if (start + n) < data.len() => {
                     let start = start + n;
-                    Ok((PacketWrite::Remain { data, start, max_size }, false))
+                    Ok((MQTTWrite::Remain { data, start, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {
-                    Ok((PacketWrite::Remain { data, start, max_size }, false))
+                    Ok((MQTTWrite::Remain { data, start, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    Ok((PacketWrite::Remain { data, start, max_size }, true))
+                    Ok((MQTTWrite::Remain { data, start, max_size }, true))
                 }
-                Err(err) => err!(Disconnected, try: Err(err), "PacketWrite::Remain"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTWrite::Remain"),
                 Ok(_) => unreachable!(),
             },
-            Fin { data, max_size } => Ok((PacketWrite::Fin { data, max_size }, false)),
-            PacketWrite::None => unreachable!(),
+            Fin { data, max_size } => Ok((MQTTWrite::Fin { data, max_size }, false)),
+            MQTTWrite::None => unreachable!(),
         }
     }
 
     pub fn reset(self, buf: &[u8]) -> Self {
         match self {
-            PacketWrite::Fin { mut data, max_size } => {
+            MQTTWrite::Fin { mut data, max_size } => {
                 data.truncate(0);
                 data.extend_from_slice(buf);
-                PacketWrite::Init { data, max_size }
+                MQTTWrite::Init { data, max_size }
             }
             _ => unreachable!(),
         }
@@ -320,7 +320,7 @@ pub fn send_disconnect(
     use crate::SLEEP_10MS;
 
     let dc = v5::Disconnect::from_reason_code(code);
-    let mut packetw = PacketWrite::new(dc.encode().unwrap().as_ref(), max_size);
+    let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,
@@ -347,15 +347,15 @@ pub fn send_disconnect(
 
 pub fn send_connack(
     prefix: &str,
-    timeout: time::Instant,
-    max_size: u32,
     code: ReasonCode,
     conn: &mio::net::TcpStream,
+    timeout: time::Instant,
+    max_size: u32,
 ) -> Result<()> {
     use crate::SLEEP_10MS;
 
     let cack = v5::ConnAck::from_reason_code(code);
-    let mut packetw = PacketWrite::new(cack.encode().unwrap().as_ref(), max_size);
+    let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,
@@ -385,7 +385,7 @@ fn read_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
         err!(
             MalformedPacket,
             code: MalformedPacket,
-            "PacketRead::read packet_len:{}",
+            "MQTTRead::read packet_len:{}",
             pkt_len
         )
     } else {

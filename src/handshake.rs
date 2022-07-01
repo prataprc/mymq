@@ -2,7 +2,7 @@ use log::{error, info};
 
 use std::{net, thread, time};
 
-use crate::packet::{send_connack, PacketRead};
+use crate::packet::{send_connack, MQTTRead};
 use crate::thread::{Rx, Threadable};
 use crate::{v5, Cluster, Config, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode as RC};
@@ -25,7 +25,7 @@ impl Threadable for Handshake {
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
 
         let max_size = self.config.mqtt_max_packet_size();
-        let mut packetr = PacketRead::new(max_size);
+        let mut packetr = MQTTRead::new(max_size);
         let (conn, addr) = (self.conn.take().unwrap(), self.addr);
         let timeout = now + time::Duration::from_secs(self.connect_timeout as u64);
         let prefix = self.prefix.clone();
@@ -44,16 +44,16 @@ impl Threadable for Handshake {
                 Err(_err) => unreachable!(),
             };
             match &packetr {
-                PacketRead::Init { .. } if time::Instant::now() < timeout => {
+                MQTTRead::Init { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                PacketRead::Header { .. } if time::Instant::now() < timeout => {
+                MQTTRead::Header { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                PacketRead::Remain { .. } if time::Instant::now() < timeout => {
+                MQTTRead::Remain { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                PacketRead::Fin { .. } => match packetr.parse() {
+                MQTTRead::Fin { .. } => match packetr.parse() {
                     Ok(v5::Packet::Connect(val)) => {
                         break (RC::Success, false, Some(val))
                     }
@@ -80,7 +80,8 @@ impl Threadable for Handshake {
         };
 
         if connack {
-            send_connack(&prefix, timeout, max_size, code, &conn).ok();
+            // if error, connect-ack shall be sent right here and ignored.
+            send_connack(&prefix, code, &conn, timeout, max_size).ok();
         } else if let Some(pkt_connect) = pkt_connect {
             err!(
                 IPCFail,
