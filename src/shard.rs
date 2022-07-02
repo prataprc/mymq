@@ -4,7 +4,7 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5};
+use crate::{queue, v5, AppTx};
 use crate::{ClientID, Cluster, Config, Flusher, Miot, Session, Shardable, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
@@ -66,6 +66,8 @@ pub struct RunLoop {
     /// MVCC clone of Cluster::topic_filters
     topic_filters: TopicTrie,
 
+    /// Back channel to communicate with application.
+    app_tx: AppTx,
     /// whether thread is closed.
     closed: bool,
 }
@@ -134,7 +136,7 @@ impl Shard {
         Ok(val)
     }
 
-    pub fn spawn(self, args: SpawnArgs) -> Result<Shard> {
+    pub fn spawn(self, args: SpawnArgs, app_tx: AppTx) -> Result<Shard> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
@@ -166,6 +168,7 @@ impl Shard {
                 shard_queues: BTreeMap::default(),
                 topic_filters: args.topic_filters,
 
+                app_tx: app_tx.clone(),
                 closed: false,
             }),
         };
@@ -181,7 +184,10 @@ impl Shard {
         };
         {
             let (config, miot_id) = (self.config.clone(), self.shard_id);
-            let miot = Miot::from_config(config, miot_id)?.spawn(shard.to_tx())?;
+            let miot = {
+                let miot = Miot::from_config(config, miot_id)?;
+                miot.spawn(shard.to_tx(), app_tx.clone())?
+            };
             match &shard.inner {
                 Inner::Handle(Handle { waker, thrd, .. }) => {
                     waker.wake()?;
@@ -331,7 +337,7 @@ impl Threadable for Shard {
         let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
+            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             let exit = self.mio_events(&rx, &events);
             if exit {
@@ -390,21 +396,21 @@ impl Shard {
             match q {
                 (q @ SetMiot(_), Some(tx)) => {
                     let resp = self.handle_set_miot(q);
-                    allow_panic!(self.prefix, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(resp)));
                 }
                 (q @ SetShardQueues(_), Some(tx)) => {
                     let resp = self.handle_set_shard_queues(q);
-                    allow_panic!(self.prefix, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(resp)));
                 }
                 (q @ AddSession { .. }, Some(tx)) => {
                     let resp = self.handle_add_session(q);
-                    allow_panic!(self.prefix, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(resp)));
                 }
                 (q @ FailedConnection { .. }, None) => {
                     self.handle_failed_connection(q);
                 }
                 (q @ Close, Some(tx)) => {
-                    allow_panic!(self.prefix, tx.send(Ok(self.handle_close(q))))
+                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))))
                 }
 
                 (_, _) => unreachable!(),
@@ -465,7 +471,7 @@ impl Shard {
         let client_id = pkt.payload.client_id.clone();
         let miot_tx = {
             let res = miot.add_connection(client_id.clone(), conn, addr, upstream);
-            allow_panic!(self.prefix, res)
+            allow_panic!(&self, res)
         };
 
         let session = {
@@ -539,6 +545,13 @@ impl Shard {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
             _ => unreachable!(),
         }
     }

@@ -129,13 +129,14 @@ macro_rules! log_error {
 
 #[macro_export]
 macro_rules! allow_panic {
-    ($prefix:expr, $($args:expr),+) => {{
+    ($self:expr, $($args:expr),+) => {{
         use log::error;
 
         match $($args),+ {
             Ok(val) => val,
             Err(err) => {
-                error!("{}, now we are going to panic", $prefix);
+                $self.as_app_tx().send("panic".to_string()).ok();
+                error!("{}, now we are going to panic", $self.prefix);
                 panic!("{}", err);
             }
         }

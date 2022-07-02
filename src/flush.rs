@@ -3,15 +3,15 @@ use log::{debug, error, info, trace};
 use std::{thread, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, Config, SLEEP_10MS};
+use crate::{queue, AppTx, Config, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
 pub struct Flusher {
     pub name: String,
-    pub prefix: String,
-    pub config: Config,
+    prefix: String,
+    config: Config,
 
     inner: Inner,
 }
@@ -22,10 +22,13 @@ pub enum Inner {
     Handle(Thread<Flusher, Request, Result<Response>>),
     // Held by each shard.
     Tx(Tx<Request, Result<Response>>),
+    // Thread
     Main(RunLoop),
 }
 
 pub struct RunLoop {
+    /// Back channel to communicate with application.
+    app_tx: AppTx,
     /// thread is already closed.
     closed: bool,
 }
@@ -60,7 +63,7 @@ impl Flusher {
         Ok(val)
     }
 
-    pub fn spawn(self) -> Result<Flusher> {
+    pub fn spawn(self, app_tx: AppTx) -> Result<Flusher> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "flusher can be spawned only in init-state ")?;
         }
@@ -69,7 +72,7 @@ impl Flusher {
             name: format!("{}-flush-main", self.config.name),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop { closed: false }),
+            inner: Inner::Main(RunLoop { app_tx, closed: false }),
         };
         flush.prefix = flush.prefix();
         let thrd = Thread::spawn(&self.prefix, flush);
@@ -256,7 +259,7 @@ impl Flusher {
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
-        let RunLoop { closed } = match &mut self.inner {
+        let RunLoop { closed, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -272,5 +275,12 @@ impl Flusher {
 impl Flusher {
     fn prefix(&self) -> String {
         format!("{}:flush", self.name)
+    }
+
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
+            _ => unreachable!(),
+        }
     }
 }

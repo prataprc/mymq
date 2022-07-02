@@ -47,7 +47,7 @@ pub use ttrie::TopicTrie;
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
-use std::{net, path, time};
+use std::{net, path, sync::mpsc, time};
 
 pub const SLEEP_10MS: time::Duration = time::Duration::from_millis(10);
 
@@ -65,6 +65,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Type alias for PacketID.
 pub type PacketID = u16;
+
+/// Type alias for back-channel to application.
+pub type AppTx = mpsc::SyncSender<String>;
 
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
 /// following error-kind: `ProtocolError`, `PacketEncode`, `PacketDecode`,

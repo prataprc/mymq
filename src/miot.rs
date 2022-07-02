@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, net, ops::Deref, sync::Arc, time};
 
 use crate::packet::{MQTTRead, MQTTWrite};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{queue, v5, ClientID, Config, Packetize, Shard};
+use crate::{queue, v5, AppTx, ClientID, Config, Packetize, Shard};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -38,6 +38,8 @@ pub struct RunLoop {
     /// next available token for connections
     next_token: mio::Token,
 
+    /// Back channel to communicate with application.
+    app_tx: AppTx,
     /// whether thread is closed.
     closed: bool,
 }
@@ -92,7 +94,7 @@ impl Miot {
         Ok(val)
     }
 
-    pub fn spawn(self, shard: Shard) -> Result<Miot> {
+    pub fn spawn(self, shard: Shard, app_tx: AppTx) -> Result<Miot> {
         use crate::FIRST_TOKEN;
 
         if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
@@ -108,10 +110,13 @@ impl Miot {
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
-                shard: Box::new(shard),
                 poll,
+                shard: Box::new(shard),
+
                 conns: BTreeMap::default(),
                 next_token: FIRST_TOKEN,
+
+                app_tx: app_tx.clone(),
                 closed: false,
             }),
         };
@@ -193,7 +198,7 @@ impl Threadable for Miot {
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
+            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             let exit = self.mio_events(&rx, &events);
             if exit {
@@ -201,7 +206,7 @@ impl Threadable for Miot {
             }
 
             // wake the shard
-            allow_panic!(self.prefix, self.as_shard().wake());
+            allow_panic!(&self, self.as_shard().wake());
         }
 
         self.handle_close(Request::Close);
@@ -259,10 +264,10 @@ impl Miot {
             match q {
                 (q @ AddConnection { .. }, Some(tx)) => {
                     let resp = self.handle_add_connection(q);
-                    allow_panic!(self.prefix, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(resp)));
                 }
                 (q @ Close, Some(tx)) => {
-                    allow_panic!(self.prefix, tx.send(Ok(self.handle_close(q))));
+                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
                 }
                 (_, _) => unreachable!(),
             }
@@ -565,7 +570,7 @@ impl Miot {
         };
 
         let interests = Interest::READABLE | Interest::WRITABLE;
-        allow_panic!(self.prefix, poll.registry().register(&mut conn, token, interests));
+        allow_panic!(&self, poll.registry().register(&mut conn, token, interests));
 
         // This queue is wired up with miot-thread. This queue carries queue::Packet,
         // and there is a separate queue for every session.
@@ -636,6 +641,13 @@ impl Miot {
     fn as_shard(&self) -> &Shard {
         match &self.inner {
             Inner::Main(RunLoop { shard, .. }) => shard,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
             _ => unreachable!(),
         }
     }

@@ -42,7 +42,7 @@ impl Threadable for Handshake {
                     error!("{}, fail read, error {}", prefix, err);
                     break (RC::ProtocolError, true, None);
                 }
-                Err(_err) => unreachable!(),
+                Err(err) => unreachable!("unexpected error {}", err),
             };
             match &packetr {
                 MQTTRead::Init { .. } if time::Instant::now() < timeout => {
@@ -71,7 +71,7 @@ impl Threadable for Handshake {
                         error!("{}, fail parse, error {}", prefix, err);
                         break (RC::ProtocolError, true, None);
                     }
-                    Err(_err) => unreachable!(),
+                    Err(err) => unreachable!("unexpected error {}", err),
                 },
                 _ => {
                     error!("{}, fail after {:?}", prefix, time::Instant::now());

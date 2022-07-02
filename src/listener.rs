@@ -4,7 +4,7 @@ use mio::event::Events;
 use std::{net, sync::Arc, time};
 
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{Cluster, Config};
+use crate::{AppTx, Cluster, Config};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -23,6 +23,7 @@ pub enum Inner {
     Init,
     // Held by Cluster
     Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
+    // Thread
     Main(RunLoop),
 }
 
@@ -34,6 +35,9 @@ pub struct RunLoop {
     server: Option<mio::net::TcpListener>,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
+
+    /// Back channel to communicate with application.
+    app_tx: AppTx,
     /// thread is already closed.
     closed: bool,
 }
@@ -92,7 +96,7 @@ impl Listener {
         Ok(val)
     }
 
-    pub fn spawn(self, cluster: Cluster) -> Result<Listener> {
+    pub fn spawn(self, cluster: Cluster, app_tx: AppTx) -> Result<Listener> {
         use mio::{Interest, Waker};
 
         if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
@@ -117,6 +121,8 @@ impl Listener {
                 poll,
                 server: Some(server),
                 cluster: Box::new(cluster),
+
+                app_tx,
                 closed: false,
             }),
         };
@@ -171,14 +177,14 @@ impl Threadable for Listener {
         let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(self.prefix, self.as_mut_poll().poll(&mut events, timeout));
+            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
                 // Exit or not.
                 Ok(true) => break,
                 Ok(false) => (),
                 Err(err) if err.kind() == ErrorKind::IPCFail => {
-                    panic!("{} err: {}", self.prefix, err)
+                    allow_panic!(self, Err(err));
                 }
                 Err(err) => unreachable!("unexpected error {}", err),
             };
@@ -326,6 +332,13 @@ impl Listener {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
             _ => unreachable!(),
         }
     }

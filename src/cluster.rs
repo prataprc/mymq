@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{rebalance, util, v5};
-use crate::{Config, ConfigNode, Flusher, Hostable, Listener, Shard, TopicTrie};
+use crate::{AppTx, Config, ConfigNode, Flusher, Hostable, Listener, Shard, TopicTrie};
 use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
@@ -16,8 +16,6 @@ use crate::{Error, ErrorKind, Result};
 //       miot.
 
 type ThreadRx = Rx<Request, Result<Response>>;
-
-pub type AppTx = mpsc::SyncSender<String>;
 
 /// Cluster is the global configuration state for multi-node MQTT cluster.
 pub struct Cluster {
@@ -34,6 +32,7 @@ enum Inner {
     Handle(Arc<mio::Waker>, Thread<Cluster, Request, Result<Response>>),
     // Held by Listener, Handshake and Shard.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
+    // Thread
     Main(RunLoop),
 }
 
@@ -50,8 +49,6 @@ pub struct RunLoop {
     flusher: Flusher,
     /// Total number of shards within this node.
     shards: BTreeMap<u32, Shard>,
-    /// Channel to interface with application.
-    app_tx: mpsc::SyncSender<String>,
 
     /// Rebalancing algorithm.
     rebalancer: rebalance::Rebalancer,
@@ -59,6 +56,8 @@ pub struct RunLoop {
     // TODO: Should we make this part of the ClusterState ?
     topic_filters: TopicTrie,
 
+    /// Back channel to communicate with application.
+    app_tx: AppTx,
     /// thread is already closed.
     closed: bool,
 }
@@ -102,7 +101,7 @@ impl Cluster {
     /// Poll register for consensus TcpStream.
     pub const TOKEN_CONSENSUS: mio::Token = mio::Token(2);
 
-    /// Create a cluster from configuration. Cluster shall be in `Init` state, to start
+    /// Create a cluster from configuration. Cluster shall be in `Init` state. To start
     /// the cluster call [Cluster::spawn]
     pub fn from_config(config: Config) -> Result<Cluster> {
         // validate
@@ -151,10 +150,10 @@ impl Cluster {
         };
 
         let listener = Listener::default();
-        let flusher = Flusher::from_config(self.config.clone())?.spawn()?;
-        let flusher_tx = flusher.to_tx();
+        let flusher = Flusher::from_config(self.config.clone())?.spawn(app_tx.clone())?;
         let shards = BTreeMap::default();
 
+        let flusher_tx = flusher.to_tx();
         let topic_filters = TopicTrie::new();
         let cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
@@ -167,11 +166,11 @@ impl Cluster {
                 listener,
                 flusher,
                 shards,
-                app_tx,
 
                 rebalancer,
                 topic_filters: topic_filters.clone(),
 
+                app_tx: app_tx.clone(),
                 closed: false,
             }),
         };
@@ -194,7 +193,7 @@ impl Cluster {
                         flusher: flusher_tx.to_tx(),
                         topic_filters: topic_filters.clone(),
                     };
-                    Shard::from_config(config, shard_id)?.spawn(args)?
+                    Shard::from_config(config, shard_id)?.spawn(args, app_tx.clone())?
                 };
                 shard_queues.insert(shard.shard_id, shard.to_msg_tx());
                 shards.insert(shard_id, shard);
@@ -207,7 +206,10 @@ impl Cluster {
             }
 
             let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
-            let listener = Listener::from_config(config)?.spawn(clust_tx)?;
+            let listener = {
+                let listener = Listener::from_config(config)?;
+                listener.spawn(clust_tx, app_tx.clone())?
+            };
 
             match &cluster.inner {
                 Inner::Handle(waker, thrd) => {
@@ -317,7 +319,6 @@ impl Cluster {
 
 pub enum Response {
     Ok,
-    NodeUuid(Uuid),
 }
 
 impl Threadable for Cluster {
@@ -335,12 +336,7 @@ impl Threadable for Cluster {
         let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
         let res = loop {
             let timeout: Option<time::Duration> = None;
-            match self.as_mut_poll().poll(&mut events, timeout) {
-                Ok(()) => (),
-                Err(err) => {
-                    break err!(IOError, try: Err(err), "{} poll error", self.prefix)
-                }
-            };
+            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
                 // Exit or not
@@ -355,16 +351,15 @@ impl Threadable for Cluster {
             Ok(Response::Ok) => (),
             Err(err) => {
                 let msg = format!("handle_close, fatal error, {}", err.to_string());
-                allow_panic!(self.prefix, self.as_app_tx().send(msg));
+                allow_panic!(&self, self.as_app_tx().send(msg));
             }
-            _ => unreachable!(),
         }
 
         match res {
             Ok(()) => info!("{}, thread exit ...", self.prefix),
             Err(err) => {
                 let msg = format!("fatal error, {}", err.to_string());
-                allow_panic!(self.prefix, self.as_app_tx().send(msg));
+                allow_panic!(&self, self.as_app_tx().send(msg));
             }
         };
 
