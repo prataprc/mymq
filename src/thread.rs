@@ -62,7 +62,7 @@ impl<Q, R> Tx<Q, R> {
 
     /// Send a request message to thread and caller can receive on other end of
     /// `resp_tx`.
-    pub fn request_tx(&self, request: Q, resp_tx: mpsc::Sender<R>) -> Result<()>
+    pub fn request_with(&self, request: Q, resp_tx: mpsc::Sender<R>) -> Result<()>
     where
         Q: 'static + Send,
         R: 'static + Send,
@@ -196,9 +196,9 @@ where
 
     /// Send a request message to thread and caller can receive on other end of
     /// `resp_tx`.
-    pub fn request_tx(&self, request: Q, resp_tx: mpsc::Sender<R>) -> Result<()> {
+    pub fn request_with(&self, request: Q, resp_tx: mpsc::Sender<R>) -> Result<()> {
         match &self.tx {
-            Some(tx) => tx.request_tx(request, resp_tx),
+            Some(tx) => tx.request_with(request, resp_tx),
             None => unreachable!(),
         }
     }

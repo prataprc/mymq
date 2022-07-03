@@ -167,30 +167,43 @@ impl Threadable for Flusher {
         use Request::*;
 
         let flush_timeout = self.config.mqtt_flush_timeout();
-
         info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
 
-        'outer: loop {
-            let (qs, disconnected) = get_requests(&rx, CONTROL_CHAN_SIZE);
+        loop {
+            let (mut qs, disconnected) = get_requests(&rx, CONTROL_CHAN_SIZE);
+
+            let closed = match &self.inner {
+                Inner::Main(RunLoop { closed, .. }) => *closed,
+                _ => unreachable!(),
+            };
+
+            if closed {
+                info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+                qs.drain(..);
+            } else {
+                debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+            }
 
             for q in qs.into_iter() {
                 match q {
                     (q @ FlushConnection { .. }, Some(tx)) => {
-                        err!(IPCFail, try: tx.send(Ok(self.handle_flush_connection(q))))
-                            .ok();
+                        let resp = self.handle_flush_connection(q);
+                        allow_panic!(&self, tx.send(Ok(resp)));
                     }
                     (q @ Close, Some(tx)) => {
-                        err!(IPCFail, try: tx.send(Ok(self.handle_close(q)))).ok();
-                        break 'outer;
+                        allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
                     }
                     (_, _) => unreachable!(),
                 }
             }
 
-            if disconnected {
-                break;
+            match disconnected {
+                true => break,
+                false => (),
             };
         }
+
+        self.handle_close(Request::Close);
 
         info!("{}, thread exit ...", self.prefix);
 

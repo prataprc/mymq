@@ -154,7 +154,7 @@ impl Cluster {
         let shards = BTreeMap::default();
 
         let flusher_tx = flusher.to_tx();
-        let topic_filters = TopicTrie::new();
+        let topic_filters = TopicTrie::default();
         let cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
             prefix: self.prefix.clone(),
@@ -245,12 +245,6 @@ pub enum Request {
         listener: Listener,
         shards: BTreeMap<u32, Shard>,
     },
-    AddNodes {
-        nodes: Vec<Node>,
-    },
-    RemoveNodes {
-        uuids: Vec<Uuid>,
-    },
     AddConnection {
         conn: mio::net::TcpStream,
         addr: net::SocketAddr,
@@ -261,30 +255,6 @@ pub enum Request {
 
 // calls to interfacw with cluster-thread.
 impl Cluster {
-    pub fn add_nodes(&self, nodes: Vec<Node>) -> Result<()> {
-        match &self.inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake()?;
-                thrd.request(Request::AddNodes { nodes })??
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
-    pub fn remove_nodes(&self, uuids: Vec<Uuid>) -> Result<()> {
-        match &self.inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake()?;
-                thrd.request(Request::RemoveNodes { uuids })??
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
     pub fn add_connection(
         &self,
         conn: mio::net::TcpStream,
@@ -347,21 +317,10 @@ impl Threadable for Cluster {
         };
 
         // handle_close should be idempotent call.
-        match self.handle_close(Request::Close) {
-            Ok(Response::Ok) => (),
-            Err(err) => {
-                let msg = format!("handle_close, fatal error, {}", err.to_string());
-                allow_panic!(&self, self.as_app_tx().send(msg));
-            }
-        }
+        allow_panic!(&self, self.handle_close(Request::Close));
+        allow_panic!(&self, res);
 
-        match res {
-            Ok(()) => info!("{}, thread exit ...", self.prefix),
-            Err(err) => {
-                let msg = format!("fatal error, {}", err.to_string());
-                allow_panic!(&self, self.as_app_tx().send(msg));
-            }
-        };
+        info!("{}, thread exit ...", self.prefix);
 
         self
     }
@@ -400,6 +359,7 @@ impl Cluster {
     }
 
     // Return (empty, disconnected)
+    // IPCFail,
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
@@ -409,7 +369,7 @@ impl Cluster {
             _ => unreachable!(),
         };
 
-        let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
+        let (mut qs, empty, mut disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
@@ -425,16 +385,11 @@ impl Cluster {
                 (q @ Set { .. }, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_set(q)))?;
                 }
-                (q @ AddNodes { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_add_nodes(q)))?;
-                }
-                (q @ RemoveNodes { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_remove_nodes(q)))?;
-                }
                 (q @ AddConnection { .. }, Some(tx)) => {
                     err!(IPCFail, try: tx.send(self.handle_add_connection(q)))?;
                 }
                 (q @ Close, Some(tx)) => {
+                    disconnected = true;
                     err!(IPCFail, try: tx.send(self.handle_close(q)))?;
                 }
 
@@ -465,14 +420,7 @@ impl Cluster {
         Ok(Response::Ok)
     }
 
-    fn handle_add_nodes(&mut self, _req: Request) -> Result<Response> {
-        todo!()
-    }
-
-    fn handle_remove_nodes(&mut self, _req: Request) -> Result<Response> {
-        todo!()
-    }
-
+    // Errors - IPCFail,
     fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
         use crate::shard::AddSessionArgs;
 

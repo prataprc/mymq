@@ -339,13 +339,14 @@ impl Threadable for Shard {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
-            let exit = self.mio_events(&rx, &events);
-            if exit {
-                break;
-            }
+            match self.mio_events(&rx, &events) {
+                true /*disconnected*/ => break,
+                false => (),
+            };
         }
 
         self.handle_close(Request::Close);
+
         info!("{} thread exit ...", self.prefix);
 
         self
@@ -353,7 +354,7 @@ impl Threadable for Shard {
 }
 
 impl Shard {
-    // (exit,)
+    // (disconnected,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
@@ -374,6 +375,7 @@ impl Shard {
 }
 
 impl Shard {
+    // Return (empty, disconnected)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
@@ -395,22 +397,19 @@ impl Shard {
         for q in qs.into_iter() {
             match q {
                 (q @ SetMiot(_), Some(tx)) => {
-                    let resp = self.handle_set_miot(q);
-                    allow_panic!(&self, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(self.handle_set_miot(q))));
                 }
                 (q @ SetShardQueues(_), Some(tx)) => {
-                    let resp = self.handle_set_shard_queues(q);
-                    allow_panic!(&self, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(self.handle_set_shard_queues(q))));
                 }
                 (q @ AddSession { .. }, Some(tx)) => {
-                    let resp = self.handle_add_session(q);
-                    allow_panic!(&self, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(self.handle_add_session(q))));
                 }
                 (q @ FailedConnection { .. }, None) => {
-                    self.handle_failed_connection(q);
+                    let _resp = self.handle_failed_connection(q);
                 }
                 (q @ Close, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))))
+                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
                 }
 
                 (_, _) => unreachable!(),
@@ -488,7 +487,7 @@ impl Shard {
         Response::Ok
     }
 
-    fn handle_failed_connection(&mut self, req: Request) {
+    fn handle_failed_connection(&mut self, req: Request) -> Response {
         let (socket, err) = match req {
             Request::FailedConnection { socket, err } => (socket, err),
             _ => unreachable!(),
@@ -500,12 +499,25 @@ impl Shard {
 
         // NOTE: Session shall be removed when session_rx says disconnected.
         err!(IPCFail, try: flusher.flush_connection_err(socket, err)).ok();
+
+        Response::Ok
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        let RunLoop { cluster, sessions, miot, closed, .. } = match &mut self.inner {
+        let RunLoop {
+            cluster,
+            flusher,
+            miot,
+
+            sessions,
+            shard_queues,
+            topic_filters,
+
+            closed,
+            ..
+        } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -521,15 +533,24 @@ impl Shard {
                 }
             };
 
+            let cluster = mem::replace(cluster, Box::new(Cluster::default()));
+            mem::drop(cluster);
+
+            let flusher = mem::replace(flusher, Flusher::default());
+            mem::drop(flusher);
+
+            let shard_queues = mem::replace(shard_queues, BTreeMap::default());
+            mem::drop(shard_queues);
+
+            let topic_filters = mem::replace(topic_filters, TopicTrie::default());
+            mem::drop(topic_filters);
+
             let mut new_sessions = BTreeMap::default();
             let iter = mem::replace(sessions, BTreeMap::default()).into_iter();
             for (client_id, sess) in iter {
                 new_sessions.insert(client_id, sess.close());
             }
             let _sesss = mem::replace(sessions, new_sessions);
-
-            let cluster = mem::replace(cluster, Box::new(Cluster::default()));
-            mem::drop(cluster);
 
             *closed = true;
         }

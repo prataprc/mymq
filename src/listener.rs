@@ -180,15 +180,12 @@ impl Threadable for Listener {
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                // Exit or not.
-                Ok(true) => break,
-                Ok(false) => (),
-                Err(err) if err.kind() == ErrorKind::IPCFail => {
-                    allow_panic!(self, Err(err));
-                }
-                Err(err) => unreachable!("unexpected error {}", err),
+                true /*disconnected*/ => break,
+                false => (),
             };
         }
+
+        self.handle_close(Request::Close);
 
         info!("{}, thread exit ...", self.prefix);
 
@@ -197,9 +194,8 @@ impl Threadable for Listener {
 }
 
 impl Listener {
-    // return (exit,)
-    // IPCFail on local channel communication.
-    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> Result<bool> {
+    // return (disconnected,)
+    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
         let mut iter = events.iter();
         let res = 'outer: loop {
@@ -211,8 +207,8 @@ impl Listener {
                     match event.token() {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
-                            match self.drain_control_chan(rx)? {
-                                (_empty, true) => break 'outer Ok(true),
+                            match self.drain_control_chan(rx) {
+                                (_empty, true) => break 'outer true,
                                 (true, _disconnected) => break,
                                 (false, false) => (),
                             }
@@ -226,7 +222,7 @@ impl Listener {
                         _ => unreachable!(),
                     }
                 }
-                None => break Ok(false),
+                None => break false,
             }
         };
 
@@ -235,17 +231,16 @@ impl Listener {
     }
 
     // Return (empty, disconnected)
-    // IPCFail on local channel communication.
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
+
+        let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
         let closed = match &self.inner {
             Inner::Main(RunLoop { closed, .. }) => *closed,
             _ => unreachable!(),
         };
-
-        let (mut qs, empty, mut disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
         if closed {
             info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
@@ -257,14 +252,13 @@ impl Listener {
         for q in qs.into_iter() {
             match q {
                 (q @ Close, Some(tx)) => {
-                    disconnected = true;
-                    err!(IPCFail, try: tx.send(Ok(self.handle_close(q))))?
+                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
                 }
                 (_, _) => unreachable!(),
             }
         }
 
-        Ok((empty, disconnected))
+        (empty, disconnected)
     }
 
     // Return (would_block,)
