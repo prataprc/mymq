@@ -90,6 +90,30 @@ macro_rules! enc_prop {
     }};
 }
 
+mod auth;
+mod connack;
+mod connect;
+mod disconnect;
+mod ping;
+mod pubaclc;
+mod publish;
+mod sub;
+mod suback;
+mod unsub;
+mod unsuback;
+
+pub use auth::Auth;
+pub use connack::{ConnAck, ConnackReasonCode};
+pub use connect::Connect;
+pub use disconnect::{DisconnReasonCode, Disconnect};
+pub use ping::{PingReq, PingResp};
+pub use pubaclc::Pub;
+pub use publish::Publish;
+pub use sub::Subscribe;
+pub use suback::SubAck;
+pub use unsub::UnSubscribe;
+pub use unsuback::UnsubAck;
+
 /// MQTT packet type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
@@ -859,30 +883,6 @@ fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
 
     Ok(data)
 }
-
-mod auth;
-mod connack;
-mod connect;
-mod disconnect;
-mod ping;
-mod pubaclc;
-mod publish;
-mod sub;
-mod suback;
-mod unsub;
-mod unsuback;
-
-pub use auth::Auth;
-pub use connack::ConnAck;
-pub use connect::Connect;
-pub use disconnect::Disconnect;
-pub use ping::{PingReq, PingResp};
-pub use pubaclc::Pub;
-pub use publish::Publish;
-pub use sub::Subscribe;
-pub use suback::SubAck;
-pub use unsub::UnSubscribe;
-pub use unsuback::UnsubAck;
 
 #[cfg(test)]
 #[path = "mod_test.rs"]

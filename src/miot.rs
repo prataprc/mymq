@@ -128,7 +128,8 @@ impl Miot {
                 app_tx: app_tx.clone(),
             }),
         };
-        let thrd = Thread::spawn(&self.prefix, miot);
+        let mut thrd = Thread::spawn(&self.prefix, miot);
+        thrd.set_waker(Arc::clone(&waker));
 
         let val = Miot {
             name: format!("{}-miot-handle", self.config.name),
@@ -148,6 +149,11 @@ pub enum Request {
     Close,
 }
 
+pub enum Response {
+    Ok,
+    Downstream(queue::PktTx),
+}
+
 pub struct AddConnectionArgs {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,
@@ -157,10 +163,15 @@ pub struct AddConnectionArgs {
 
 // calls to interface with listener-thread, and shall wake the thread
 impl Miot {
+    pub fn wake(&self) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(waker, _thrd) => err!(IOError, try: waker.wake(), "miot-wake"),
+            _ => unreachable!(),
+        }
+    }
     pub fn add_connection(&self, args: AddConnectionArgs) -> Result<queue::PktTx> {
         match &self.inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake()?;
+            Inner::Handle(_waker, thrd) => {
                 match thrd.request(Request::AddConnection(args))?? {
                     Response::Downstream(tx) => Ok(tx),
                     _ => unreachable!(),
@@ -172,8 +183,7 @@ impl Miot {
 
     pub fn remove_connection(&self, client_id: ClientID) -> Result<()> {
         match &self.inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake()?;
+            Inner::Handle(_waker, thrd) => {
                 thrd.request(Request::RemoveConnection { client_id })??;
                 Ok(())
             }
@@ -186,19 +196,13 @@ impl Miot {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake().ok();
+            Inner::Handle(_waker, thrd) => {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),
         }
     }
-}
-
-pub enum Response {
-    Ok,
-    Downstream(queue::PktTx),
 }
 
 impl Threadable for Miot {
@@ -220,8 +224,8 @@ impl Threadable for Miot {
                 false => (),
             };
 
-            // when ever miot is woken, associated shard-thread is also woken.
-            allow_panic!(&self, self.as_shard().wake());
+            // We do granular wake up, in read_conns and write_conns
+            // allow_panic!(&self, self.as_shard().wake());
         }
 
         self.handle_close(Request::Close);

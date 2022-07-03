@@ -5,8 +5,20 @@
 #![feature(backtrace)]
 #![feature(error_iter)]
 
+#[macro_export]
+macro_rules! tx_pkt_miot {
+    ($session:ident, $shard:ident, $resp:expr) => {{
+        let res = $session.miot_tx.send($resp);
+        $shard.as_miot().wake().ok(); // TODO: allow_panic ?
+        err!(IPCFail, try: res)
+    }};
+}
+
 #[macro_use]
 mod error;
+#[macro_use]
+pub mod v5;
+
 // mod chash; TODO
 mod cluster;
 mod config;
@@ -24,9 +36,6 @@ mod timer;
 mod ttrie;
 mod types;
 mod util;
-
-#[macro_use]
-pub mod v5;
 
 #[cfg(any(feature = "fuzzy", test))]
 pub mod fuzzy;

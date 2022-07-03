@@ -182,7 +182,8 @@ impl Cluster {
                 app_tx: app_tx.clone(),
             }),
         };
-        let thrd = Thread::spawn(&self.prefix, cluster);
+        let mut thrd = Thread::spawn(&self.prefix, cluster);
+        thrd.set_waker(Arc::clone(&waker));
 
         let cluster = Cluster {
             name: format!("{}-cluster-handle", self.config.name),
@@ -220,8 +221,7 @@ impl Cluster {
             };
 
             match &cluster.inner {
-                Inner::Handle(waker, thrd) => {
-                    waker.wake()?;
+                Inner::Handle(_waker, thrd) => {
                     thrd.request(Request::Set { shards, listener })??;
                 }
                 _ => unreachable!(),
@@ -271,10 +271,7 @@ pub struct AddConnectionArgs {
 impl Cluster {
     pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
-            Inner::Tx(waker, tx) => {
-                waker.wake()?;
-                tx.request(Request::AddConnection(args))??
-            }
+            Inner::Tx(_waker, tx) => tx.request(Request::AddConnection(args))??,
             _ => unreachable!(),
         };
 
@@ -286,8 +283,7 @@ impl Cluster {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake().ok();
+            Inner::Handle(_waker, thrd) => {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }

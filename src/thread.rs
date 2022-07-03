@@ -4,7 +4,8 @@
 //! expected to hold onto its own state, and handle all inter-thread communication
 //! via channels and message queues.
 
-use std::{sync::mpsc, thread};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 use crate::{Error, ErrorKind, Result};
 
@@ -19,15 +20,15 @@ pub trait Threadable: Sized {
 ///
 /// The clone behavior is similar to [mpsc::Sender] or, [mpsc::SyncSender].
 pub enum Tx<Q, R = ()> {
-    N(mpsc::Sender<(Q, Option<mpsc::Sender<R>>)>),
-    S(mpsc::SyncSender<(Q, Option<mpsc::Sender<R>>)>),
+    N(mpsc::Sender<(Q, Option<mpsc::Sender<R>>)>, Option<Arc<mio::Waker>>),
+    S(mpsc::SyncSender<(Q, Option<mpsc::Sender<R>>)>, Option<Arc<mio::Waker>>),
 }
 
 impl<Q, R> Clone for Tx<Q, R> {
     fn clone(&self) -> Self {
         match self {
-            Tx::N(tx) => Tx::N(tx.clone()),
-            Tx::S(tx) => Tx::S(tx.clone()),
+            Tx::N(tx, waker) => Tx::N(tx.clone(), waker.as_ref().map(Arc::clone)),
+            Tx::S(tx, waker) => Tx::S(tx.clone(), waker.as_ref().map(Arc::clone)),
         }
     }
 }
@@ -40,8 +41,16 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => err!(IPCFail, try: tx.send((msg, None))),
-            Tx::S(tx) => err!(IPCFail, try: tx.send((msg, None))),
+            Tx::N(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((msg, None)));
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
+            Tx::S(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((msg, None)));
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
         }
     }
 
@@ -53,8 +62,16 @@ impl<Q, R> Tx<Q, R> {
     {
         let (stx, srx) = mpsc::channel();
         match self {
-            Tx::N(tx) => err!(IPCFail, try: tx.send((request, Some(stx))))?,
-            Tx::S(tx) => err!(IPCFail, try: tx.send((request, Some(stx))))?,
+            Tx::N(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((request, Some(stx))))?;
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
+            Tx::S(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((request, Some(stx))))?;
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
         }
 
         err!(IPCFail, try: srx.recv())
@@ -68,8 +85,16 @@ impl<Q, R> Tx<Q, R> {
         R: 'static + Send,
     {
         match self {
-            Tx::N(tx) => err!(IPCFail, try: tx.send((request, Some(resp_tx)))),
-            Tx::S(tx) => err!(IPCFail, try: tx.send((request, Some(resp_tx)))),
+            Tx::N(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((request, Some(resp_tx))));
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
+            Tx::S(tx, waker) => {
+                let res = err!(IPCFail, try: tx.send((request, Some(resp_tx))));
+                waker.as_ref().map(|w| w.wake().ok());
+                res
+            }
         }
     }
 }
@@ -129,7 +154,7 @@ where
         Thread {
             name: name.to_string(),
             handle: Some(thread::spawn(move || thrd.main_loop(rx))),
-            tx: Some(Tx::N(tx)),
+            tx: Some(Tx::N(tx, None)),
         }
     }
 
@@ -140,8 +165,18 @@ where
         Thread {
             name: name.to_string(),
             handle: Some(thread::spawn(move || thrd.main_loop(rx))),
-            tx: Some(Tx::S(tx)),
+            tx: Some(Tx::S(tx, None)),
         }
+    }
+
+    /// Set a waker on this thread, so that for every post/request calls the thred
+    /// is woken up
+    pub fn set_waker(&mut self, waker: Arc<mio::Waker>) {
+        self.tx = match self.tx.take() {
+            Some(Tx::N(tx, None)) => Some(Tx::N(tx, Some(Arc::clone(&waker)))),
+            Some(Tx::S(tx, None)) => Some(Tx::S(tx, Some(Arc::clone(&waker)))),
+            _ => unreachable!(),
+        };
     }
 
     /// Return a clone of tx channel.

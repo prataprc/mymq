@@ -93,18 +93,8 @@ pub struct Disconnect {
 }
 
 impl Disconnect {
-    pub fn from_reason_code(code: ReasonCode) -> Disconnect {
-        match code {
-            ReasonCode::MalformedPacket => Disconnect {
-                code: DisconnReasonCode::try_from(code as u8).ok(),
-                properties: None,
-            },
-            ReasonCode::ProtocolError => Disconnect {
-                code: DisconnReasonCode::try_from(code as u8).ok(),
-                properties: None,
-            },
-            _ => unreachable!(),
-        }
+    pub fn from_reason_code(code: DisconnReasonCode) -> Disconnect {
+        Disconnect { code: Some(code), properties: None }
     }
 }
 

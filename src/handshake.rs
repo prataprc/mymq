@@ -5,7 +5,7 @@ use std::{net, thread, time};
 use crate::packet::{send_connack, MQTTRead};
 use crate::thread::{Rx, Threadable};
 use crate::{v5, Cluster, Config, SLEEP_10MS};
-use crate::{Error, ErrorKind, ReasonCode as RC};
+use crate::{Error, ErrorKind};
 
 pub struct Handshake {
     pub prefix: String,
@@ -20,7 +20,7 @@ impl Threadable for Handshake {
     type Resp = ();
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
-        use crate::cluster::AddConnectionArgs;
+        use crate::{cluster::AddConnectionArgs, v5::ConnackReasonCode as RC};
 
         let now = time::Instant::now();
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);

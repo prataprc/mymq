@@ -3,8 +3,8 @@ use log::{debug, info, trace, warn};
 use std::{thread, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, AppTx, Config, SLEEP_10MS};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{queue, v5, AppTx, Config, SLEEP_10MS};
+use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -258,7 +258,10 @@ impl Flusher {
         }
 
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
-        let code = conn_err.as_ref().map(|err| err.code()).unwrap_or(ReasonCode::Success);
+        let code = match conn_err {
+            Some(code) => v5::DisconnReasonCode::try_from(code.kind() as u8).unwrap(),
+            None => v5::DisconnReasonCode::NormalDisconnect,
+        };
         send_disconnect(&prefix, timeout, max_size, code, &mut socket.conn).ok();
 
         Response::Ok

@@ -129,7 +129,8 @@ impl Listener {
             }),
         };
         listener.prefix = listener.prefix();
-        let thrd = Thread::spawn(&self.prefix, listener);
+        let mut thrd = Thread::spawn(&self.prefix, listener);
+        thrd.set_waker(Arc::clone(&waker));
 
         let mut listener = Listener {
             name: format!("{}-listener-handle", self.config.name),
@@ -159,8 +160,7 @@ impl Listener {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Handle(waker, thrd) => {
-                waker.wake().ok();
+            Inner::Handle(_waker, thrd) => {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }

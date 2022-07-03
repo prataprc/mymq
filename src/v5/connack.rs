@@ -132,20 +132,18 @@ pub struct ConnAck {
 }
 
 impl ConnAck {
-    pub fn from_reason_code(code: ReasonCode) -> ConnAck {
-        match code {
-            ReasonCode::MalformedPacket => ConnAck {
-                flags: ConnackFlags::default(),
-                code: ConnackReasonCode::try_from(code as u8).unwrap(),
-                properties: None,
-            },
-            ReasonCode::ProtocolError => ConnAck {
-                flags: ConnackFlags::default(),
-                code: ConnackReasonCode::try_from(code as u8).unwrap(),
-                properties: None,
-            },
-            _ => unreachable!(),
+    pub fn new_success(session_present: bool, ps: Option<ConnAckProperties>) -> ConnAck {
+        let mut flags = ConnackFlags::default();
+        if session_present {
+            flags = ConnackFlags(*flags | *ConnackFlags::SESSION_PRESENT)
         }
+        let code = ConnackReasonCode::Success;
+        ConnAck { flags, code, properties: ps }
+    }
+
+    pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {
+        let flags = ConnackFlags::default();
+        ConnAck { flags, code, properties: None }
     }
 }
 

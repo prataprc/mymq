@@ -314,7 +314,7 @@ pub fn send_disconnect(
     prefix: &str,
     timeout: time::Instant,
     max_size: u32,
-    code: ReasonCode,
+    code: v5::DisconnReasonCode,
     conn: &mio::net::TcpStream,
 ) -> Result<()> {
     use crate::SLEEP_10MS;
@@ -347,7 +347,7 @@ pub fn send_disconnect(
 
 pub fn send_connack(
     prefix: &str,
-    code: ReasonCode,
+    code: v5::ConnackReasonCode,
     conn: &mio::net::TcpStream,
     timeout: time::Instant,
     max_size: u32,

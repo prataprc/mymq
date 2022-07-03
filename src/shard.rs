@@ -178,7 +178,8 @@ impl Shard {
                 app_tx: app_tx.clone(),
             }),
         };
-        let thrd = Thread::spawn(&self.prefix, shard);
+        let mut thrd = Thread::spawn(&self.prefix, shard);
+        thrd.set_waker(Arc::clone(&waker));
 
         let shard = Shard {
             name: format!("{}-shard-handle", self.config.name),
@@ -195,8 +196,7 @@ impl Shard {
                 miot.spawn(shard.to_tx(), app_tx.clone())?
             };
             match &shard.inner {
-                Inner::Handle(Handle { waker, thrd, .. }) => {
-                    waker.wake()?;
+                Inner::Handle(Handle { thrd, .. }) => {
                     thrd.request(Request::SetMiot(miot))??;
                 }
                 _ => unreachable!(),
@@ -270,42 +270,6 @@ pub struct AddSessionArgs {
 
 // calls to interfacw with cluster-thread.
 impl Shard {
-    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) -> Result<()> {
-        match &self.inner {
-            Inner::Handle(Handle { waker, thrd, .. }) => {
-                waker.wake()?;
-                thrd.request(Request::SetShardQueues(shards))??;
-            }
-            _ => unreachable!(),
-        }
-
-        Ok(())
-    }
-
-    pub fn add_session(&self, args: AddSessionArgs) -> Result<()> {
-        match &self.inner {
-            Inner::Handle(Handle { waker, thrd, .. }) => {
-                waker.wake()?;
-                thrd.request(Request::AddSession(args))??;
-            }
-            _ => unreachable!(),
-        }
-
-        Ok(())
-    }
-
-    pub fn failed_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
-        match &self.inner {
-            Inner::Tx(waker, tx) => {
-                waker.wake()?;
-                tx.post(Request::FailedConnection { socket, err })?;
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
     pub fn wake(&self) -> Result<()> {
         match &self.inner {
             Inner::Handle(Handle { waker, .. }) => {
@@ -317,13 +281,45 @@ impl Shard {
         }
     }
 
+    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(Handle { thrd, .. }) => {
+                thrd.request(Request::SetShardQueues(shards))??;
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    pub fn add_session(&self, args: AddSessionArgs) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(Handle { thrd, .. }) => {
+                thrd.request(Request::AddSession(args))??;
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    pub fn failed_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
+        match &self.inner {
+            Inner::Tx(_waker, tx) => {
+                tx.post(Request::FailedConnection { socket, err })?
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(())
+    }
+
     pub fn close_wait(mut self) -> Shard {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Handle(Handle { waker, thrd, .. }) => {
-                waker.wake().ok();
+            Inner::Handle(Handle { thrd, .. }) => {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
@@ -350,6 +346,8 @@ impl Threadable for Shard {
                 true /*disconnected*/ => break,
                 false => (),
             };
+
+            self.route();
         }
 
         self.handle_close(Request::Close);
@@ -419,6 +417,22 @@ impl Shard {
         }
 
         (empty, disconnected)
+    }
+
+    fn route(&mut self) {
+        use std::mem;
+
+        let mut inner = mem::replace(&mut self.inner, Inner::Init);
+        let RunLoop { sessions, .. } = match &mut inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        for (_, session) in sessions.iter_mut() {
+            session.route(self); // TODO: handle error
+        }
+
+        let _init = mem::replace(&mut self.inner, inner);
     }
 }
 
@@ -543,20 +557,27 @@ impl Shard {
 }
 
 impl Shard {
-    fn prefix(&self) -> String {
+    pub fn prefix(&self) -> String {
         format!("{}:{}", self.name, self.shard_id)
     }
 
-    fn as_mut_poll(&mut self) -> &mut mio::Poll {
+    pub fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
             _ => unreachable!(),
         }
     }
 
-    fn as_app_tx(&self) -> &AppTx {
+    pub fn as_app_tx(&self) -> &AppTx {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_miot(&self) -> &Miot {
+        match &self.inner {
+            Inner::Main(RunLoop { miot, .. }) => miot,
             _ => unreachable!(),
         }
     }
