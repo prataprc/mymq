@@ -135,8 +135,8 @@ impl Session {
             | v5::Packet::SubAck(_)
             | v5::Packet::UnsubAck(_)
             | v5::Packet::PingResp => {
-                let resp = v5::Packet::ConnAck(v5::ConnAck::from_reason_code(
-                    v5::ConnackReasonCode::ProtocolError,
+                let resp = v5::Packet::Disconnect(v5::Disconnect::from_reason_code(
+                    v5::DisconnReasonCode::ProtocolError,
                 ));
                 let res = err!(
                     ProtocolError,
