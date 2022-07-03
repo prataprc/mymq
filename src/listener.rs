@@ -25,6 +25,8 @@ pub enum Inner {
     Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
     // Thread
     Main(RunLoop),
+    // Held by Cluster, replacing both Handle and Main.
+    Close(FinState),
 }
 
 pub struct RunLoop {
@@ -32,15 +34,15 @@ pub struct RunLoop {
     /// thread-waker.
     poll: mio::Poll,
     /// MQTT server listening on `port`.
-    server: Option<mio::net::TcpListener>,
+    server: mio::net::TcpListener,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
-    /// thread is already closed.
-    closed: bool,
 }
+
+pub struct FinState;
 
 impl Default for Listener {
     fn default() -> Listener {
@@ -69,6 +71,7 @@ impl Drop for Listener {
                 panic!("{} invalid drop ...", self.prefix);
             }
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -119,11 +122,10 @@ impl Listener {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
-                server: Some(server),
+                server: server,
                 cluster: Box::new(cluster),
 
                 app_tx,
-                closed: false,
             }),
         };
         listener.prefix = listener.prefix();
@@ -188,7 +190,6 @@ impl Threadable for Listener {
         self.handle_close(Request::Close);
 
         info!("{}, thread exit ...", self.prefix);
-
         self
     }
 }
@@ -237,16 +238,11 @@ impl Listener {
 
         let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
 
-        let closed = match &self.inner {
-            Inner::Main(RunLoop { closed, .. }) => *closed,
-            _ => unreachable!(),
-        };
-
-        if closed {
-            info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+        if matches!(&self.inner, Inner::Close(_)) {
+            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
             qs.drain(..);
         } else {
-            debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+            debug!("{} process {} requests closed:false", self.prefix, qs.len());
         }
 
         for q in qs.into_iter() {
@@ -271,7 +267,7 @@ impl Listener {
             _ => unreachable!(),
         };
 
-        match server.as_ref().unwrap().accept() {
+        match server.accept() {
             Ok((conn, addr)) => {
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
@@ -297,20 +293,17 @@ impl Listener {
     fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        let RunLoop { server, cluster, closed, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
+        match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(_run_loop) => {
+                info!("{} closing ...", self.prefix);
+
+                // Drop, poll, server, cluster and app_tx.
+                let _init = mem::replace(&mut self.inner, Inner::Close(FinState));
+                Response::Ok
+            }
+            Inner::Close(_) => Response::Ok,
             _ => unreachable!(),
-        };
-
-        if *closed == false {
-            let cluster = mem::replace(cluster, Box::new(Cluster::default()));
-            mem::drop(cluster);
-            mem::drop(server.take());
-
-            info!("{} closed ...", self.prefix);
-            *closed = true;
         }
-        Response::Ok
     }
 }
 

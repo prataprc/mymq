@@ -23,25 +23,33 @@ pub enum Inner {
     Init,
     // Help by Shard.
     Handle(Arc<mio::Waker>, Thread<Miot, Request, Result<Response>>),
+    // Thread.
     Main(RunLoop),
+    // Held by Cluster, replacing both Handle and Main.
+    Close(FinState),
 }
 
 pub struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from remote client and
     /// thread-waker.
     poll: mio::Poll,
-    /// Shard instance that is paired with this miot thread.
+    /// Shard-tx associated with the shard that is paired with this miot thread.
     shard: Box<Shard>,
 
-    /// collection of all active socket connections abstracted as queue.
-    conns: BTreeMap<ClientID, queue::Socket>,
     /// next available token for connections
     next_token: mio::Token,
+    /// collection of all active socket connections, and its associated data.
+    conns: BTreeMap<ClientID, queue::Socket>,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
-    /// whether thread is closed.
-    closed: bool,
+}
+
+pub struct FinState {
+    pub next_token: mio::Token,
+    pub client_ids: Vec<ClientID>,
+    pub addrs: Vec<net::SocketAddr>,
+    pub tokens: Vec<mio::Token>,
 }
 
 impl Default for Miot {
@@ -71,6 +79,7 @@ impl Drop for Miot {
                 panic!("{} invalid drop ...", self.prefix);
             }
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -113,11 +122,10 @@ impl Miot {
                 poll,
                 shard: Box::new(shard),
 
-                conns: BTreeMap::default(),
                 next_token: FIRST_TOKEN,
+                conns: BTreeMap::default(),
 
                 app_tx: app_tx.clone(),
-                closed: false,
             }),
         };
         let thrd = Thread::spawn(&self.prefix, miot);
@@ -135,32 +143,39 @@ impl Miot {
 }
 
 pub enum Request {
-    AddConnection {
-        client_id: ClientID,
-        conn: mio::net::TcpStream,
-        addr: net::SocketAddr,
-        upstream: queue::PktTx,
-    },
+    AddConnection(AddConnectionArgs),
+    RemoveConnection { client_id: ClientID },
     Close,
+}
+
+pub struct AddConnectionArgs {
+    pub client_id: ClientID,
+    pub conn: mio::net::TcpStream,
+    pub addr: net::SocketAddr,
+    pub upstream: queue::PktTx,
 }
 
 // calls to interface with listener-thread, and shall wake the thread
 impl Miot {
-    pub fn add_connection(
-        &self,
-        client_id: ClientID,
-        conn: mio::net::TcpStream,
-        addr: net::SocketAddr,
-        upstream: queue::PktTx,
-    ) -> Result<queue::PktTx> {
-        let req = Request::AddConnection { client_id, conn, addr, upstream };
+    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<queue::PktTx> {
         match &self.inner {
             Inner::Handle(waker, thrd) => {
                 waker.wake()?;
-                match thrd.request(req)?? {
+                match thrd.request(Request::AddConnection(args))?? {
                     Response::Downstream(tx) => Ok(tx),
                     _ => unreachable!(),
                 }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn remove_connection(&self, client_id: ClientID) -> Result<()> {
+        match &self.inner {
+            Inner::Handle(waker, thrd) => {
+                waker.wake()?;
+                thrd.request(Request::RemoveConnection { client_id })??;
+                Ok(())
             }
             _ => unreachable!(),
         }
@@ -200,24 +215,24 @@ impl Threadable for Miot {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
-            let exit = self.mio_events(&rx, &events);
-            if exit {
-                break;
-            }
+            match self.mio_events(&rx, &events) {
+                true /*disconnected*/ => break,
+                false => (),
+            };
 
-            // wake the shard
+            // when ever miot is woken, associated shard-thread is also woken.
             allow_panic!(&self, self.as_shard().wake());
         }
 
         self.handle_close(Request::Close);
-        info!("{} thread exit...", self.prefix);
 
+        info!("{} thread exit...", self.prefix);
         self
     }
 }
 
 impl Miot {
-    // return (exit,)
+    // return (disconnected,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
@@ -226,7 +241,7 @@ impl Miot {
         }
         debug!("{} polled {} events", self.prefix, count);
 
-        let exit = loop {
+        let disconnected = loop {
             // keep repeating until all control requests are drained.
             match self.drain_control_chan(rx) {
                 (_empty, true) => break true,
@@ -235,10 +250,12 @@ impl Miot {
             }
         };
 
-        self.read_conns();
-        self.write_conns();
+        if !disconnected && !matches!(&self.inner, Inner::Close(_)) {
+            self.read_conns();
+            self.write_conns();
+        }
 
-        exit
+        disconnected
     }
 
     // Return (empty, disconnected)
@@ -246,25 +263,22 @@ impl Miot {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let closed = match &self.inner {
-            Inner::Main(RunLoop { closed, .. }) => *closed,
-            _ => unreachable!(),
-        };
-
         let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
 
-        if closed {
-            info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+        if matches!(&self.inner, Inner::Close(_)) {
+            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
             qs.drain(..);
         } else {
-            debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+            debug!("{} process {} requests closed:false", self.prefix, qs.len());
         }
 
         for q in qs.into_iter() {
             match q {
                 (q @ AddConnection { .. }, Some(tx)) => {
-                    let resp = self.handle_add_connection(q);
-                    allow_panic!(&self, tx.send(Ok(resp)));
+                    allow_panic!(&self, tx.send(Ok(self.handle_add_connection(q))));
+                }
+                (q @ RemoveConnection { .. }, Some(tx)) => {
+                    allow_panic!(&self, tx.send(Ok(self.handle_remove_connection(q))));
                 }
                 (q @ Close, Some(tx)) => {
                     allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
@@ -279,18 +293,11 @@ impl Miot {
 
 impl Miot {
     fn read_conns(&mut self) {
-        let (shard, conns, closed) = match &mut self.inner {
-            Inner::Main(RunLoop { shard, conns, closed, .. }) => (shard, conns, *closed),
+        let (shard, conns) = match &mut self.inner {
+            Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             _ => unreachable!(),
         };
 
-        if closed {
-            info!("{} skipping read connections, closed:{}", self.prefix, closed);
-        } else {
-            debug!("{} processing read connections. closed:{}", self.prefix, closed);
-        }
-
-        // if thread is closed, conns shall be empty.
         let mut fail_queues = vec![];
         for (client_id, socket) in conns.iter_mut() {
             let prefix = format!("rconn:{}:{}", socket.addr, client_id.deref());
@@ -304,7 +311,7 @@ impl Miot {
             error!("{} removing connection {} ...", self.prefix, err);
 
             let socket = conns.remove(&client_id).unwrap();
-            err!(IPCFail, try: shard.failed_connection(socket, err)).ok();
+            allow_panic!(&self, shard.failed_connection(socket, err));
         }
     }
 
@@ -415,16 +422,10 @@ impl Miot {
     }
 
     fn write_conns(&mut self) {
-        let (shard, conns, closed) = match &mut self.inner {
-            Inner::Main(RunLoop { shard, conns, closed, .. }) => (shard, conns, *closed),
+        let (shard, conns) = match &mut self.inner {
+            Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             _ => unreachable!(),
         };
-
-        if closed {
-            info!("{} skipping write connections, closed:{}", self.prefix, closed);
-        } else {
-            debug!("{} processing write connections, closed:{}", self.prefix, closed);
-        }
 
         // if thread is closed conns will be empty.
         let mut fail_queues = vec![];
@@ -554,12 +555,6 @@ impl Miot {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use mio::Interest;
 
-        let (client_id, mut conn, addr, session_tx) = match req {
-            Request::AddConnection { client_id, conn, addr, upstream } => {
-                (client_id, conn, addr, upstream)
-            }
-            _ => unreachable!(),
-        };
         let (poll, conns, token) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, next_token, .. }) => {
                 let token = *next_token;
@@ -568,6 +563,12 @@ impl Miot {
             }
             _ => unreachable!(),
         };
+
+        let AddConnectionArgs { client_id, mut conn, addr, upstream } = match req {
+            Request::AddConnection(args) => args,
+            _ => unreachable!(),
+        };
+        let session_tx = upstream;
 
         let interests = Interest::READABLE | Interest::WRITABLE;
         allow_panic!(&self, poll.registry().register(&mut conn, token, interests));
@@ -598,31 +599,60 @@ impl Miot {
         Response::Downstream(downstream)
     }
 
-    fn handle_close(&mut self, _req: Request) -> Response {
-        use std::mem;
-
-        let RunLoop { shard, conns, closed, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
+    fn handle_remove_connection(&mut self, req: Request) -> Response {
+        let (poll, conns) = match &mut self.inner {
+            Inner::Main(RunLoop { poll, conns, .. }) => (poll, conns),
             _ => unreachable!(),
         };
 
-        if *closed == false {
-            info!("{} connections:{} ...", self.prefix, conns.len());
+        let client_id = match req {
+            Request::RemoveConnection { client_id } => client_id,
+            _ => unreachable!(),
+        };
 
-            let shard = mem::replace(shard, Box::new(Shard::default()));
-            mem::drop(shard);
+        let mut socket = conns.remove(&client_id).unwrap();
+        allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
 
-            let conns = mem::replace(conns, BTreeMap::default());
-            for (cid, socket) in conns.into_iter() {
-                info!(
-                    "{} closing socket {:?} client-id:{:?}",
-                    self.prefix, socket.addr, *cid
-                );
-                mem::drop(socket.conn);
-            }
-            *closed = true;
-        }
         Response::Ok
+    }
+
+    fn handle_close(&mut self, _req: Request) -> Response {
+        use std::mem;
+
+        match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(run_loop) => {
+                info!("{} closing connections:{} ...", self.prefix, run_loop.conns.len());
+
+                mem::drop(run_loop.poll);
+                mem::drop(run_loop.shard);
+
+                let mut client_ids = vec![];
+                let mut addrs = vec![];
+                let mut tokens = vec![];
+
+                for (cid, socket) in run_loop.conns.into_iter() {
+                    info!(
+                        "{} closing socket {:?} client-id:{:?}",
+                        self.prefix, socket.addr, *cid
+                    );
+                    client_ids.push(socket.client_id);
+                    addrs.push(socket.addr);
+                    tokens.push(socket.token);
+                }
+
+                let fin_state = FinState {
+                    next_token: run_loop.next_token,
+                    client_ids,
+                    addrs,
+                    tokens,
+                };
+                let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+
+                Response::Ok
+            }
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        }
     }
 }
 

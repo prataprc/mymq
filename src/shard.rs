@@ -450,7 +450,7 @@ impl Shard {
     }
 
     fn handle_add_session(&mut self, req: Request) -> Response {
-        use crate::session::SessionArgs;
+        use crate::{miot::AddConnectionArgs, session::SessionArgs};
 
         let AddSessionArgs { conn, addr, pkt } = match req {
             Request::AddSession(args) => args,
@@ -469,8 +469,9 @@ impl Shard {
         };
         let client_id = pkt.payload.client_id.clone();
         let miot_tx = {
-            let res = miot.add_connection(client_id.clone(), conn, addr, upstream);
-            allow_panic!(&self, res)
+            let args =
+                AddConnectionArgs { client_id: client_id.clone(), conn, addr, upstream };
+            allow_panic!(&self, miot.add_connection(args))
         };
 
         let session = {
@@ -498,7 +499,7 @@ impl Shard {
         };
 
         // NOTE: Session shall be removed when session_rx says disconnected.
-        err!(IPCFail, try: flusher.flush_connection_err(socket, err)).ok();
+        allow_panic!(&self, flusher.flush_connection_err(socket, err));
 
         Response::Ok
     }

@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace};
+use log::{debug, info, trace, warn};
 
 use std::{thread, time};
 
@@ -24,14 +24,16 @@ pub enum Inner {
     Tx(Tx<Request, Result<Response>>),
     // Thread
     Main(RunLoop),
+    // Held by Cluser, replacing both Handle and Main.
+    Close(FinState),
 }
 
 pub struct RunLoop {
     /// Back channel to communicate with application.
     app_tx: AppTx,
-    /// thread is already closed.
-    closed: bool,
 }
+
+pub struct FinState;
 
 impl Default for Flusher {
     fn default() -> Flusher {
@@ -72,7 +74,7 @@ impl Flusher {
             name: format!("{}-flush-main", self.config.name),
             prefix: self.prefix.clone(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop { app_tx, closed: false }),
+            inner: Inner::Main(RunLoop { app_tx }),
         };
         flush.prefix = flush.prefix();
         let thrd = Thread::spawn(&self.prefix, flush);
@@ -172,16 +174,11 @@ impl Threadable for Flusher {
         loop {
             let (mut qs, disconnected) = get_requests(&rx, CONTROL_CHAN_SIZE);
 
-            let closed = match &self.inner {
-                Inner::Main(RunLoop { closed, .. }) => *closed,
-                _ => unreachable!(),
-            };
-
-            if closed {
-                info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+            if matches!(&self.inner, Inner::Close(_)) {
+                info!("{} skipping {} requests closed:true", self.prefix, qs.len());
                 qs.drain(..);
             } else {
-                debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+                debug!("{} process {} requests closed:false", self.prefix, qs.len());
             }
 
             for q in qs.into_iter() {
@@ -257,7 +254,7 @@ impl Flusher {
                     }
                 },
                 Err(err) if err.kind() == ErrorKind::Disconnected => {
-                    error!("{} stop flush, socket disconnected {}", prefix, err);
+                    warn!("{} stop flush, socket disconnected {}", prefix, err);
                     break;
                 }
                 Err(err) => unreachable!("unexpected err: {}", err),
@@ -272,16 +269,18 @@ impl Flusher {
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
-        let RunLoop { closed, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
+        use std::mem;
 
-        if *closed == false {
-            info!("{} closed ...", self.prefix);
-            *closed = true;
+        match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(_run_loop) => {
+                info!("{} closed ...", self.prefix);
+
+                let _init = mem::replace(&mut self.inner, Inner::Close(FinState));
+                Response::Ok
+            }
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
         }
-        Response::Ok
     }
 }
 
