@@ -26,11 +26,14 @@ pub enum Inner {
     Init,
     // Held by Cluster.
     Handle(Handle),
-    // Held by Miot, Session(s).
+    // Held by Miot.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     // Held by all Shard threads.
     MsgTx(Arc<mio::Waker>, queue::MsgTx),
+    // Thread.
     Main(RunLoop),
+    // Held by Cluster, replacing both Handle and Main.
+    Close(FinState),
 }
 
 pub struct Handle {
@@ -57,19 +60,22 @@ pub struct RunLoop {
     /// Every shard has an input queue for queue::Message, which receives all locally
     /// hopping MQTT messages for sessions managed by this shard.
     msg_rx: queue::MsgRx,
-    /// Collection of sessions and corresponding clients managed by this shard.
-    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
-    // TODO: remove session only when Session::session_rx channel has disconnected.
-    sessions: BTreeMap<ClientID, Session>,
     /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::topic_filters
     topic_filters: TopicTrie,
+    /// Collection of sessions and corresponding clients managed by this shard.
+    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
+    // TODO: remove session only when Session::session_rx channel has disconnected.
+    sessions: BTreeMap<ClientID, Session>,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
-    /// whether thread is closed.
-    closed: bool,
+}
+
+pub struct FinState {
+    pub miot: Miot,
+    pub sessions: BTreeMap<ClientID, Session>,
 }
 
 impl Default for Shard {
@@ -108,6 +114,7 @@ impl Drop for Shard {
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::MsgTx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -169,7 +176,6 @@ impl Shard {
                 topic_filters: args.topic_filters,
 
                 app_tx: app_tx.clone(),
-                closed: false,
             }),
         };
         let thrd = Thread::spawn(&self.prefix, shard);
@@ -244,12 +250,6 @@ impl Shard {
     }
 }
 
-pub struct AddSessionArgs {
-    pub conn: mio::net::TcpStream,
-    pub addr: net::SocketAddr,
-    pub pkt: v5::Connect,
-}
-
 pub enum Request {
     SetMiot(Miot),
     SetShardQueues(BTreeMap<u32, Shard>),
@@ -260,6 +260,12 @@ pub enum Request {
 
 pub enum Response {
     Ok,
+}
+
+pub struct AddSessionArgs {
+    pub conn: mio::net::TcpStream,
+    pub addr: net::SocketAddr,
+    pub pkt: v5::Connect,
 }
 
 // calls to interfacw with cluster-thread.
@@ -306,18 +312,19 @@ impl Shard {
                 err!(IOError, try: waker.wake(), "shard-wake")
             }
             Inner::Tx(waker, _) => err!(IOError, try: waker.wake(), "shard-wake"),
+            Inner::MsgTx(waker, _) => err!(IOError, try: waker.wake(), "shard-wake"),
             _ => unreachable!(),
         }
     }
 
-    pub fn close_wait(mut self) -> Result<Shard> {
+    pub fn close_wait(mut self) -> Shard {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(Handle { waker, thrd, .. }) => {
-                waker.wake()?;
-                thrd.request(Request::Close)??;
+                waker.wake().ok();
+                thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),
@@ -380,18 +387,13 @@ impl Shard {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let closed = match &self.inner {
-            Inner::Main(RunLoop { closed, .. }) => *closed,
-            _ => unreachable!(),
-        };
-
         let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
 
-        if closed {
-            info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+        if matches!(&self.inner, Inner::Close(_)) {
+            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
             qs.drain(..);
         } else {
-            debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+            debug!("{} process {} requests closed:false", self.prefix, qs.len());
         }
 
         for q in qs.into_iter() {
@@ -469,8 +471,8 @@ impl Shard {
         };
         let client_id = pkt.payload.client_id.clone();
         let miot_tx = {
-            let args =
-                AddConnectionArgs { client_id: client_id.clone(), conn, addr, upstream };
+            let client_id = client_id.clone();
+            let args = AddConnectionArgs { client_id, conn, addr, upstream };
             allow_panic!(&self, miot.add_connection(args))
         };
 
@@ -489,6 +491,8 @@ impl Shard {
     }
 
     fn handle_failed_connection(&mut self, req: Request) -> Response {
+        use crate::flush::FlushConnectionArgs;
+
         let (socket, err) = match req {
             Request::FailedConnection { socket, err } => (socket, err),
             _ => unreachable!(),
@@ -499,7 +503,8 @@ impl Shard {
         };
 
         // NOTE: Session shall be removed when session_rx says disconnected.
-        allow_panic!(&self, flusher.flush_connection_err(socket, err));
+        let args = FlushConnectionArgs { socket, err: Some(err) };
+        allow_panic!(&self, flusher.flush_connection(args));
 
         Response::Ok
     }
@@ -507,55 +512,33 @@ impl Shard {
     fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        let RunLoop {
-            cluster,
-            flusher,
-            miot,
+        match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(mut run_loop) => {
+                info!("{} close sessions:{} ...", self.prefix, run_loop.sessions.len());
 
-            sessions,
-            shard_queues,
-            topic_filters,
+                let miot = mem::replace(&mut run_loop.miot, Miot::default()).close_wait();
 
-            closed,
-            ..
-        } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
+                mem::drop(run_loop.poll);
+                mem::drop(run_loop.cluster);
+                mem::drop(run_loop.flusher);
 
-        if *closed == false {
-            info!("{} sessions:{} ...", self.prefix, sessions.len());
+                mem::drop(run_loop.msg_rx);
+                mem::drop(run_loop.shard_queues);
+                mem::drop(run_loop.topic_filters);
 
-            *miot = match mem::replace(miot, Miot::default()).close_wait() {
-                Ok(miot) => miot,
-                Err(err) => {
-                    error!("{} miot close_wait failed, ignored {} ...", self.prefix, err);
-                    Miot::default()
+                let mut new_sessions = BTreeMap::default();
+                for (client_id, sess) in run_loop.sessions.into_iter() {
+                    new_sessions.insert(client_id, sess.close());
                 }
-            };
 
-            let cluster = mem::replace(cluster, Box::new(Cluster::default()));
-            mem::drop(cluster);
+                let fin_state = FinState { miot, sessions: new_sessions };
+                let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
 
-            let flusher = mem::replace(flusher, Flusher::default());
-            mem::drop(flusher);
-
-            let shard_queues = mem::replace(shard_queues, BTreeMap::default());
-            mem::drop(shard_queues);
-
-            let topic_filters = mem::replace(topic_filters, TopicTrie::default());
-            mem::drop(topic_filters);
-
-            let mut new_sessions = BTreeMap::default();
-            let iter = mem::replace(sessions, BTreeMap::default()).into_iter();
-            for (client_id, sess) in iter {
-                new_sessions.insert(client_id, sess.close());
+                Response::Ok
             }
-            let _sesss = mem::replace(sessions, new_sessions);
-
-            *closed = true;
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
         }
-        Response::Ok
     }
 }
 

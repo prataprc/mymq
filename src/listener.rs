@@ -154,14 +154,14 @@ pub enum Response {
 
 // calls to interface with listener-thread, and shall wake the thread
 impl Listener {
-    pub fn close_wait(mut self) -> Result<Listener> {
+    pub fn close_wait(mut self) -> Listener {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(waker, thrd) => {
-                waker.wake()?;
-                thrd.request(Request::Close)??;
+                waker.wake().ok();
+                thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),

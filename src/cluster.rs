@@ -34,6 +34,8 @@ enum Inner {
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     // Thread
     Main(RunLoop),
+    // Held by Application, replacing both Handle and Main.
+    Close(FinState),
 }
 
 pub struct RunLoop {
@@ -58,8 +60,14 @@ pub struct RunLoop {
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
-    /// thread is already closed.
-    closed: bool,
+}
+
+pub struct FinState {
+    pub state: ClusterState,
+    pub listener: Listener,
+    pub flusher: Flusher,
+    pub shards: BTreeMap<u32, Shard>,
+    pub topic_filters: TopicTrie,
 }
 
 impl Default for Cluster {
@@ -89,6 +97,7 @@ impl Drop for Cluster {
             }
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
     }
 }
@@ -171,7 +180,6 @@ impl Cluster {
                 topic_filters: topic_filters.clone(),
 
                 app_tx: app_tx.clone(),
-                closed: false,
             }),
         };
         let thrd = Thread::spawn(&self.prefix, cluster);
@@ -245,26 +253,27 @@ pub enum Request {
         listener: Listener,
         shards: BTreeMap<u32, Shard>,
     },
-    AddConnection {
-        conn: mio::net::TcpStream,
-        addr: net::SocketAddr,
-        pkt: v5::Connect,
-    },
+    AddConnection(AddConnectionArgs),
     Close,
+}
+
+pub enum Response {
+    Ok,
+}
+
+pub struct AddConnectionArgs {
+    pub conn: mio::net::TcpStream,
+    pub addr: net::SocketAddr,
+    pub pkt: v5::Connect,
 }
 
 // calls to interfacw with cluster-thread.
 impl Cluster {
-    pub fn add_connection(
-        &self,
-        conn: mio::net::TcpStream,
-        addr: net::SocketAddr,
-        pkt: v5::Connect,
-    ) -> Result<()> {
+    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
             Inner::Tx(waker, tx) => {
                 waker.wake()?;
-                tx.request(Request::AddConnection { conn, addr, pkt })??
+                tx.request(Request::AddConnection(args))??
             }
             _ => unreachable!(),
         };
@@ -272,23 +281,19 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn close_wait(mut self) -> Result<Cluster> {
+    pub fn close_wait(mut self) -> Cluster {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(waker, thrd) => {
-                waker.wake()?;
-                thrd.request(Request::Close)??;
+                waker.wake().ok();
+                thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),
         }
     }
-}
-
-pub enum Response {
-    Ok,
 }
 
 impl Threadable for Cluster {
@@ -304,21 +309,17 @@ impl Threadable for Cluster {
         );
 
         let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
-        let res = loop {
+        loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                // Exit or not
-                Ok(true) => break Ok(()),
-                Ok(false) => (),
-                Err(err) => break Err(err),
+                true /*disconnected*/ => break,
+                false => (),
             };
-        };
+        }
 
-        // handle_close should be idempotent call.
-        allow_panic!(&self, self.handle_close(Request::Close));
-        allow_panic!(&self, res);
+        self.handle_close(Request::Close);
 
         info!("{}, thread exit ...", self.prefix);
 
@@ -327,11 +328,11 @@ impl Threadable for Cluster {
 }
 
 impl Cluster {
-    // return (exit,)
-    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> Result<bool> {
+    // return (disconnected,)
+    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
         let mut iter = events.iter();
-        let res = 'outer: loop {
+        let disconnected = 'outer: loop {
             match iter.next() {
                 Some(event) => {
                     trace!("{}, poll-event token:{}", self.prefix, event.token().0);
@@ -340,8 +341,8 @@ impl Cluster {
                     match event.token() {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
-                            match self.drain_control_chan(rx)? {
-                                (_empty, true) => break 'outer Ok(true),
+                            match self.drain_control_chan(rx) {
+                                (_empty, true) => break 'outer true,
                                 (true, _disconnected) => break,
                                 (false, false) => (),
                             }
@@ -350,32 +351,27 @@ impl Cluster {
                         _ => unreachable!(),
                     }
                 }
-                None => break Ok(false),
+                None => break false,
             }
         };
 
         debug!("{}, polled and got {} events", self.prefix, count);
-        res
+        disconnected
     }
 
     // Return (empty, disconnected)
     // IPCFail,
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> Result<(bool, bool)> {
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let closed = match &self.inner {
-            Inner::Main(RunLoop { closed, .. }) => *closed,
-            _ => unreachable!(),
-        };
+        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
 
-        let (mut qs, empty, mut disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
-
-        if closed {
-            info!("{} skipping {} requests closed:{}", self.prefix, qs.len(), closed);
+        if matches!(&self.inner, Inner::Close(_)) {
+            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
             qs.drain(..);
         } else {
-            debug!("{} process {} requests closed:{}", self.prefix, qs.len(), closed);
+            debug!("{} process {} requests closed:false", self.prefix, qs.len());
         }
 
         // TODO: review control-channel handling for all threads. Should we panic or
@@ -383,27 +379,26 @@ impl Cluster {
         for q in qs.into_iter() {
             match q {
                 (q @ Set { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_set(q)))?;
+                    allow_panic!(&self, tx.send(Ok(self.handle_set(q))));
                 }
-                (q @ AddConnection { .. }, Some(tx)) => {
-                    err!(IPCFail, try: tx.send(self.handle_add_connection(q)))?;
+                (q @ AddConnection(_), Some(tx)) => {
+                    allow_panic!(&self, tx.send(Ok(self.handle_add_connection(q))));
                 }
                 (q @ Close, Some(tx)) => {
-                    disconnected = true;
-                    err!(IPCFail, try: tx.send(self.handle_close(q)))?;
+                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
                 }
 
                 (_, _) => unreachable!(), // TODO: log meaning message.
             };
         }
 
-        Ok((empty, disconnected))
+        (empty, disconnected)
     }
 }
 
 // Main loop
 impl Cluster {
-    fn handle_set(&mut self, req: Request) -> Result<Response> {
+    fn handle_set(&mut self, req: Request) -> Response {
         let run_loop = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -417,15 +412,15 @@ impl Cluster {
             _ => unreachable!(),
         }
 
-        Ok(Response::Ok)
+        Response::Ok
     }
 
     // Errors - IPCFail,
-    fn handle_add_connection(&mut self, req: Request) -> Result<Response> {
+    fn handle_add_connection(&mut self, req: Request) -> Response {
         use crate::shard::AddSessionArgs;
 
-        let (conn, addr, connect) = match req {
-            Request::AddConnection { conn, addr, pkt } => (conn, addr, pkt),
+        let AddConnectionArgs { conn, addr, pkt: connect } = match req {
+            Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
 
@@ -451,35 +446,50 @@ impl Cluster {
         info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_id);
 
         // Add session to the shard.
-        shard.add_session(AddSessionArgs { conn, addr, pkt: connect })?;
+        allow_panic!(
+            &self,
+            shard.add_session(AddSessionArgs { conn, addr, pkt: connect })
+        );
 
-        Ok(Response::Ok)
+        Response::Ok
     }
 
-    fn handle_close(&mut self, _: Request) -> Result<Response> {
+    fn handle_close(&mut self, _: Request) -> Response {
         use std::mem;
 
-        let RunLoop { listener, flusher, shards, closed, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
+        match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(mut run_loop) => {
+                info!("{}, closing shards:{}", self.prefix, run_loop.shards.len());
 
-        if *closed == false {
-            info!("{}, closing {} shards hosted", self.prefix, shards.len());
+                mem::drop(run_loop.poll);
 
-            *listener = mem::replace(listener, Listener::default()).close_wait()?;
-            *flusher = mem::replace(flusher, Flusher::default()).close_wait()?;
+                let mut shards = BTreeMap::default();
+                for (shard_id, shard) in run_loop.shards.into_iter() {
+                    shards.insert(shard_id, shard.close_wait());
+                }
 
-            let hshards = mem::replace(shards, BTreeMap::default());
-            for (uuid, shard) in hshards.into_iter() {
-                let shard = shard.close_wait()?;
-                shards.insert(uuid, shard);
+                let listener = mem::replace(&mut run_loop.listener, Listener::default())
+                    .close_wait();
+
+                let flusher =
+                    mem::replace(&mut run_loop.flusher, Flusher::default()).close_wait();
+
+                mem::drop(run_loop.rebalancer);
+
+                let fin_state = FinState {
+                    state: run_loop.state,
+                    listener,
+                    flusher,
+                    shards,
+                    topic_filters: run_loop.topic_filters,
+                };
+
+                let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+                Response::Ok
             }
-
-            *closed = true;
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
         }
-
-        Ok(Response::Ok)
     }
 }
 
@@ -573,7 +583,7 @@ impl Hostable for Node {
     }
 }
 
-enum ClusterState {
+pub enum ClusterState {
     /// Cluster is single-node.
     SingleNode { state: SingleNode },
     /// Cluster is in the process of updating its gods&nodes, and working out rebalance.
@@ -582,13 +592,13 @@ enum ClusterState {
     Stable { state: MultiNode },
 }
 
-struct MultiNode {
+pub struct MultiNode {
     config: Config,
     nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
     topology: Vec<rebalance::Topology>, // list of shards mapped to node.
 }
 
-struct SingleNode {
+pub struct SingleNode {
     config: Config,
     node: Node,
     topology: Vec<rebalance::Topology>,

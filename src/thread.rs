@@ -159,14 +159,14 @@ where
     ///
     /// Even otherwise, when Thread value goes out of scope its drop implementation
     /// shall call this method to exit the thread, except that any errors are ignored.
-    pub fn close_wait(mut self) -> Result<T> {
+    pub fn close_wait(mut self) -> T {
         use std::{mem, panic};
 
         mem::drop(self.tx.take());
 
         let handle = self.handle.take().unwrap();
         match handle.join() {
-            Ok(thread_val) => Ok(thread_val),
+            Ok(thread_val) => thread_val,
             Err(err) => panic::resume_unwind(err),
         }
     }

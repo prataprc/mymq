@@ -122,37 +122,32 @@ pub enum Response {
     Ok,
 }
 
+pub struct FlushConnectionArgs {
+    pub socket: queue::Socket,
+    pub err: Option<Error>,
+}
+
 // calls to interfacw with cluster-thread.
 impl Flusher {
-    pub fn flush_connection_err(&self, socket: queue::Socket, err: Error) -> Result<()> {
+    pub fn flush_connection(&self, args: FlushConnectionArgs) -> Result<()> {
         match &self.inner {
-            Inner::Handle(thrd) => {
-                thrd.request(Request::FlushConnection { socket, err: Some(err) })??
-            }
+            Inner::Handle(thrd) => thrd.request(Request::FlushConnection {
+                socket: args.socket,
+                err: args.err,
+            })??,
             _ => unreachable!(),
         };
 
         Ok(())
     }
 
-    pub fn flush_connection(&self, socket: queue::Socket) -> Result<()> {
-        match &self.inner {
-            Inner::Handle(thrd) => {
-                thrd.request(Request::FlushConnection { socket, err: None })??
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(())
-    }
-
-    pub fn close_wait(mut self) -> Result<Flusher> {
+    pub fn close_wait(mut self) -> Flusher {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(thrd) => {
-                thrd.request(Request::Close)??;
+                thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),
@@ -228,10 +223,11 @@ impl Flusher {
 
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
         loop {
+            // TODO: is there a point in sending this upstream ? does it make a diffnce.
             match Miot::send_upstream(&prefix, &mut socket) {
-                Ok(true /*would_block*/) if time::Instant::now() > timeout => break,
-                Ok(true) => thread::sleep(SLEEP_10MS),
-                Ok(false) => break,
+                Ok((true, _wake)) if time::Instant::now() > timeout => break,
+                Ok((true, _wake)) => thread::sleep(SLEEP_10MS),
+                Ok((_would_block, _wake)) => break,
                 Err(err) if err.kind() == ErrorKind::RxClosed => break,
                 Err(err) => unreachable!("{}", err),
             }

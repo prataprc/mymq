@@ -181,14 +181,14 @@ impl Miot {
         }
     }
 
-    pub fn close_wait(mut self) -> Result<Miot> {
+    pub fn close_wait(mut self) -> Miot {
         use std::mem;
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(waker, thrd) => {
-                waker.wake()?;
-                thrd.request(Request::Close)??;
+                waker.wake().ok();
+                thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
             _ => unreachable!(),
@@ -302,7 +302,8 @@ impl Miot {
         for (client_id, socket) in conns.iter_mut() {
             let prefix = format!("rconn:{}:{}", socket.addr, client_id.deref());
             match Self::read_packets(&prefix, &self.config, socket) {
-                Ok(_) => (),
+                Ok((_would_block, true)) => allow_panic!(&self, shard.wake()),
+                Ok((_would_block, false)) => (),
                 Err(err) => fail_queues.push((client_id.clone(), err)),
             }
         }
@@ -315,19 +316,19 @@ impl Miot {
         }
     }
 
-    // return (would_block,)
+    // return (would_block,wake)
     // Disconnected, MalformedPacket, ProtocolError, RxClosed
     fn read_packets(
         prefix: &str,
         config: &Config,
         socket: &mut queue::Socket,
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         let msg_batch_size = config.mqtt_msg_batch_size() as usize;
 
         // before reading from socket, send remaining packets to shard.
-        let upstream_block = Self::send_upstream(prefix, socket)?;
+        let (upstream_block, mut wake) = Self::send_upstream(prefix, socket)?;
         match upstream_block {
-            true => Ok(true),
+            true => Ok((true, wake)),
             false => loop {
                 match Self::read_packet(prefix, config, socket)? {
                     (Some(pkt), _) if socket.rd.packets.len() < msg_batch_size => {
@@ -335,12 +336,14 @@ impl Miot {
                     }
                     (Some(pkt), would_block) => {
                         socket.rd.packets.push(pkt);
-                        Self::send_upstream(prefix, socket)?;
-                        break Ok(would_block);
+                        let (_, w) = Self::send_upstream(prefix, socket)?;
+                        wake = wake | w;
+                        break Ok((would_block, wake));
                     }
                     (None, would_block) => {
-                        Self::send_upstream(prefix, socket)?;
-                        break Ok(would_block);
+                        let (_, w) = Self::send_upstream(prefix, socket)?;
+                        wake = wake | w;
+                        break Ok((would_block, wake));
                     }
                 }
             },
@@ -386,9 +389,12 @@ impl Miot {
         Ok((pkt, would_block))
     }
 
-    // return (would_block,)
+    // return (would_block,wake)
     // RxClosed, if the receiving end of the queue, in shard/session, has closed.
-    pub fn send_upstream(prefix: &str, socket: &mut queue::Socket) -> Result<bool> {
+    pub fn send_upstream(
+        prefix: &str,
+        socket: &mut queue::Socket,
+    ) -> Result<(bool, bool)> {
         use std::sync::mpsc;
 
         let mut iter = {
@@ -396,13 +402,14 @@ impl Miot {
             packets.into_iter()
         };
         let session_tx = &socket.rd.session_tx;
+        let mut wake = false;
         let res = loop {
             match iter.next() {
                 Some(packet) => match session_tx.try_send(packet) {
-                    Ok(()) => (),
+                    Ok(()) => wake = true,
                     Err(mpsc::TrySendError::Full(p)) => {
                         socket.rd.packets.push(p);
-                        break Ok(true);
+                        break Ok((true, wake));
                     }
                     Err(mpsc::TrySendError::Disconnected(p)) => {
                         socket.rd.packets.push(p);
@@ -413,7 +420,7 @@ impl Miot {
                         )?;
                     }
                 },
-                None => break Ok(false),
+                None => break Ok((false, wake)),
             }
         };
 
@@ -432,7 +439,8 @@ impl Miot {
         for (client_id, socket) in conns.iter_mut() {
             let prefix = format!("wconn:{}:{}", socket.addr, client_id.deref());
             match Self::write_packets(&prefix, &self.config, socket) {
-                Ok(_) => (),
+                Ok(false) => allow_panic!(&self, shard.wake()),
+                Ok(_would_block) => (),
                 Err(err) => fail_queues.push((client_id.clone(), err)),
             }
         }
@@ -445,7 +453,7 @@ impl Miot {
         }
     }
 
-    // write packets to connection, return (would_block,)
+    // write packets to connection, return (would_block,wake)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
     // TxFinish, if the transmitting end of the queue, in shard/session, has closed.
     fn write_packets(

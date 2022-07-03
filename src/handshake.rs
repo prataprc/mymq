@@ -20,6 +20,8 @@ impl Threadable for Handshake {
     type Resp = ();
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
+        use crate::cluster::AddConnectionArgs;
+
         let now = time::Instant::now();
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
 
@@ -84,9 +86,10 @@ impl Threadable for Handshake {
             // if error, connect-ack shall be sent right here and ignored.
             send_connack(&prefix, code, &conn, timeout, max_size).ok();
         } else if let Some(pkt_connect) = pkt_connect {
+            let args = AddConnectionArgs { conn, addr, pkt: pkt_connect };
             err!(
                 IPCFail,
-                try: self.cluster.add_connection(conn, addr, pkt_connect),
+                try: self.cluster.add_connection(args),
                 "cluster.add_connection"
             )
             .ok();

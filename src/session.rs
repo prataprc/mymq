@@ -34,7 +34,7 @@ pub struct Session {
     timestamp: BTreeMap<ClientID, u64>,
 }
 
-/// SessionState is a candidate for synchronisation with replicas.
+/// SessionState is a candidate for consensus with replicas.
 struct SessionState {
     /// Client's ClientID that created this session.
     client_id: ClientID,
