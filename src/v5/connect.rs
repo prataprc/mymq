@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::util::{self, advance};
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
-use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
+use crate::{Blob, ClientID, Config, MqttProtocol, Packetize, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Connect";
@@ -261,6 +261,13 @@ impl Connect {
             None => ConnectProperties::RECEIVE_MAXIMUM,
         }
     }
+
+    pub fn max_packet_size(&self) -> u32 {
+        match &self.properties {
+            Some(props) => props.max_packet_size(),
+            None => Config::DEF_MQTT_MAX_PACKET_SIZE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -369,6 +376,10 @@ impl ConnectProperties {
 
     pub fn receive_maximum(&self) -> u16 {
         self.receive_maximum.unwrap_or(Self::RECEIVE_MAXIMUM)
+    }
+
+    pub fn max_packet_size(&self) -> u32 {
+        self.max_packet_size.unwrap_or(Config::DEF_MQTT_MAX_PACKET_SIZE)
     }
 
     pub fn topic_alias_maximum(&self) -> u16 {

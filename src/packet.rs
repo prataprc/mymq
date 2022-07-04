@@ -256,6 +256,7 @@ impl MQTTWrite {
         match self {
             // silently ignore if the packet size is more that requested.
             Init { data, max_size } if data.len() > max_size => {
+                // TODO: add skipped packets to connection metrics.
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Init { data, max_size } => match stream.write(&data) {
@@ -312,10 +313,10 @@ impl MQTTWrite {
 
 pub fn send_disconnect(
     prefix: &str,
-    timeout: time::Instant,
-    max_size: u32,
     code: v5::DisconnReasonCode,
     conn: &mio::net::TcpStream,
+    timeout: time::Instant,
+    max_size: u32,
 ) -> Result<()> {
     use crate::SLEEP_10MS;
 
@@ -384,7 +385,7 @@ fn read_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
     if pkt_len > max_size {
         err!(
             MalformedPacket,
-            code: MalformedPacket,
+            code: PacketTooLarge,
             "MQTTRead::read packet_len:{}",
             pkt_len
         )

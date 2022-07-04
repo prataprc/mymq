@@ -38,9 +38,28 @@ use crate::{KeepAlive, Shard};
 //      If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00),
 //      1 (0x01), or 2 (0x02) [MQTT-3.1.2-12]. A value of 3 (0x03) is a Malformed Packet.
 //
-// *Session Reconnect*
+// *Session Reconnect/Restart*
 //
 // TODO: `session_expiry_interval`.
+// TODO: For restart, try seqno handshake between broker/client during CONNECT/CONNACK.
+//       seqno, can be exchanged via user-property.
+//
+// *Shared Subscription*
+//
+// TODO: In the case of a Shared Subscription where the message is too large to send to
+//       one or more of the Clients but other Clients can receive it, the Server can
+//       choose either discard the message without sending the message to any of the
+//       Clients, or to send the message to one of the Clients that can receive it.
+//
+// *CONNECT Properties*
+//
+// TODO: `topic_alias_maximum`
+// TODO: `request_response_info`
+// TODO: `request_problem_info`
+// TODO: `authentication_method`
+// TODO: `authentication_data`
+// TODO: `payload.username`
+// TODO: `payload.password`
 
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
@@ -54,6 +73,7 @@ pub struct Session {
     addr: net::SocketAddr,
     prefix: String,
     client_receive_maximum: u16,
+    client_max_packet_size: u32,
     config: Config,
 
     // Outbound channel to Miot thread.
@@ -136,6 +156,7 @@ impl Session {
             addr: args.addr,
             prefix: prefix.clone(),
             client_receive_maximum: pkt.receive_maximum(),
+            client_max_packet_size: pkt.max_packet_size(),
             config: config.clone(),
 
             miot_tx: args.miot_tx,
@@ -157,7 +178,10 @@ impl Session {
             ..v5::ConnAckProperties::default()
         };
         let connack = v5::ConnAck::new_success(Some(props));
-        // TODO: `session_present`
+        // TODO: session_present
+        // TODO: max_packet_size
+        // TODO: receive_maximum
+        // TODO: topic_alias_maximum
 
         connack
     }
@@ -178,6 +202,10 @@ impl Session {
         for subsc in self.state.subscriptions.iter() {
             topic_filters.unsubscribe(&subsc.topic_filter).ok();
         }
+    }
+
+    pub fn client_max_packet_size(&self) -> u32 {
+        self.client_max_packet_size
     }
 }
 

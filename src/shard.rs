@@ -531,7 +531,14 @@ impl Shard {
 
         {
             let client_id = client_id.clone();
-            let args = AddConnectionArgs { client_id, conn, addr, upstream, downstream };
+            let args = AddConnectionArgs {
+                client_id,
+                conn,
+                addr,
+                upstream,
+                downstream,
+                client_max_packet_size: session.client_max_packet_size(),
+            };
             allow_panic!(&self, miot.add_connection(args));
         }
 

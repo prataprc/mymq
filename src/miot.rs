@@ -158,6 +158,7 @@ pub struct AddConnectionArgs {
     pub addr: net::SocketAddr,
     pub upstream: queue::PktTx,
     pub downstream: queue::PktRx,
+    pub client_max_packet_size: u32,
 }
 
 // calls to interface with miot-thread, and shall wake the thread
@@ -589,11 +590,17 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let AddConnectionArgs { client_id, mut conn, addr, upstream, downstream } =
-            match req {
-                Request::AddConnection(args) => args,
-                _ => unreachable!(),
-            };
+        let AddConnectionArgs {
+            client_id,
+            mut conn,
+            addr,
+            upstream,
+            downstream,
+            client_max_packet_size,
+        } = match req {
+            Request::AddConnection(args) => args,
+            _ => unreachable!(),
+        };
         let (session_tx, miot_rx) = (upstream, downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
@@ -606,7 +613,7 @@ impl Miot {
             packets: Vec::default(),
         };
         let wt = queue::Sink {
-            pw: MQTTWrite::new(&[], self.config.mqtt_max_packet_size()),
+            pw: MQTTWrite::new(&[], client_max_packet_size),
             timeout: None,
             miot_rx,
             packets: Vec::default(),

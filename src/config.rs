@@ -78,19 +78,28 @@ pub struct Config {
     /// MQTT packets are drainded from queues and connections in batches, so that
     /// all queues will get evenly processed. This parameter defines the batch size
     /// while draining the message queues.
+    /// * **Default**: [Config::DEF_MQTT_MSG_BATCH_SIZE]
+    /// * **Mutable**: No
     pub mqtt_msg_batch_size: Option<u32>,
 
     /// MQTT Keep Alive, in secs, that server can suggest to the client. If configured
     /// with non-zero value, clients should use this keep-alive instead of the client
     /// configured keep-alive-timeout.
+    /// while draining the message queues.
+    /// * **Default**: None,
+    /// * **Mutable**: No
     pub mqtt_keep_alive: Option<u32>,
 
     /// MQTT Keep Alive factor, the final value of `mqtt_keep_alive` is computed by
     /// multiplying the `mqtt_keep_alive` with this factor.
+    /// * **Default**: 1.5
+    /// * **Mutable**: No
     pub mqtt_keep_alive_factor: f32,
 
     /// MQTT Receive-maximum, control the number of unacknowledged PUBLISH packets
     /// server can receive and process concurrently for the client.
+    /// * **Default**: [Config::DEF_MQTT_RECEIVE_MAXIMUM]
+    /// * **Mutable**: No
     pub mqtt_receive_maximum: u16,
 
     // TODO
@@ -136,23 +145,25 @@ impl Default for Config {
 
 impl Config {
     /// Refer to [Config::max_nodes]
-    const DEF_MAX_NODES: u32 = 1;
+    pub const DEF_MAX_NODES: u32 = 1;
     /// Refer to [Config::connect_timeout]
-    const DEF_CONNECT_TIMEOUT: u32 = 5; // in seconds.
+    pub const DEF_CONNECT_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::mqtt_read_timeout]
-    const DEF_MQTT_READ_TIMEOUT: u32 = 5; // in seconds.
+    pub const DEF_MQTT_READ_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::mqtt_write_timeout]
-    const DEF_MQTT_WRITE_TIMEOUT: u32 = 5; // in seconds.
+    pub const DEF_MQTT_WRITE_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::mqtt_flush_timeout]
-    const DEF_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
+    pub const DEF_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
     /// Refer to [Config::mqtt_max_packet_size]
-    const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
+    // TODO: This value should match the limit set by the protocol.
+    //       Refer 3.1.2.11.4 Maximum Packet Size
+    pub const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
     /// Refer to [Config::mqtt_msg_batch_size]
-    const DEF_MQTT_MSG_BATCH_SIZE: u32 = 1024; // default is 1MB.
+    pub const DEF_MQTT_MSG_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::mqtt_keep_alive_factor]
-    const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
+    pub const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]
-    const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
+    pub const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>

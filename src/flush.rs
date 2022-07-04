@@ -251,6 +251,7 @@ impl Flusher {
                     error!("{} give up flush_packets after {:?}", prefix, timeout);
                     break;
                 }
+
                 Ok(true) => thread::sleep(SLEEP_10MS),
                 Ok(false) => break,
                 Err(err) if err.kind() == ErrorKind::Disconnected => {
@@ -266,7 +267,7 @@ impl Flusher {
             Some(err) => v5::DisconnReasonCode::try_from(err.code() as u8).unwrap(),
             None => v5::DisconnReasonCode::NormalDisconnect,
         };
-        send_disconnect(&prefix, timeout, max_size, code, &mut socket.conn).ok();
+        send_disconnect(&prefix, code, &mut socket.conn, timeout, max_size).ok();
 
         Response::Ok
     }
