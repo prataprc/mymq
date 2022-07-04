@@ -132,13 +132,16 @@ pub struct ConnAck {
 }
 
 impl ConnAck {
-    pub fn new_success(session_present: bool, ps: Option<ConnAckProperties>) -> ConnAck {
-        let mut flags = ConnackFlags::default();
-        if session_present {
-            flags = ConnackFlags(*flags | *ConnackFlags::SESSION_PRESENT)
+    pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
+        ConnAck {
+            flags: ConnackFlags::default(),
+            code: ConnackReasonCode::Success,
+            properties: ps,
         }
-        let code = ConnackReasonCode::Success;
-        ConnAck { flags, code, properties: ps }
+    }
+
+    pub fn set_session_present(&mut self) {
+        self.flags = ConnackFlags(*self.flags | *ConnackFlags::SESSION_PRESENT);
     }
 
     pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {

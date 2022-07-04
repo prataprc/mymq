@@ -254,6 +254,13 @@ impl Connect {
 
         Ok(())
     }
+
+    pub fn receive_maximum(&self) -> u16 {
+        match &self.properties {
+            Some(props) => props.receive_maximum(),
+            None => ConnectProperties::RECEIVE_MAXIMUM,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

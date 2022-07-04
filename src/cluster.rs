@@ -12,6 +12,7 @@ use crate::{Error, ErrorKind, Result};
 use crate::{Flusher, Listener, Shard, Ticker};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
+// TODO: Review assert macro calls.
 // TODO: Review `as` type-casting for numbers.
 // TODO: Validate and document all thread handles, cluster, listener, flusher, shard,
 //       miot.

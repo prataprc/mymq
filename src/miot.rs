@@ -149,7 +149,6 @@ pub enum Request {
 
 pub enum Response {
     Ok,
-    Downstream(queue::PktTx),
     Removed(queue::Socket),
 }
 
@@ -158,6 +157,7 @@ pub struct AddConnectionArgs {
     pub conn: mio::net::TcpStream,
     pub addr: net::SocketAddr,
     pub upstream: queue::PktTx,
+    pub downstream: queue::PktRx,
 }
 
 // calls to interface with miot-thread, and shall wake the thread
@@ -168,13 +168,11 @@ impl Miot {
             _ => unreachable!(),
         }
     }
-    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<queue::PktTx> {
+    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
-                match thrd.request(Request::AddConnection(args))?? {
-                    Response::Downstream(tx) => Ok(tx),
-                    _ => unreachable!(),
-                }
+                thrd.request(Request::AddConnection(args))??;
+                Ok(())
             }
             _ => unreachable!(),
         }
@@ -323,7 +321,7 @@ impl Miot {
                 Response::Removed(socket) => {
                     allow_panic!(&self, shard.flush_connection(socket, err));
                 }
-                _ => unreachable!(),
+                Response::Ok => (),
             }
         }
     }
@@ -591,21 +589,15 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let AddConnectionArgs { client_id, mut conn, addr, upstream } = match req {
-            Request::AddConnection(args) => args,
-            _ => unreachable!(),
-        };
-        let session_tx = upstream;
+        let AddConnectionArgs { client_id, mut conn, addr, upstream, downstream } =
+            match req {
+                Request::AddConnection(args) => args,
+                _ => unreachable!(),
+            };
+        let (session_tx, miot_rx) = (upstream, downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
         allow_panic!(&self, poll.registry().register(&mut conn, token, interests));
-
-        // This queue is wired up with miot-thread. This queue carries queue::Packet,
-        // and there is a separate queue for every session.
-        let (downstream, miot_rx) = {
-            let msg_batch_size = self.config.mqtt_msg_batch_size() as usize;
-            queue::pkt_channel(msg_batch_size)
-        };
 
         let rd = queue::Source {
             pr: MQTTRead::new(self.config.mqtt_max_packet_size()),
@@ -623,7 +615,7 @@ impl Miot {
         let socket = queue::Socket { client_id, conn, addr, token, rd, wt };
         conns.insert(id, socket);
 
-        Response::Downstream(downstream)
+        Response::Ok
     }
 
     fn handle_remove_connection(&mut self, req: Request) -> Response {
@@ -639,10 +631,13 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let mut socket = conns.remove(&client_id).unwrap();
-        allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
-
-        Response::Removed(socket)
+        match conns.remove(&client_id) {
+            Some(mut socket) => {
+                allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
+                Response::Removed(socket)
+            }
+            None => Response::Ok,
+        }
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {

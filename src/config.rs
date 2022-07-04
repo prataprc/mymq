@@ -69,6 +69,30 @@ pub struct Config {
     /// * **Mutable**: No
     pub mqtt_flush_timeout: Option<u32>,
 
+    /// Maximum packet size allowed by the broker, this shall be communicated with
+    /// remote client during handshake.
+    /// * **Default**: [Config::DEF_MQTT_MAX_PACKET_SIZE]
+    /// * **Mutable**: No
+    pub mqtt_max_packet_size: Option<u32>,
+
+    /// MQTT packets are drainded from queues and connections in batches, so that
+    /// all queues will get evenly processed. This parameter defines the batch size
+    /// while draining the message queues.
+    pub mqtt_msg_batch_size: Option<u32>,
+
+    /// MQTT Keep Alive, in secs, that server can suggest to the client. If configured
+    /// with non-zero value, clients should use this keep-alive instead of the client
+    /// configured keep-alive-timeout.
+    pub mqtt_keep_alive: Option<u32>,
+
+    /// MQTT Keep Alive factor, the final value of `mqtt_keep_alive` is computed by
+    /// multiplying the `mqtt_keep_alive` with this factor.
+    pub mqtt_keep_alive_factor: f32,
+
+    /// MQTT Receive-maximum, control the number of unacknowledged PUBLISH packets
+    /// server can receive and process concurrently for the client.
+    pub mqtt_receive_maximum: u16,
+
     // TODO
     /// Subscribe ack timeout, in secs, after receiving a subscribe/un-subscribe
     /// message, broker immediately sends corresponding ACK. If outbound queue to the
@@ -82,17 +106,6 @@ pub struct Config {
     /// client is full, tthis timeout will kick in. If broker cannot send an ACK
     /// within that timeout, session/connection shall be closed.
     pub publish_ack_timeout: Option<u32>,
-
-    /// Maximum packet size allowed by the broker, this shall be communicated with
-    /// remote client during handshake.
-    /// * **Default**: [Config::DEF_MQTT_MAX_PACKET_SIZE]
-    /// * **Mutable**: No
-    pub mqtt_max_packet_size: Option<u32>,
-
-    /// MQTT packets are drainded from queues and connections in batches, so that
-    /// all queues will get evenly processed. This parameter defines the batch size
-    /// while draining the message queues.
-    pub mqtt_msg_batch_size: Option<u32>,
 }
 
 impl Default for Config {
@@ -112,6 +125,9 @@ impl Default for Config {
             mqtt_flush_timeout: Some(Self::DEF_MQTT_FLUSH_TIMEOUT),
             mqtt_max_packet_size: Some(Self::DEF_MQTT_MAX_PACKET_SIZE),
             mqtt_msg_batch_size: Some(Self::DEF_MQTT_MSG_BATCH_SIZE),
+            mqtt_keep_alive: None,
+            mqtt_keep_alive_factor: Self::DEF_MQTT_KEEP_ALIVE_FACTOR,
+            mqtt_receive_maximum: Self::DEF_MQTT_RECEIVE_MAXIMUM,
             subscribe_ack_timeout: None,
             publish_ack_timeout: None,
         }
@@ -133,6 +149,10 @@ impl Config {
     const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
     /// Refer to [Config::mqtt_msg_batch_size]
     const DEF_MQTT_MSG_BATCH_SIZE: u32 = 1024; // default is 1MB.
+    /// Refer to [Config::mqtt_keep_alive_factor]
+    const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
+    /// Refer to [Config::mqtt_receive_maximum]
+    const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -183,6 +203,21 @@ impl Config {
             Some(val) => val,
             None => Self::DEF_MQTT_MSG_BATCH_SIZE,
         }
+    }
+
+    pub fn mqtt_keep_alive(&self) -> Option<u32> {
+        match self.mqtt_keep_alive {
+            Some(0) | None => None,
+            Some(val) => Some(val),
+        }
+    }
+
+    pub fn mqtt_keep_alive_factor(&self) -> f32 {
+        self.mqtt_keep_alive_factor
+    }
+
+    pub fn mqtt_receive_maximum(&self) -> u16 {
+        self.mqtt_receive_maximum
     }
 }
 

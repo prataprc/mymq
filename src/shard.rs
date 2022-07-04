@@ -435,6 +435,9 @@ impl Shard {
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
                     failed_sessions.push((client_id.clone(), err));
                 }
+                Err(err) if err.kind() == ErrorKind::Disconnected => {
+                    failed_sessions.push((client_id.clone(), err));
+                }
                 Err(err) => unreachable!("unexpected err {}", err),
             }
         }
@@ -489,26 +492,23 @@ impl Shard {
             Request::AddSession(args) => args,
             _ => unreachable!(),
         };
-        let RunLoop { sessions, miot, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
 
         let client_id = pkt.payload.client_id.clone();
 
         // TODO: handle pkt.flags.clean_start here.
 
-        // This queue is wired up with miot-thread. This queue carries queue::Packet,
-        // and there is a separate queue for every session.
-        let session = {
+        let (mut session, upstream, downstream) = {
+            // This queue is wired up with miot-thread. This queue carries queue::Packet,
+            // and there is a separate queue for every session.
             let (upstream, session_rx) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
                 queue::pkt_channel(size)
             };
-            let miot_tx = {
-                let client_id = client_id.clone();
-                let args = AddConnectionArgs { client_id, conn, addr, upstream };
-                allow_panic!(&self, miot.add_connection(args))
+            // This queue is wired up with miot-thread. This queue carries queue::Packet,
+            // and there is a separate queue for every session.
+            let (miot_tx, downstream) = {
+                let size = self.config.mqtt_msg_batch_size() as usize;
+                queue::pkt_channel(size)
             };
             let args = SessionArgs {
                 addr,
@@ -516,11 +516,26 @@ impl Shard {
                 miot_tx,
                 session_rx,
             };
-            Session::start(args, self.config.clone(), pkt)
+            (Session::start(args, self.config.clone(), &pkt), upstream, downstream)
         };
-        sessions.insert(client_id, session);
 
-        // TODO: send connack-success here.
+        // send back the connection acknowledgment CONNACK here.
+        let packet = v5::Packet::ConnAck(session.success_ack(&pkt, self));
+        session.in_messages(vec![queue::Message::new_client_ack(packet)]);
+        let (_, _) = session.flush_messages(); // add_connection will wake miot-thread.
+
+        let RunLoop { sessions, miot, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        {
+            let client_id = client_id.clone();
+            let args = AddConnectionArgs { client_id, conn, addr, upstream, downstream };
+            allow_panic!(&self, miot.add_connection(args));
+        }
+
+        sessions.insert(client_id, session);
 
         Response::Ok
     }
