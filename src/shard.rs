@@ -57,6 +57,11 @@ pub struct RunLoop {
     /// to Inner::Init
     miot: Miot,
 
+    /// Collection of sessions and corresponding clients managed by this shard.
+    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
+    // TODO: remove session only when Session::session_rx channel has disconnected.
+    sessions: BTreeMap<ClientID, Session>,
+
     /// Every shard has an input queue for queue::Message, which receives all locally
     /// hopping MQTT messages for sessions managed by this shard.
     msg_rx: queue::MsgRx,
@@ -64,10 +69,6 @@ pub struct RunLoop {
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::topic_filters
     topic_filters: TopicTrie,
-    /// Collection of sessions and corresponding clients managed by this shard.
-    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
-    // TODO: remove session only when Session::session_rx channel has disconnected.
-    sessions: BTreeMap<ClientID, Session>,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
@@ -254,7 +255,7 @@ pub enum Request {
     SetMiot(Miot),
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
-    FailedConnection { socket: queue::Socket, err: Error },
+    FlushConnection { socket: queue::Socket, err: Error },
     Close,
 }
 
@@ -303,11 +304,9 @@ impl Shard {
         Ok(())
     }
 
-    pub fn failed_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
+    pub fn flush_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
         match &self.inner {
-            Inner::Tx(_waker, tx) => {
-                tx.post(Request::FailedConnection { socket, err })?
-            }
+            Inner::Tx(_waker, tx) => tx.post(Request::FlushConnection { socket, err })?,
             _ => unreachable!(),
         };
 
@@ -405,8 +404,8 @@ impl Shard {
                 (q @ AddSession { .. }, Some(tx)) => {
                     allow_panic!(&self, tx.send(Ok(self.handle_add_session(q))));
                 }
-                (q @ FailedConnection { .. }, None) => {
-                    let _resp = self.handle_failed_connection(q);
+                (q @ FlushConnection { .. }, None) => {
+                    let _resp = self.handle_flush_connection(q);
                 }
                 (q @ Close, Some(tx)) => {
                     allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
@@ -428,11 +427,28 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        for (_, session) in sessions.iter_mut() {
-            session.route(self); // TODO: handle error
+        let mut failed_sessions = vec![];
+        for (client_id, session) in sessions.iter_mut() {
+            match session.route(self) {
+                Ok(()) => (),
+                Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                    failed_sessions.push((client_id.clone(), err));
+                }
+                Err(err) => unreachable!("unexpected err {}", err),
+            }
         }
-
         let _init = mem::replace(&mut self.inner, inner);
+
+        for (client_id, err) in failed_sessions {
+            let socket = {
+                let RunLoop { miot, .. } = match &mut self.inner {
+                    Inner::Main(run_loop) => run_loop,
+                    _ => unreachable!(),
+                };
+                allow_panic!(&self, miot.remove_connection(client_id))
+            };
+            self.handle_flush_connection(Request::FlushConnection { socket, err });
+        }
     }
 }
 
@@ -477,20 +493,20 @@ impl Shard {
             _ => unreachable!(),
         };
 
+        let client_id = pkt.payload.client_id.clone();
+
         // This queue is wired up with miot-thread. This queue carries queue::Packet,
         // and there is a separate queue for every session.
-        let (upstream, session_rx) = {
-            let size = self.config.mqtt_msg_batch_size() as usize;
-            queue::pkt_channel(size)
-        };
-        let client_id = pkt.payload.client_id.clone();
-        let miot_tx = {
-            let client_id = client_id.clone();
-            let args = AddConnectionArgs { client_id, conn, addr, upstream };
-            allow_panic!(&self, miot.add_connection(args))
-        };
-
         let session = {
+            let (upstream, session_rx) = {
+                let size = self.config.mqtt_msg_batch_size() as usize;
+                queue::pkt_channel(size)
+            };
+            let miot_tx = {
+                let client_id = client_id.clone();
+                let args = AddConnectionArgs { client_id, conn, addr, upstream };
+                allow_panic!(&self, miot.add_connection(args))
+            };
             let args = SessionArgs {
                 addr,
                 client_id: client_id.clone(),
@@ -499,24 +515,31 @@ impl Shard {
             };
             Session::start(args, self.config.clone(), pkt)
         };
-        sessions.insert(client_id.clone(), session);
+        sessions.insert(client_id, session);
 
         Response::Ok
     }
 
-    fn handle_failed_connection(&mut self, req: Request) -> Response {
+    fn handle_flush_connection(&mut self, req: Request) -> Response {
         use crate::flush::FlushConnectionArgs;
 
         let (socket, err) = match req {
-            Request::FailedConnection { socket, err } => (socket, err),
+            Request::FlushConnection { socket, err } => (socket, err),
             _ => unreachable!(),
         };
-        let RunLoop { flusher, .. } = match &mut self.inner {
+        let RunLoop { flusher, sessions, topic_filters, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        // NOTE: Session shall be removed when session_rx says disconnected.
+        match sessions.remove(&socket.client_id) {
+            Some(mut session) => {
+                session.remove_topic_filters(topic_filters);
+                session.close();
+            }
+            None => (),
+        }
+
         let args = FlushConnectionArgs { socket, err: Some(err) };
         allow_panic!(&self, flusher.flush_connection(args));
 

@@ -152,6 +152,7 @@ pub enum Request {
 pub enum Response {
     Ok,
     Downstream(queue::PktTx),
+    Removed(queue::Socket),
 }
 
 pub struct AddConnectionArgs {
@@ -181,11 +182,13 @@ impl Miot {
         }
     }
 
-    pub fn remove_connection(&self, client_id: ClientID) -> Result<()> {
+    pub fn remove_connection(&self, client_id: ClientID) -> Result<queue::Socket> {
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
-                thrd.request(Request::RemoveConnection { client_id })??;
-                Ok(())
+                match thrd.request(Request::RemoveConnection { client_id })?? {
+                    Response::Removed(socket) => Ok(socket),
+                    _ => unreachable!(),
+                }
             }
             _ => unreachable!(),
         }
@@ -224,7 +227,7 @@ impl Threadable for Miot {
                 false => (),
             };
 
-            // We do granular wake up, in read_conns and write_conns
+            // TODO: We do granular wake up, in read_conns and write_conns, remove this ?
             // allow_panic!(&self, self.as_shard().wake());
         }
 
@@ -301,6 +304,7 @@ impl Miot {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             _ => unreachable!(),
         };
+        let shard = shard.to_tx();
 
         let mut fail_queues = vec![];
         for (client_id, socket) in conns.iter_mut() {
@@ -308,15 +312,21 @@ impl Miot {
             match Self::read_packets(&prefix, &self.config, socket) {
                 Ok((_would_block, true)) => allow_panic!(&self, shard.wake()),
                 Ok((_would_block, false)) => (),
-                Err(err) => fail_queues.push((client_id.clone(), err)),
+                Err(err) => {
+                    error!("{} failed read_packets ...", prefix);
+                    fail_queues.push((client_id.clone(), err));
+                }
             }
         }
 
         for (client_id, err) in fail_queues.into_iter() {
-            error!("{} removing connection {} ...", self.prefix, err);
-
-            let socket = conns.remove(&client_id).unwrap();
-            allow_panic!(&self, shard.failed_connection(socket, err));
+            let req = Request::RemoveConnection { client_id };
+            match self.handle_remove_connection(req) {
+                Response::Removed(socket) => {
+                    allow_panic!(&self, shard.flush_connection(socket, err));
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -437,6 +447,7 @@ impl Miot {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             _ => unreachable!(),
         };
+        let shard = shard.to_tx();
 
         // if thread is closed conns will be empty.
         let mut fail_queues = vec![];
@@ -445,15 +456,21 @@ impl Miot {
             match Self::write_packets(&prefix, &self.config, socket) {
                 Ok(false) => allow_panic!(&self, shard.wake()),
                 Ok(_would_block) => (),
-                Err(err) => fail_queues.push((client_id.clone(), err)),
+                Err(err) => {
+                    error!("{} failed write_packets ...", prefix);
+                    fail_queues.push((client_id.clone(), err));
+                }
             }
         }
 
         for (client_id, err) in fail_queues.into_iter() {
-            let socket = conns.remove(&client_id).unwrap();
-            let prefix = format!("wconn:{}:{}", socket.addr, *client_id);
-            error!("{} removing connection {} ...", prefix, err);
-            err!(IPCFail, try: shard.failed_connection(socket, err)).ok();
+            let req = Request::RemoveConnection { client_id };
+            match self.handle_remove_connection(req) {
+                Response::Removed(socket) => {
+                    allow_panic!(&self, shard.flush_connection(socket, err));
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -612,6 +629,8 @@ impl Miot {
     }
 
     fn handle_remove_connection(&mut self, req: Request) -> Response {
+        error!("{} removing connection ...", self.prefix);
+
         let (poll, conns) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, .. }) => (poll, conns),
             _ => unreachable!(),
@@ -625,7 +644,7 @@ impl Miot {
         let mut socket = conns.remove(&client_id).unwrap();
         allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
 
-        Response::Ok
+        Response::Removed(socket)
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {

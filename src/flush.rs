@@ -1,4 +1,4 @@
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 
 use std::{thread, time};
 
@@ -211,7 +211,6 @@ impl Flusher {
         let now = time::Instant::now();
         let max_size = self.config.mqtt_max_packet_size();
         let flush_timeout = self.config.mqtt_flush_timeout();
-        let msg_batch_size = self.config.mqtt_msg_batch_size() as usize;
 
         let (mut socket, conn_err) = match req {
             Request::FlushConnection { socket, err } => (socket, err),
@@ -220,35 +219,26 @@ impl Flusher {
         let prefix = format!("{}:{}:{}", self.prefix, socket.addr, *socket.client_id);
 
         info!("{} flush connection at {:?}", prefix, now);
+        match rx_packets(&socket.wt.miot_rx, usize::MAX) {
+            (qs, _empty, false) => {
+                socket.wt.packets.extend_from_slice(&qs);
+                error!("{} unexpected fatality, usize::MAX exhausted", prefix);
+            }
+            (qs, _empty, true) => {
+                socket.wt.packets.extend_from_slice(&qs);
+                info!("{} flush last batch, qs:{}", prefix, qs.len());
+            }
+        }
 
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
         loop {
-            // TODO: is there a point in sending this upstream ? does it make a diffnce.
-            match Miot::send_upstream(&prefix, &mut socket) {
-                Ok((true, _wake)) if time::Instant::now() > timeout => break,
-                Ok((true, _wake)) => thread::sleep(SLEEP_10MS),
-                Ok((_would_block, _wake)) => break,
-                Err(err) if err.kind() == ErrorKind::RxClosed => break,
-                Err(err) => unreachable!("{}", err),
-            }
-        }
-        debug!("{} flushed packets upstream, newer ones shall be ignored", prefix);
-
-        loop {
             match Miot::flush_packets(&prefix, &self.config, &mut socket) {
-                Ok(true /*would_block*/) if time::Instant::now() > timeout => break,
+                Ok(true /*would_block*/) if time::Instant::now() > timeout => {
+                    error!("{} give up flush_packets after {:?}", prefix, timeout);
+                    break;
+                }
                 Ok(true) => thread::sleep(SLEEP_10MS),
-                Ok(false) => match rx_packets(&socket.wt.miot_rx, msg_batch_size) {
-                    (qs, _empty, false) => {
-                        socket.wt.packets.extend_from_slice(&qs);
-                        trace!("{} flush packets from upstream", prefix);
-                    }
-                    (qs, _empty, true) => {
-                        socket.wt.packets.extend_from_slice(&qs);
-                        info!("{} flush last batch, upstream finished", prefix);
-                        break;
-                    }
-                },
+                Ok(false) => break,
                 Err(err) if err.kind() == ErrorKind::Disconnected => {
                     warn!("{} stop flush, socket disconnected {}", prefix, err);
                     break;
@@ -259,7 +249,7 @@ impl Flusher {
 
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
         let code = match conn_err {
-            Some(code) => v5::DisconnReasonCode::try_from(code.kind() as u8).unwrap(),
+            Some(err) => v5::DisconnReasonCode::try_from(err.code() as u8).unwrap(),
             None => v5::DisconnReasonCode::NormalDisconnect,
         };
         send_disconnect(&prefix, timeout, max_size, code, &mut socket.conn).ok();

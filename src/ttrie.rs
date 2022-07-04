@@ -1,5 +1,8 @@
 use std::sync::{atomic::AtomicPtr, Arc};
 
+use crate::Result;
+use crate::TopicFilter;
+
 // <TopicFilter, (ClientID, shard_id)
 pub struct TopicTrie {
     inner: Arc<AtomicPtr<Inner>>,
@@ -18,6 +21,12 @@ impl Default for TopicTrie {
 
 impl TopicTrie {
     pub fn clone(&self) -> TopicTrie {
+        todo!()
+    }
+}
+
+impl TopicTrie {
+    pub fn unsubscribe(&self, _tfilter: &TopicFilter) -> Result<()> {
         todo!()
     }
 }

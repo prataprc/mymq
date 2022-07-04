@@ -110,7 +110,8 @@ pub struct ClientOut {
     // TODO: can we fold this into consensus seqno ?
     pub seqno: u64,
     // This index is essentially un-acked collection of inflight PUBLISH messages.
-    // All incoming PUBLISH messages will be indexed here using monotonically increasing
+    //
+    // All incoming messages will be indexed here using monotonically increasing
     // sequence number tracked by `ClientOut::seqno`.
     //
     // Note that before indexing message, its `seqno` shall be overwritten from
