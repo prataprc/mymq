@@ -30,13 +30,11 @@ impl Packetize for ConnectFlags {
 
         let (flags, n) = dec_field!(u8, stream, 0);
         let flags = ConnectFlags(flags);
-        flags.unwrap()?;
 
         Ok((flags, n))
     }
 
     fn encode(&self) -> Result<Blob> {
-        self.unwrap()?;
         self.0.encode()
     }
 }
@@ -58,17 +56,13 @@ impl ConnectFlags {
     }
 
     // return (clean_start, will_flag, will_qos, will_retain)
-    pub fn unwrap(&self) -> Result<(bool, bool, QoS, bool)> {
+    pub fn unwrap(&self) -> (bool, bool, QoS, bool) {
         let clean_start: bool = (self.0 & Self::CLEAN_START.0) > 0;
         let will_flag: bool = (self.0 & Self::WILL_FLAG.0) > 0;
-        let will_qos: QoS = (self.0 & Self::WILL_QOS_MASK >> 3).try_into()?;
+        let will_qos: QoS = (self.0 & Self::WILL_QOS_MASK >> 3).try_into().unwrap();
         let will_retain: bool = (self.0 & Self::WILL_RETAIN.0) > 0;
 
-        if (self.0 & 0b_0000_0001) > 0 {
-            err!(MalformedPacket, code: MalformedPacket, "{} flags {:0x?}", PP, self.0)?;
-        }
-
-        Ok((clean_start, will_flag, will_qos, will_retain))
+        (clean_start, will_flag, will_qos, will_retain)
     }
 
     pub fn is_will_flag(&self) -> bool {
@@ -152,6 +146,8 @@ impl Packetize for Connect {
     fn encode(&self) -> Result<Blob> {
         use crate::v5::{insert_fixed_header, PacketType};
 
+        self.validate()?;
+
         let mut data = Vec::with_capacity(64);
         data.extend_from_slice(self.protocol_name.encode()?.as_ref());
         data.extend_from_slice(u8::from(self.protocol_version).encode()?.as_ref());
@@ -210,6 +206,39 @@ impl Connect {
                 self.protocol_version
             )?;
         };
+
+        let flags = *self.flags;
+        if (flags & 0b_0000_0001) > 0 {
+            err!(MalformedPacket, code: MalformedPacket, "{} flags {:0x?}", PP, flags)?;
+        }
+        QoS::try_from((flags & ConnectFlags::WILL_QOS_MASK) >> 3)?;
+        if (flags & *ConnectFlags::WILL_FLAG) > 0 {
+            // TODO: Wonder why the spec. says that properites and payload MUST be
+            // specified
+            if self.payload.will_topic.is_none() {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "{} missing will-topic",
+                    PP
+                )?;
+            } else if self.payload.will_properties.is_none() {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "{} missing will-properties",
+                    PP
+                )?;
+            } else if self.payload.will_payload.is_none() {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "{} missing will-payload",
+                    PP
+                )?;
+            }
+        }
+
         let pld = &self.payload;
         if let Some(true) = pld.will_properties.as_ref().map(|p| p.is_utf8()) {
             if let Err(err) = std::str::from_utf8(pld.will_payload.as_ref().unwrap()) {

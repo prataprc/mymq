@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace};
+use log::{debug, info, trace};
 use mio::event::Events;
 use uuid::Uuid;
 
@@ -7,8 +7,9 @@ use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{rebalance, util, v5};
-use crate::{AppTx, Config, ConfigNode, Flusher, Hostable, Listener, Shard, TopicTrie};
+use crate::{AppTx, Config, ConfigNode, Hostable, TopicTrie};
 use crate::{Error, ErrorKind, Result};
+use crate::{Flusher, Listener, Shard, Ticker};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
 // TODO: Review `as` type-casting for numbers.
@@ -47,6 +48,8 @@ pub struct RunLoop {
     poll: mio::Poll,
     /// Listener thread for MQTT connections from remote/local clients.
     listener: Listener,
+    /// Ticker thread to periodically wake up other threads, defaul is 10ms.
+    ticker: Ticker,
     /// Flusher thread for MQTT connections from remote/local clients.
     flusher: Flusher,
     /// Total number of shards within this node.
@@ -65,6 +68,7 @@ pub struct RunLoop {
 pub struct FinState {
     pub state: ClusterState,
     pub listener: Listener,
+    pub ticker: Ticker,
     pub flusher: Flusher,
     pub shards: BTreeMap<u32, Shard>,
     pub topic_filters: TopicTrie,
@@ -91,10 +95,7 @@ impl Drop for Cluster {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => {
-                error!("{} invalid drop ...", self.prefix);
-                panic!("{} invalid drop ...", self.prefix);
-            }
+            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
@@ -124,10 +125,9 @@ impl Cluster {
             )?;
         }
 
-        let def = Cluster::default();
         let mut val = Cluster {
             name: format!("{}-cluster-init", config.name),
-            prefix: def.prefix.clone(),
+            prefix: String::default(),
             config,
             inner: Inner::Init,
         };
@@ -164,15 +164,16 @@ impl Cluster {
 
         let flusher_tx = flusher.to_tx();
         let topic_filters = TopicTrie::default();
-        let cluster = Cluster {
+        let mut cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 state,
 
                 poll,
                 listener,
+                ticker: Ticker::default(),
                 flusher,
                 shards,
 
@@ -182,18 +183,23 @@ impl Cluster {
                 app_tx: app_tx.clone(),
             }),
         };
+        cluster.prefix = cluster.prefix();
         let mut thrd = Thread::spawn(&self.prefix, cluster);
         thrd.set_waker(Arc::clone(&waker));
 
-        let cluster = Cluster {
+        let mut cluster = Cluster {
             name: format!("{}-cluster-handle", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
+        cluster.prefix = cluster.prefix();
+
         {
-            let mut shards = BTreeMap::default();
+            let mut ticker_shards = vec![];
             let mut shard_queues = BTreeMap::default();
+
+            let mut shards = BTreeMap::default();
             for shard_id in 0..self.config.num_shards() {
                 let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = {
@@ -204,7 +210,10 @@ impl Cluster {
                     };
                     Shard::from_config(config, shard_id)?.spawn(args, app_tx.clone())?
                 };
+
                 shard_queues.insert(shard.shard_id, shard.to_msg_tx());
+                ticker_shards.push(shard.to_tx());
+
                 shards.insert(shard_id, shard);
             }
 
@@ -220,9 +229,12 @@ impl Cluster {
                 listener.spawn(clust_tx, app_tx.clone())?
             };
 
+            let ticker = Ticker::from_config(self.config.clone())?
+                .spawn(ticker_shards, app_tx.clone())?;
+
             match &cluster.inner {
                 Inner::Handle(_waker, thrd) => {
-                    thrd.request(Request::Set { shards, listener })??;
+                    thrd.request(Request::Set { listener, ticker, shards })??;
                 }
                 _ => unreachable!(),
             }
@@ -239,18 +251,21 @@ impl Cluster {
             Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
             _ => unreachable!(),
         };
-        Cluster {
+        let mut val = Cluster {
             name: format!("{}-cluster-tx", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner,
-        }
+        };
+        val.prefix = val.prefix();
+        val
     }
 }
 
 pub enum Request {
     Set {
         listener: Listener,
+        ticker: Ticker,
         shards: BTreeMap<u32, Shard>,
     },
     AddConnection(AddConnectionArgs),
@@ -267,7 +282,7 @@ pub struct AddConnectionArgs {
     pub pkt: v5::Connect,
 }
 
-// calls to interfacw with cluster-thread.
+// calls to interface with cluster-thread.
 impl Cluster {
     pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
@@ -401,7 +416,8 @@ impl Cluster {
         };
 
         match req {
-            Request::Set { listener, shards } => {
+            Request::Set { listener, ticker, shards } => {
+                run_loop.ticker = ticker;
                 run_loop.listener = listener;
                 run_loop.shards = shards;
             }
@@ -467,6 +483,9 @@ impl Cluster {
                 let listener = mem::replace(&mut run_loop.listener, Listener::default())
                     .close_wait();
 
+                let ticker =
+                    mem::replace(&mut run_loop.ticker, Ticker::default()).close_wait();
+
                 let flusher =
                     mem::replace(&mut run_loop.flusher, Flusher::default()).close_wait();
 
@@ -475,6 +494,7 @@ impl Cluster {
                 let fin_state = FinState {
                     state: run_loop.state,
                     listener,
+                    ticker,
                     flusher,
                     shards,
                     topic_filters: run_loop.topic_filters,

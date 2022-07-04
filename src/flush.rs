@@ -49,13 +49,27 @@ impl Default for Flusher {
     }
 }
 
+impl Drop for Flusher {
+    fn drop(&mut self) {
+        use std::mem;
+
+        let inner = mem::replace(&mut self.inner, Inner::Init);
+        match inner {
+            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Handle(_thrd) => info!("{} drop ...", self.prefix),
+            Inner::Tx(_tx) => info!("{} drop ...", self.prefix),
+            Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+        }
+    }
+}
+
 impl Flusher {
     /// Create a flusher from configuration. Flusher shall be in `Init` state. To start
     /// this flusher thread call [Flusher::spawn].
     pub fn from_config(config: Config) -> Result<Flusher> {
-        let def = Flusher::default();
         let mut val = Flusher {
-            name: def.name.clone(),
+            name: format!("{}-flush-init", config.name),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -72,7 +86,7 @@ impl Flusher {
 
         let mut flush = Flusher {
             name: format!("{}-flush-main", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop { app_tx }),
         };
@@ -81,7 +95,7 @@ impl Flusher {
 
         let mut flush = Flusher {
             name: format!("{}-flush-handle", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
@@ -101,7 +115,7 @@ impl Flusher {
 
         let mut flush = Flusher {
             name: format!("{}-flush-tx", self.config.name),
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner,
         };
@@ -127,7 +141,7 @@ pub struct FlushConnectionArgs {
     pub err: Option<Error>,
 }
 
-// calls to interfacw with cluster-thread.
+// calls to interface with flusher-thread.
 impl Flusher {
     pub fn flush_connection(&self, args: FlushConnectionArgs) -> Result<()> {
         match &self.inner {

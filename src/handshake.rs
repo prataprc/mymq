@@ -5,7 +5,7 @@ use std::{net, thread, time};
 use crate::packet::{send_connack, MQTTRead};
 use crate::thread::{Rx, Threadable};
 use crate::{v5, Cluster, Config, SLEEP_10MS};
-use crate::{Error, ErrorKind};
+use crate::{Error, ErrorKind, ReasonCode};
 
 pub struct Handshake {
     pub prefix: String,
@@ -20,7 +20,7 @@ impl Threadable for Handshake {
     type Resp = ();
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
-        use crate::{cluster::AddConnectionArgs, v5::ConnackReasonCode as RC};
+        use crate::cluster::AddConnectionArgs;
 
         let now = time::Instant::now();
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
@@ -38,11 +38,11 @@ impl Threadable for Handshake {
                 Ok((val, _would_block)) => val,
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                     error!("{}, fail read, error {}", prefix, err);
-                    break (RC::MalformedPacket, true, None);
+                    break (err.code(), true, None);
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
                     error!("{}, fail read, error {}", prefix, err);
-                    break (RC::ProtocolError, true, None);
+                    break (err.code(), true, None);
                 }
                 Err(err) => unreachable!("unexpected error {}", err),
             };
@@ -58,32 +58,33 @@ impl Threadable for Handshake {
                 }
                 MQTTRead::Fin { .. } => match packetr.parse() {
                     Ok(v5::Packet::Connect(val)) => {
-                        break (RC::Success, false, Some(val))
+                        break (ReasonCode::Success, false, Some(val))
                     }
                     Ok(pkt) => {
                         let pt = pkt.to_packet_type();
                         error!("{}, unexpect {:?} on new connection", prefix, pt);
-                        break (RC::ProtocolError, true, None);
+                        break (ReasonCode::ProtocolError, true, None);
                     }
                     Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                         error!("{}, fail parse, error {}", prefix, err);
-                        break (RC::MalformedPacket, true, None);
+                        break (err.code(), true, None);
                     }
                     Err(err) if err.kind() == ErrorKind::ProtocolError => {
                         error!("{}, fail parse, error {}", prefix, err);
-                        break (RC::ProtocolError, true, None);
+                        break (err.code(), true, None);
                     }
                     Err(err) => unreachable!("unexpected error {}", err),
                 },
                 _ => {
                     error!("{}, fail after {:?}", prefix, time::Instant::now());
-                    break (RC::UnspecifiedError, true, None);
+                    break (ReasonCode::UnspecifiedError, true, None);
                 }
             };
         };
 
         if connack {
             // if error, connect-ack shall be sent right here and ignored.
+            let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
             send_connack(&prefix, code, &conn, timeout, max_size).ok();
         } else if let Some(pkt_connect) = pkt_connect {
             let args = AddConnectionArgs { conn, addr, pkt: pkt_connect };

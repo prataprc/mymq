@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace};
+use log::{debug, info, trace};
 use uuid::Uuid;
 
 use std::{collections::BTreeMap, net, sync::Arc};
@@ -108,10 +108,7 @@ impl Drop for Shard {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_hndl) => {
-                error!("{} invalid drop ...", self.prefix);
-                panic!("{} invalid drop ...", self.prefix);
-            }
+            Inner::Handle(_hndl) => info!("{} drop ...", self.prefix),
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::MsgTx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
@@ -132,7 +129,7 @@ impl Shard {
     pub fn from_config(config: Config, shard_id: u32) -> Result<Shard> {
         let def = Shard::default();
         let mut val = Shard {
-            name: def.name.clone(),
+            name: format!("{}-shard-init", config.name),
             shard_id,
             uuid: def.uuid,
             prefix: def.prefix.clone(),
@@ -159,11 +156,11 @@ impl Shard {
             let size = self.config.mqtt_msg_batch_size() * self.config.num_shards();
             queue::msg_channel(size as usize)
         };
-        let shard = Shard {
+        let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
@@ -179,17 +176,19 @@ impl Shard {
                 app_tx: app_tx.clone(),
             }),
         };
+        shard.prefix = shard.prefix();
         let mut thrd = Thread::spawn(&self.prefix, shard);
         thrd.set_waker(Arc::clone(&waker));
 
-        let shard = Shard {
+        let mut shard = Shard {
             name: format!("{}-shard-handle", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(Handle { waker, thrd, msg_tx }),
         };
+        shard.prefix = shard.prefix();
         {
             let (config, miot_id) = (self.config.clone(), self.shard_id);
             let miot = {
@@ -222,11 +221,11 @@ impl Shard {
             name: format!("{}-shard-tx", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner,
         };
-        shard.prefix = self.prefix();
+        shard.prefix = shard.prefix();
         shard
     }
 
@@ -240,14 +239,16 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        Shard {
-            name: format!("{}-shard-tx", self.config.name),
+        let mut shard = Shard {
+            name: format!("{}-shard-msg-tx", self.config.name),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
             inner,
-        }
+        };
+        shard.prefix = shard.prefix();
+        shard
     }
 }
 
@@ -269,7 +270,7 @@ pub struct AddSessionArgs {
     pub pkt: v5::Connect,
 }
 
-// calls to interfacw with cluster-thread.
+// calls to interface with shard-thread.
 impl Shard {
     pub fn wake(&self) -> Result<()> {
         match &self.inner {
@@ -495,6 +496,8 @@ impl Shard {
 
         let client_id = pkt.payload.client_id.clone();
 
+        // TODO: handle pkt.flags.clean_start here.
+
         // This queue is wired up with miot-thread. This queue carries queue::Packet,
         // and there is a separate queue for every session.
         let session = {
@@ -516,6 +519,8 @@ impl Shard {
             Session::start(args, self.config.clone(), pkt)
         };
         sessions.insert(client_id, session);
+
+        // TODO: send connack-success here.
 
         Response::Ok
     }

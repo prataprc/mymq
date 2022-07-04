@@ -1,12 +1,40 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net;
 
-use crate::{queue, v5, ClientID, Config, Shard, TopicFilter, TopicTrie};
+use crate::{queue, v5, ClientID, Config, Shard, TopicFilter, TopicName, TopicTrie};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
-// set to 0.
+//      set to 0.
 // TODO Revisit 2.2.1 Packet Identifier
+//
+// *Will Message*
+//
+// TODO The Will Message MUST be published after the Network Connection is subsequently
+//      closed and either the Will Delay Interval has elapsed or the Session ends,
+//      unless the Will Message has been deleted by the Server on receipt of a
+//      DISCONNECT packet with Reason Code 0x00 (Normal disconnection) or a new
+//      Network Connection for the ClientID is opened before the Will Delay Interval
+//      has elapsed.
+//
+//      Situations in which the Will Message is published include, but are not
+//      limited to:
+//      * An I/O error or network failure detected by the Server.
+//      * The Client fails to communicate within the Keep Alive time.
+//      * The Client closes the Network Connection without first sending a DISCONNECT
+//        packet with a Reason Code 0x00 (Normal disconnection).
+//      * The Server closes the Network Connection without first receiving a
+//        DISCONNECT packet with a Reason Code 0x00 (Normal disconnection).
+// TODO The Will Message MUST be removed from the stored Session State in the Server
+//      once it has been published or the Server has received a DISCONNECT packet
+//      with a Reason Code of 0x00 (Normal disconnection) from the Client.
+// TODO In the case of a Server shutdown or failure, the Server MAY defer publication
+//      of Will Messages until a subsequent restart. If this happens, there might be
+//      a delay between the time the Server experienced failure and when the Will
+//      Message is published.
+// TODO If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00)
+//      If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00),
+//      1 (0x01), or 2 (0x02) [MQTT-3.1.2-12]. A value of 3 (0x03) is a Malformed Packet.
 
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
@@ -33,6 +61,9 @@ pub struct Session {
     // the ack is sent back, entry shall be removed from this index.
     timestamp: BTreeMap<ClientID, (u32, u64)>,
 
+    // MQTT Will-Delay-Publish
+    will_message: Option<WillMessage>,
+
     state: SessionState,
 }
 
@@ -52,8 +83,16 @@ struct Subscription {
     topic_filter: TopicFilter,
 }
 
+struct WillMessage {
+    retain: bool,
+    qos: v5::QoS,
+    properties: Option<v5::WillProperties>,
+    topic: TopicName,
+    payload: Option<Vec<u8>>,
+}
+
 impl Session {
-    pub fn start(args: SessionArgs, config: Config, _pkt: v5::Connect) -> Session {
+    pub fn start(args: SessionArgs, config: Config, pkt: v5::Connect) -> Session {
         let cinp = queue::ClientInp {
             seqno: 0,
             index: BTreeMap::default(),
@@ -70,17 +109,31 @@ impl Session {
             cout,
         };
 
+        let (_clean_start, wflag, qos, retain) = pkt.flags.unwrap();
+        let will_message = match wflag {
+            true => Some(WillMessage {
+                retain,
+                qos,
+                properties: pkt.payload.will_properties,
+                topic: pkt.payload.will_topic.unwrap(),
+                payload: pkt.payload.will_payload,
+            }),
+            false => None,
+        };
+
         Session {
             addr: args.addr,
-            miot_tx: args.miot_tx,
-            session_rx: args.session_rx,
             prefix: format!("session:{}", args.addr),
             config,
 
-            state,
-
+            miot_tx: args.miot_tx,
+            session_rx: args.session_rx,
             cinp,
             timestamp: BTreeMap::default(),
+
+            will_message,
+
+            state,
         }
     }
 

@@ -74,10 +74,7 @@ impl Drop for Miot {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => {
-                error!("{} invalid drop ...", self.prefix);
-                panic!("{} invalid drop ...", self.prefix);
-            }
+            Inner::Handle(_waker, _thrd) => info!("{} invalid drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
@@ -90,9 +87,8 @@ impl Miot {
     /// Create a miot thread from configuration. Miot shall be in `Init` state, to start
     /// the miot thread call [Miot::spawn].
     pub fn from_config(config: Config, miot_id: u32) -> Result<Miot> {
-        let m = Miot::default();
         let mut val = Miot {
-            name: m.name.clone(),
+            name: format!("{}-miot-init", config.name),
             miot_id,
             prefix: String::default(),
             config: config.clone(),
@@ -113,10 +109,10 @@ impl Miot {
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
-        let miot = Miot {
+        let mut miot = Miot {
             name: format!("{}-miot-main", self.config.name),
             miot_id: self.miot_id,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
@@ -128,16 +124,18 @@ impl Miot {
                 app_tx: app_tx.clone(),
             }),
         };
+        miot.prefix = miot.prefix();
         let mut thrd = Thread::spawn(&self.prefix, miot);
         thrd.set_waker(Arc::clone(&waker));
 
-        let val = Miot {
+        let mut val = Miot {
             name: format!("{}-miot-handle", self.config.name),
             miot_id: self.miot_id,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
+        val.prefix = val.prefix();
 
         Ok(val)
     }
@@ -162,7 +160,7 @@ pub struct AddConnectionArgs {
     pub upstream: queue::PktTx,
 }
 
-// calls to interface with listener-thread, and shall wake the thread
+// calls to interface with miot-thread, and shall wake the thread
 impl Miot {
     pub fn wake(&self) -> Result<()> {
         match &self.inner {
@@ -695,13 +693,6 @@ impl Miot {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
-            _ => unreachable!(),
-        }
-    }
-
-    fn as_shard(&self) -> &Shard {
-        match &self.inner {
-            Inner::Main(RunLoop { shard, .. }) => shard,
             _ => unreachable!(),
         }
     }

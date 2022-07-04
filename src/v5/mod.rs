@@ -104,7 +104,7 @@ mod unsuback;
 
 pub use auth::Auth;
 pub use connack::{ConnAck, ConnackReasonCode};
-pub use connect::Connect;
+pub use connect::{Connect, WillProperties};
 pub use disconnect::{DisconnReasonCode, Disconnect};
 pub use ping::{PingReq, PingResp};
 pub use pubaclc::Pub;

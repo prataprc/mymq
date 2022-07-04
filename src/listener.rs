@@ -66,10 +66,7 @@ impl Drop for Listener {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => {
-                error!("{} invalid drop ...", self.prefix);
-                panic!("{} invalid drop ...", self.prefix);
-            }
+            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
@@ -88,7 +85,7 @@ impl Listener {
     pub fn from_config(config: Config) -> Result<Listener> {
         let def = Listener::default();
         let mut val = Listener {
-            name: def.name.clone(),
+            name: format!("{}-listener-init", config.name),
             port: config.port.unwrap_or(def.port),
             prefix: String::default(),
             config,
@@ -118,7 +115,7 @@ impl Listener {
         let mut listener = Listener {
             name: format!("{}-listener-main", self.config.name),
             port: self.port,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
@@ -135,7 +132,7 @@ impl Listener {
         let mut listener = Listener {
             name: format!("{}-listener-handle", self.config.name),
             port: self.port,
-            prefix: self.prefix.clone(),
+            prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
