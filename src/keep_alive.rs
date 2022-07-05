@@ -25,7 +25,7 @@ impl KeepAlive {
         self.interval
     }
 
-    pub fn expired(&self) -> Result<()> {
+    pub fn check_expired(&self) -> Result<()> {
         match self.interval {
             Some(interval) => {
                 let now = time::Duration::from_secs(interval as u64);

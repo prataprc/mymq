@@ -21,9 +21,12 @@ impl TryFrom<u8> for MqttProtocol {
         match val {
             4 => Ok(MqttProtocol::V4),
             5 => Ok(MqttProtocol::V5),
-            val => {
-                err!(PacketDecode, code: UnsupportedProtocolVersion, "found: {:?}", val)?
-            }
+            val => err!(
+                MalformedPacket,
+                code: UnsupportedProtocolVersion,
+                "found: {:?}",
+                val
+            )?,
         }
     }
 }
@@ -247,7 +250,7 @@ impl Packetize for VarU32 {
                 data[3] = ((val >> 21) & 0x7f_u32) as u8;
                 4
             }
-            val => err!(PacketEncode, desc: "VarU32::encode({})", val)?,
+            val => err!(ProtocolError, desc: "VarU32::encode({})", val)?,
         };
 
         Ok(Blob::Small { data, size })
@@ -379,12 +382,12 @@ impl Packetize for String {
 
     fn encode(&self) -> Result<Blob> {
         if self.chars().any(util::is_invalid_utf8_code_point) {
-            return err!(PacketEncode, desc: "String::encode invalid utf8 string");
+            return err!(ProtocolError, desc: "String::encode invalid utf8 string");
         }
 
         match self.len() {
             n if n > (u16::MAX as usize) => {
-                err!(PacketEncode, desc: "String::encode too large {:?}", n)
+                err!(ProtocolError, desc: "String::encode too large {:?}", n)
             }
             n if n < 30 => {
                 let mut data = [0_u8; 32];
@@ -417,7 +420,7 @@ impl Packetize for Vec<u8> {
     fn encode(&self) -> Result<Blob> {
         match self.len() {
             n if n > (u16::MAX as usize) => {
-                err!(PacketEncode, desc: "Vector::encode({})", n)
+                err!(ProtocolError, desc: "Vector::encode({})", n)
             }
             n => {
                 let mut data = Vec::with_capacity(2 + n);

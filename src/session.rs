@@ -234,33 +234,33 @@ impl Session {
 }
 
 impl Session {
-    pub fn route(&mut self, shard: &Shard) -> Result<()> {
+    pub fn route_packets(&mut self, shard: &Shard) -> Result<()> {
         use crate::miot::rx_packets;
 
         match rx_packets(&self.session_rx, self.config.mqtt_msg_batch_size() as usize) {
             (pkts, _empty, true) => {
-                self.route_packets(shard, pkts)?;
+                self.handle_packets(shard, pkts)?;
                 err!(Disconnected, desc: "{} downstream disconnect", self.prefix)?
             }
-            (pkts, _empty, _disconnected) => self.route_packets(shard, pkts)?,
+            (pkts, _empty, _disconnected) => self.handle_packets(shard, pkts)?,
         }
 
-        self.keep_alive.expired()
+        self.keep_alive.check_expired()
     }
 
-    fn route_packets(&mut self, shard: &Shard, pkts: Vec<v5::Packet>) -> Result<()> {
+    fn handle_packets(&mut self, shard: &Shard, pkts: Vec<v5::Packet>) -> Result<()> {
         if pkts.len() > 0 {
             self.keep_alive.live();
         }
 
         for pkt in pkts.into_iter() {
-            self.route_packet(shard, pkt)?
+            self.handle_packet(shard, pkt)?
         }
 
         Ok(())
     }
 
-    fn route_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<()> {
+    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<()> {
         self.check_protocol_error(&pkt)?;
 
         Ok(())
@@ -286,6 +286,10 @@ impl Session {
             ),
             _ => Ok(()),
         }
+    }
+
+    pub fn route_messages(&mut self) -> Result<()> {
+        todo!()
     }
 }
 

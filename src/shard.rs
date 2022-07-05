@@ -348,7 +348,8 @@ impl Threadable for Shard {
                 false => (),
             };
 
-            self.route();
+            self.route_packets();
+            self.route_messages();
         }
 
         self.handle_close(Request::Close);
@@ -420,7 +421,9 @@ impl Shard {
         (empty, disconnected)
     }
 
-    fn route(&mut self) {
+    // For each session interface convert packets to messages and route them to other
+    // shards/bridges and consume messages from other shards.
+    fn route_packets(&mut self) {
         let mut inner = mem::replace(&mut self.inner, Inner::Init);
         let RunLoop { sessions, .. } = match &mut inner {
             Inner::Main(run_loop) => run_loop,
@@ -429,29 +432,62 @@ impl Shard {
 
         let mut failed_sessions = vec![];
         for (client_id, session) in sessions.iter_mut() {
-            match session.route(self) {
+            match session.route_packets(self) {
                 Ok(()) => (),
-                Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                    failed_sessions.push((client_id.clone(), err));
-                }
-                Err(err) if err.kind() == ErrorKind::Disconnected => {
-                    failed_sessions.push((client_id.clone(), err));
-                }
-                Err(err) => unreachable!("unexpected err {}", err),
+                Err(err) => failed_sessions.push((client_id.clone(), err)),
             }
         }
         let _init = mem::replace(&mut self.inner, inner);
 
         for (client_id, err) in failed_sessions {
-            let socket = {
-                let RunLoop { miot, .. } = match &mut self.inner {
-                    Inner::Main(run_loop) => run_loop,
-                    _ => unreachable!(),
-                };
-                allow_panic!(&self, miot.remove_connection(&client_id))
+            let RunLoop { miot, .. } = match &mut self.inner {
+                Inner::Main(run_loop) => run_loop,
+                _ => unreachable!(),
             };
-            self.handle_flush_connection(Request::FlushConnection { socket, err });
+            match allow_panic!(&self, miot.remove_connection(&client_id)) {
+                Some(socket) => {
+                    let req = Request::FlushConnection { socket, err };
+                    self.handle_flush_connection(req)
+                }
+                None => (),
+            }
         }
+    }
+
+    // For each session interface with miot pkt_channels to read/write packets.
+    fn route_messages(&mut self) {
+        todo!()
+        //let mut inner = mem::replace(&mut self.inner, Inner::Init);
+        //let RunLoop { sessions, .. } = match &mut inner {
+        //    Inner::Main(run_loop) => run_loop,
+        //    _ => unreachable!(),
+        //};
+
+        //let mut failed_sessions = vec![];
+        //for (client_id, session) in sessions.iter_mut() {
+        //    match session.route_packets(self) {
+        //        Ok(()) => (),
+        //        Err(err) if err.kind() == ErrorKind::ProtocolError => {
+        //            failed_sessions.push((client_id.clone(), err));
+        //        }
+        //        Err(err) if err.kind() == ErrorKind::Disconnected => {
+        //            failed_sessions.push((client_id.clone(), err));
+        //        }
+        //        Err(err) => unreachable!("unexpected err {}", err),
+        //    }
+        //}
+        //let _init = mem::replace(&mut self.inner, inner);
+
+        //for (client_id, err) in failed_sessions {
+        //    let socket = {
+        //        let RunLoop { miot, .. } = match &mut self.inner {
+        //            Inner::Main(run_loop) => run_loop,
+        //            _ => unreachable!(),
+        //        };
+        //        allow_panic!(&self, miot.remove_connection(&client_id))
+        //    };
+        //    self.handle_flush_connection(Request::FlushConnection { socket, err });
+        //}
     }
 }
 

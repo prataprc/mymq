@@ -90,8 +90,7 @@ pub type SubscribedTrie = TopicTrie<TopicFilter, (ClientID, u32)>; // (_, shard_
 pub type RetainedTrie = TopicTrie<TopicName, v5::Packet>;
 
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
-/// following error-kind: `ProtocolError`, `PacketEncode`, `PacketDecode`,
-/// `MalformedPacket`.
+/// following error-kind: `ProtocolError`, `MalformedPacket`.
 pub trait Packetize: Sized {
     /// Deserialize bytes and construct a packet or packet's field. Upon error, it is
     /// expected that the stream is left at meaningful boundry to re-detect the error.

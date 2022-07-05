@@ -257,26 +257,17 @@ impl Error {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorKind {
     NoError,
-    // error that leads to cluster shutdown
-    Fatal,
     // general error
     InvalidInput,
-    FailConvert,
     // mqtt errors
     MalformedPacket,
     ProtocolError,
-    PacketEncode,
-    PacketDecode,
     UnsupportedProtocolVersion,
     InsufficientBytes,
-    PayloadTooLong,
     SessionTakenOver,
     // network error
-    WouldBlock,
     Disconnected,
-    BadPacket,
     // thread / ipc error
-    ThreadFail,
     IPCFail,
     RxClosed,
     TxFinish,
@@ -292,24 +283,16 @@ impl fmt::Display for ErrorKind {
         match self {
             NoError => write!(f, "NoError"),
             // general error
-            Fatal => write!(f, "Fatal"),
             InvalidInput => write!(f, "InvalidInput"),
-            FailConvert => write!(f, "FailConvert"),
             // mqtt errors
             ProtocolError => write!(f, "ProtocolError"),
-            PacketEncode => write!(f, "PacketEncode"),
-            PacketDecode => write!(f, "PacketDecode"),
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
             MalformedPacket => write!(f, "MalformedPacket"),
-            PayloadTooLong => write!(f, "PayloadTooLong"),
             SessionTakenOver => write!(f, "SessionTakenOver"),
             // network error
-            WouldBlock => write!(f, "WouldBlock"),
             Disconnected => write!(f, "Disconnected"),
-            BadPacket => write!(f, "BadPacket"),
             // thread / ipc error
-            ThreadFail => write!(f, "ThreadFail"),
             IPCFail => write!(f, "IPCFail"),
             RxClosed => write!(f, "RxClosed"),
             TxFinish => write!(f, "TxFinish"),

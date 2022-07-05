@@ -288,6 +288,6 @@ where
 
     let ploc: &path::Path = loc.as_ref();
     let data = err!(IOError, try: fs::read(ploc), "reading config from {:?}", ploc)?;
-    let s = err!(FailConvert, try: from_utf8(&data), "config not utf8 {:?}", ploc)?;
-    err!(FailConvert, try: toml::from_str(s), "config not toml {:?}", ploc)
+    let s = err!(InvalidInput, try: from_utf8(&data), "config not utf8 {:?}", ploc)?;
+    err!(InvalidInput, try: toml::from_str(s), "config not toml {:?}", ploc)
 }
