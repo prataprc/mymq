@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, net, ops::Deref, sync::Arc, time};
 
 use crate::packet::{MQTTRead, MQTTWrite};
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{queue, v5, AppTx, ClientID, Config, Packetize, Shard};
+use crate::{socket, v5, AppTx, ClientID, Config, Packetize, Shard, Socket};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -39,7 +39,7 @@ pub struct RunLoop {
     /// next available token for connections
     next_token: mio::Token,
     /// collection of all active socket connections, and its associated data.
-    conns: BTreeMap<ClientID, queue::Socket>,
+    conns: BTreeMap<ClientID, Socket>,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
@@ -149,15 +149,15 @@ pub enum Request {
 
 pub enum Response {
     Ok,
-    Removed(queue::Socket),
+    Removed(Socket),
 }
 
 pub struct AddConnectionArgs {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,
     pub addr: net::SocketAddr,
-    pub upstream: queue::PktTx,
-    pub downstream: queue::PktRx,
+    pub upstream: socket::PktTx,
+    pub downstream: socket::PktRx,
     pub client_max_packet_size: u32,
 }
 
@@ -179,7 +179,7 @@ impl Miot {
         }
     }
 
-    pub fn remove_connection(&self, id: &ClientID) -> Result<Option<queue::Socket>> {
+    pub fn remove_connection(&self, id: &ClientID) -> Result<Option<Socket>> {
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
                 let req = Request::RemoveConnection { client_id: id.clone() };
@@ -333,7 +333,7 @@ impl Miot {
     fn read_packets(
         prefix: &str,
         config: &Config,
-        socket: &mut queue::Socket,
+        socket: &mut Socket,
     ) -> Result<(bool, bool)> {
         let msg_batch_size = config.mqtt_msg_batch_size() as usize;
 
@@ -369,7 +369,7 @@ impl Miot {
     fn read_packet(
         prefix: &str,
         config: &Config,
-        socket: &mut queue::Socket,
+        socket: &mut Socket,
     ) -> Result<(Option<v5::Packet>, bool)> {
         use crate::packet::MQTTRead::{Fin, Header, Init, Remain};
         use std::mem;
@@ -403,10 +403,7 @@ impl Miot {
 
     // return (would_block,wake)
     // RxClosed, if the receiving end of the queue, in shard/session, has closed.
-    pub fn send_upstream(
-        prefix: &str,
-        socket: &mut queue::Socket,
-    ) -> Result<(bool, bool)> {
+    pub fn send_upstream(prefix: &str, socket: &mut Socket) -> Result<(bool, bool)> {
         use std::sync::mpsc;
 
         let mut iter = {
@@ -475,11 +472,7 @@ impl Miot {
     // write packets to connection, return (would_block,wake)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
     // TxFinish, if the transmitting end of the queue, in shard/session, has closed.
-    fn write_packets(
-        prefix: &str,
-        config: &Config,
-        socket: &mut queue::Socket,
-    ) -> Result<bool> {
+    fn write_packets(prefix: &str, config: &Config, socket: &mut Socket) -> Result<bool> {
         let msg_batch_size = config.mqtt_msg_batch_size() as usize;
 
         // before reading from socket, send remaining packets to connection.
@@ -506,7 +499,7 @@ impl Miot {
     pub fn flush_packets(
         prefix: &str,
         config: &Config,
-        socket: &mut queue::Socket,
+        socket: &mut Socket,
     ) -> Result<bool> {
         use std::mem;
 
@@ -544,11 +537,7 @@ impl Miot {
 
     // return (would_block,)
     // Disconnected, if connection has gone bad or attempted maximum retries on socket.
-    fn write_packet(
-        prefix: &str,
-        config: &Config,
-        socket: &mut queue::Socket,
-    ) -> Result<bool> {
+    fn write_packet(prefix: &str, config: &Config, socket: &mut Socket) -> Result<bool> {
         use crate::packet::MQTTWrite::{Fin, Init, Remain};
         use std::mem;
 
@@ -607,20 +596,20 @@ impl Miot {
         let interests = Interest::READABLE | Interest::WRITABLE;
         allow_panic!(&self, poll.registry().register(&mut conn, token, interests));
 
-        let rd = queue::Source {
+        let rd = socket::Source {
             pr: MQTTRead::new(self.config.mqtt_max_packet_size()),
             timeout: None,
             session_tx,
             packets: Vec::default(),
         };
-        let wt = queue::Sink {
+        let wt = socket::Sink {
             pw: MQTTWrite::new(&[], client_max_packet_size),
             timeout: None,
             miot_rx,
             packets: Vec::default(),
         };
         let id = client_id.clone();
-        let socket = queue::Socket { client_id, conn, addr, token, rd, wt };
+        let socket = socket::Socket { client_id, conn, addr, token, rd, wt };
         conns.insert(id, socket);
 
         Response::Ok
@@ -709,7 +698,7 @@ impl Miot {
 }
 
 /// Return (requests, empty, disconnected)
-pub fn rx_packets(rx: &queue::PktRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
+pub fn rx_packets(rx: &socket::PktRx, max: usize) -> (Vec<v5::Packet>, bool, bool) {
     use std::sync::mpsc;
 
     let mut reqs = vec![];

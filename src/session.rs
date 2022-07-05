@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::{net, sync::mpsc};
 
-use crate::{queue, v5};
+use crate::{message, socket, v5};
 use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{KeepAlive, Shard};
+use crate::{KeepAlive, Message, PktRx, PktTx, Shard};
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
@@ -74,8 +74,8 @@ use crate::{KeepAlive, Shard};
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
     pub client_id: ClientID,
-    pub miot_tx: queue::PktTx,
-    pub session_rx: queue::PktRx,
+    pub miot_tx: PktTx,
+    pub session_rx: PktRx,
 }
 
 pub struct Session {
@@ -87,11 +87,11 @@ pub struct Session {
     config: Config,
 
     // Outbound channel to Miot thread.
-    miot_tx: queue::PktTx,
+    miot_tx: PktTx,
     // Inbound channel from Miot thread.
-    session_rx: queue::PktRx,
+    session_rx: PktRx,
     // inbound queue from client.
-    cinp: queue::ClientInp,
+    cinp: message::ClientInp,
     // A Periodic Message::LocalAck shall be sent to other sessions. Every incoming
     // PUBLISH from a local-session will be indexed with its cliend_id, and
     // Message::Packet::seqno. Only the latest seqno shall be indexed here, and once
@@ -115,7 +115,7 @@ struct SessionState {
     /// messages are committed here, [Cluster::topic_filter] will also be updated.
     subscriptions: BTreeMap<TopicFilter, Subscription>,
     /// Manages out-bound messages to client.
-    cout: queue::ClientOut,
+    cout: message::ClientOut,
 }
 
 #[allow(dead_code)]
@@ -136,12 +136,12 @@ struct WillMessage {
 
 impl Session {
     pub fn start(args: SessionArgs, config: Config, pkt: &v5::Connect) -> Session {
-        let cinp = queue::ClientInp {
+        let cinp = message::ClientInp {
             seqno: 1,
             index: BTreeMap::default(),
             timestamp: BTreeMap::default(),
         };
-        let cout = queue::ClientOut {
+        let cout = message::ClientOut {
             seqno: 1,
             index: BTreeMap::default(),
             next_packet_id: 1,
@@ -214,7 +214,7 @@ impl Session {
     pub fn close(mut self) -> Self {
         use std::mem;
 
-        let (tx, rx) = queue::pkt_channel(1); // DUMMY channels
+        let (tx, rx) = socket::pkt_channel(1); // DUMMY channels
         mem::drop(mem::replace(&mut self.miot_tx, tx));
         mem::drop(mem::replace(&mut self.session_rx, rx));
 
@@ -265,7 +265,7 @@ impl Session {
         &mut self,
         shard: &Shard,
         pkts: Vec<v5::Packet>,
-    ) -> Result<Vec<queue::Message>> {
+    ) -> Result<Vec<Message>> {
         if pkts.len() > 0 {
             self.keep_alive.live();
         }
@@ -279,11 +279,11 @@ impl Session {
     }
 
     // handle incoming packet
-    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<queue::Message> {
+    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<Message> {
         // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
-        self.check_protocol_error(&pkt)?;
+        // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
+        // PUBLISH, PUBLISH-ack lead to message routing.
 
-        // SUBSCRIBE, UNSUBSCRIBE, PINGREQ
         let msg = match pkt {
             v5::Packet::Publish(_publish) => todo!(),
             v5::Packet::PubAck(_puback) => todo!(),
@@ -292,8 +292,11 @@ impl Session {
             v5::Packet::PubComp(_puback) => todo!(),
             v5::Packet::Subscribe(_sub) => todo!(),
             v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::PingReq => queue::Message::new_client_ack(v5::Packet::PingReq),
-            v5::Packet::Disconnect(_disconn) => todo!(),
+            v5::Packet::PingReq => Message::new_client_ack(v5::Packet::PingReq),
+            v5::Packet::Disconnect(_disconn) => {
+                // TODO: handle disconnect packet, its header and properties.
+                err!(Disconnected, code: Success, "{} client disconnect", self.prefix)?
+            }
             v5::Packet::Auth(_auth) => todo!(),
             v5::Packet::Connect(_) => err!(
                 ProtocolError,
@@ -320,12 +323,6 @@ impl Session {
         Ok(msg)
     }
 
-    fn check_protocol_error(&self, pkt: &v5::Packet) -> Result<()> {
-        match pkt {
-            _ => Ok(()),
-        }
-    }
-
     pub fn route_messages(&mut self) -> Result<()> {
         todo!()
     }
@@ -334,11 +331,11 @@ impl Session {
 // Handle incoming messages, incoming messages could be from owning shard's message queue
 // or locally generated (like Message::ClientAck)
 impl Session {
-    pub fn in_messages(&mut self, msgs: Vec<queue::Message>) {
+    pub fn in_messages(&mut self, msgs: Vec<Message>) {
         for msg in msgs.into_iter() {
             match &msg {
-                queue::Message::LocalAck { .. } | queue::Message::ClientAck { .. } => (),
-                queue::Message::Packet { client_id, shard_id, seqno, .. } => {
+                Message::LocalAck { .. } | Message::ClientAck { .. } => (),
+                Message::Packet { client_id, shard_id, seqno, .. } => {
                     self.timestamp.insert(client_id.clone(), (*shard_id, *seqno));
                 }
             }
@@ -353,7 +350,7 @@ impl Session {
             let ok = self.state.cout.index.len() < self.client_receive_maximum.into();
             let msg = self.state.cout.back_log.pop_front();
             match msg {
-                Some(queue::Message::LocalAck { client_id, seqno, instant }) => {
+                Some(Message::LocalAck { client_id, seqno, instant }) => {
                     let old_seqno = match self.cinp.timestamp.get(&client_id) {
                         Some((seqno, _)) => *seqno,
                         None => 0,
@@ -361,11 +358,11 @@ impl Session {
                     assert!(old_seqno < seqno);
                     self.cinp.timestamp.insert(client_id, (seqno, instant));
                 }
-                Some(msg @ queue::Message::Packet { .. }) if !ok => {
+                Some(msg @ Message::Packet { .. }) if !ok => {
                     self.state.cout.back_log.push_front(msg);
                     break Ok((true, miot_wake));
                 }
-                Some(mut msg @ queue::Message::Packet { .. }) => {
+                Some(mut msg @ Message::Packet { .. }) => {
                     let (would_block, wake) = self.flush_message(&msg)?;
                     miot_wake = miot_wake | wake;
                     if would_block {
@@ -377,7 +374,7 @@ impl Session {
                         self.state.cout.index.insert(curr_packet_id, msg);
                     }
                 }
-                Some(msg @ queue::Message::ClientAck { .. }) => {
+                Some(msg @ Message::ClientAck { .. }) => {
                     let (would_block, wake) = self.flush_message(&msg)?;
                     miot_wake = miot_wake | wake;
                     if would_block {
@@ -392,10 +389,10 @@ impl Session {
 
     // return (would_block,miot_wake)
     // TODO: use ClientOut::seqno in outgoing PUBLISH messages as UserProp
-    fn flush_message(&mut self, msg: &queue::Message) -> Result<(bool, bool)> {
+    fn flush_message(&mut self, msg: &Message) -> Result<(bool, bool)> {
         let packet = match &msg {
-            queue::Message::ClientAck { packet } => packet.clone(),
-            queue::Message::Packet { packet, .. } => packet.clone(),
+            Message::ClientAck { packet } => packet.clone(),
+            Message::Packet { packet, .. } => packet.clone(),
             _ => unreachable!(),
         };
         match self.miot_tx.try_send(packet) {

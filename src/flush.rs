@@ -3,7 +3,7 @@ use log::{debug, error, info, trace, warn};
 use std::{thread, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5, AppTx, Config, SLEEP_10MS};
+use crate::{v5, AppTx, Config, Socket, SLEEP_10MS};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -125,10 +125,7 @@ impl Flusher {
 }
 
 pub enum Request {
-    FlushConnection {
-        socket: queue::Socket,
-        err: Option<Error>,
-    },
+    FlushConnection { socket: Socket, err: Option<Error> },
     Close,
 }
 
@@ -137,7 +134,7 @@ pub enum Response {
 }
 
 pub struct FlushConnectionArgs {
-    pub socket: queue::Socket,
+    pub socket: Socket,
     pub err: Option<Error>,
 }
 

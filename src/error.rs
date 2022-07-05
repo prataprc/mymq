@@ -307,7 +307,7 @@ impl fmt::Display for ErrorKind {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ReasonCode {
-    Success = 0x00, // NormalDisconnet, QoS0
+    Success = 0x00, // NormalDisconnect, QoS0
     QoS1 = 0x1,
     QoS2 = 0x02,
     DiconnectWillMessage = 0x04,

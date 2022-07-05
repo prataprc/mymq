@@ -4,9 +4,9 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, mem, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5};
+use crate::{message, socket, v5};
 use crate::{AppTx, ClientID, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::{Cluster, Flusher, Miot};
+use crate::{Cluster, Flusher, Message, Miot, Socket};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -30,7 +30,7 @@ pub enum Inner {
     // Held by Miot.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     // Held by all Shard threads.
-    MsgTx(Arc<mio::Waker>, queue::MsgTx),
+    MsgTx(Arc<mio::Waker>, message::MsgTx),
     // Thread.
     Main(RunLoop),
     // Held by Cluster, replacing both Handle and Main.
@@ -40,7 +40,7 @@ pub enum Inner {
 pub struct Handle {
     waker: Arc<mio::Waker>,
     thrd: Thread<Shard, Request, Result<Response>>,
-    msg_tx: queue::MsgTx,
+    msg_tx: message::MsgTx,
 }
 
 pub struct RunLoop {
@@ -63,9 +63,9 @@ pub struct RunLoop {
     // TODO: remove session only when Session::session_rx channel has disconnected.
     sessions: BTreeMap<ClientID, Session>,
 
-    /// Every shard has an input queue for queue::Message, which receives all locally
+    /// Every shard has an input queue for [Message], which receives all locally
     /// hopping MQTT messages for sessions managed by this shard.
-    msg_rx: queue::MsgRx,
+    msg_rx: message::MsgRx,
     /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::topic_filters
@@ -151,12 +151,12 @@ impl Shard {
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
-        // This is the local queue that carries queue::Message from one local-session
+        // This is the local queue that carries [Message] from one local-session
         // to another local-session. Note that the queue is shared by all the sessions
         // in this shard, hence the queue-capacity is correspondingly large.
         let (msg_tx, msg_rx) = {
             let size = self.config.mqtt_msg_batch_size() * self.config.num_shards();
-            queue::msg_channel(size as usize)
+            message::msg_channel(size as usize)
         };
         let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
@@ -259,7 +259,7 @@ pub enum Request {
     SetMiot(Miot),
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
-    FlushConnection { socket: queue::Socket, err: Error },
+    FlushConnection { socket: Socket, err: Error },
     Close,
 }
 
@@ -308,7 +308,7 @@ impl Shard {
         Ok(())
     }
 
-    pub fn flush_connection(&self, socket: queue::Socket, err: Error) -> Result<()> {
+    pub fn flush_connection(&self, socket: Socket, err: Error) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => tx.post(Request::FlushConnection { socket, err })?,
             _ => unreachable!(),
@@ -533,17 +533,17 @@ impl Shard {
         // TODO: handle pkt.flags.clean_start here.
 
         let (mut session, upstream, downstream) = {
-            // This queue is wired up with miot-thread. This queue carries queue::Packet,
+            // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
             let (upstream, session_rx) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
-                queue::pkt_channel(size)
+                socket::pkt_channel(size)
             };
-            // This queue is wired up with miot-thread. This queue carries queue::Packet,
+            // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
             let (miot_tx, downstream) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
-                queue::pkt_channel(size)
+                socket::pkt_channel(size)
             };
             let args = SessionArgs {
                 addr,
@@ -556,7 +556,7 @@ impl Shard {
 
         // send back the connection acknowledgment CONNACK here.
         let packet = v5::Packet::ConnAck(session.success_ack(&pkt, self));
-        session.in_messages(vec![queue::Message::new_client_ack(packet)]);
+        session.in_messages(vec![Message::new_client_ack(packet)]);
         let (_would_block, _wake) = match session.flush_messages() {
             Ok(val) => val,
             Err(err) => {
