@@ -454,7 +454,7 @@ impl Cluster {
         };
 
         let client_id = connect.payload.client_id.clone();
-        let shard_id = rebalance::Rebalancer::session_parition(
+        let shard_id = rebalance::Rebalancer::session_partition(
             &*client_id,
             self.config.num_shards(),
         );

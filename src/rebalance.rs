@@ -52,7 +52,7 @@ pub struct Rebalancer {
 impl Rebalancer {
     /// Clients are mapped to shards using ClientID, so that a client will always
     /// map to the same shard no matter where or when it is computed.
-    pub fn session_parition<U: AsRef<[u8]>>(id: &U, num_shards: u32) -> u32 {
+    pub fn session_partition<U: AsRef<[u8]>>(id: &U, num_shards: u32) -> u32 {
         let id: &[u8] = id.as_ref();
         let hash = cityhash_rs::cityhash_110_128(id);
         let hash = (hash & 0xFFFFFFFFFFFFFFFF) ^ ((hash >> 64) & 0xFFFFFFFFFFFFFFFF);
