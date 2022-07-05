@@ -93,8 +93,8 @@ pub struct Disconnect {
 }
 
 impl Disconnect {
-    pub fn from_reason_code(code: DisconnReasonCode) -> Disconnect {
-        Disconnect { code: Some(code), properties: None }
+    pub fn new(code: DisconnReasonCode, props: Option<DisconnProperties>) -> Disconnect {
+        Disconnect { code: Some(code), properties: props }
     }
 }
 
@@ -148,10 +148,10 @@ impl Packetize for Disconnect {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct DisconnProperties {
-    session_expiry_interval: Option<u32>,
-    reason_string: Option<String>,
-    user_properties: Vec<UserProperty>,
-    server_reference: Option<String>,
+    pub session_expiry_interval: Option<u32>,
+    pub reason_string: Option<String>,
+    pub user_properties: Vec<UserProperty>,
+    pub server_reference: Option<String>,
 }
 
 impl Packetize for DisconnProperties {

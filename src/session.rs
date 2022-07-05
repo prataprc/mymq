@@ -80,7 +80,6 @@ pub struct SessionArgs {
 
 pub struct Session {
     /// Remote socket address.
-    addr: net::SocketAddr,
     prefix: String,
     client_receive_maximum: u16,
     client_max_packet_size: u32,
@@ -100,6 +99,7 @@ pub struct Session {
     timestamp: BTreeMap<ClientID, (u32, u64)>, // (shard_id, seqno)
 
     // MQTT Will-Delay-Publish
+    #[allow(dead_code)]
     will_message: Option<WillMessage>,
     // MQTT Keep alive between client and broker.
     keep_alive: KeepAlive,
@@ -118,12 +118,14 @@ struct SessionState {
     cout: queue::ClientOut,
 }
 
+#[allow(dead_code)]
 struct Subscription {
     subscription_id: u32,
     qos: v5::QoS,
     topic_filter: TopicFilter,
 }
 
+#[allow(dead_code)]
 struct WillMessage {
     retain: bool,
     qos: v5::QoS,
@@ -166,8 +168,7 @@ impl Session {
         let prefix = format!("session:{}", args.addr);
         let sei = config.mqtt_session_expiry_interval(pkt.session_expiry_interval());
         Session {
-            addr: args.addr,
-            prefix: prefix.clone(),
+            prefix: prefix,
             client_receive_maximum: pkt.receive_maximum(),
             client_max_packet_size: pkt.max_packet_size(),
             session_expiry_interval: sei,
@@ -178,7 +179,7 @@ impl Session {
             cinp,
             timestamp: BTreeMap::default(),
 
-            keep_alive: KeepAlive::new(&prefix, &pkt, &config),
+            keep_alive: KeepAlive::new(args.addr, &pkt, &config),
 
             will_message,
 
@@ -240,13 +241,11 @@ impl Session {
 
         let batch_size = self.config.mqtt_msg_batch_size() as usize;
         let msgs = match rx_packets(&self.session_rx, batch_size) {
-            (pkts, _empty, true) => {
-                self.handle_packets(shard, pkts)?;
+            (_pkts, _empty, true) => {
+                // TODO: is it okay to leave pkts hanging ?
                 err!(Disconnected, desc: "{} downstream disconnect", self.prefix)?
             }
-            (pkts, _empty, _disconnected) => {
-                self.handle_packets(shard, pkts)?;
-            }
+            (pkts, _empty, _disconnected) => self.handle_packets(shard, pkts)?,
         };
 
         // msgs is locally generate Message::ClientAck
@@ -255,7 +254,7 @@ impl Session {
         // flush any locally generate Message::ClientAck
         let (_would_block, wake) = self.flush_messages()?;
         if wake {
-            allow_panic!(self, shard.miot.wake());
+            shard.as_miot().wake()?;
         }
 
         self.keep_alive.check_expired()
@@ -276,7 +275,7 @@ impl Session {
             msgs.push(self.handle_packet(shard, pkt)?);
         }
 
-        Ok(())
+        Ok(msgs)
     }
 
     // handle incoming packet
@@ -286,7 +285,36 @@ impl Session {
 
         // SUBSCRIBE, UNSUBSCRIBE, PINGREQ
         let msg = match pkt {
+            v5::Packet::Publish(_publish) => todo!(),
+            v5::Packet::PubAck(_puback) => todo!(),
+            v5::Packet::PubRec(_puback) => todo!(),
+            v5::Packet::PubRel(_puback) => todo!(),
+            v5::Packet::PubComp(_puback) => todo!(),
+            v5::Packet::Subscribe(_sub) => todo!(),
+            v5::Packet::UnSubscribe(_unsub) => todo!(),
             v5::Packet::PingReq => queue::Message::new_client_ack(v5::Packet::PingReq),
+            v5::Packet::Disconnect(_disconn) => todo!(),
+            v5::Packet::Auth(_auth) => todo!(),
+            v5::Packet::Connect(_) => err!(
+                ProtocolError,
+                code: ProtocolError,
+                "{} duplicate connect packet",
+                self.prefix
+            )?,
+            v5::Packet::ConnAck(_) | v5::Packet::SubAck(_) => err!(
+                ProtocolError,
+                code: ProtocolError,
+                "{} packet type {:?} not expected from client",
+                self.prefix,
+                pkt.to_packet_type()
+            )?,
+            v5::Packet::UnsubAck(_) | v5::Packet::PingResp => err!(
+                ProtocolError,
+                code: ProtocolError,
+                "{} packet type {:?} not expected from client",
+                self.prefix,
+                pkt.to_packet_type()
+            )?,
         };
 
         Ok(msg)
@@ -294,22 +322,6 @@ impl Session {
 
     fn check_protocol_error(&self, pkt: &v5::Packet) -> Result<()> {
         match pkt {
-            v5::Packet::Connect(_) => err!(
-                ProtocolError,
-                code: ProtocolError,
-                "{} duplicate packet error",
-                self.prefix
-            ),
-            v5::Packet::ConnAck(_)
-            | v5::Packet::SubAck(_)
-            | v5::Packet::UnsubAck(_)
-            | v5::Packet::PingResp => err!(
-                ProtocolError,
-                code: ProtocolError,
-                "{} packet type {:?} not expected from client",
-                self.prefix,
-                pkt.to_packet_type()
-            ),
             _ => Ok(()),
         }
     }
@@ -351,14 +363,14 @@ impl Session {
                 }
                 Some(msg @ queue::Message::Packet { .. }) if !ok => {
                     self.state.cout.back_log.push_front(msg);
-                    break (true, miot_wake);
+                    break Ok((true, miot_wake));
                 }
                 Some(mut msg @ queue::Message::Packet { .. }) => {
                     let (would_block, wake) = self.flush_message(&msg)?;
                     miot_wake = miot_wake | wake;
                     if would_block {
                         self.state.cout.back_log.push_front(msg);
-                        break (would_block, miot_wake);
+                        break Ok((would_block, miot_wake));
                     } else {
                         let (curr_seqno, curr_packet_id) = self.incr_cout_seqno();
                         msg.set_seqno(curr_seqno, curr_packet_id);
@@ -370,10 +382,10 @@ impl Session {
                     miot_wake = miot_wake | wake;
                     if would_block {
                         self.state.cout.back_log.push_front(msg);
-                        break (would_block, miot_wake);
+                        break Ok((would_block, miot_wake));
                     }
                 }
-                None => break (false, miot_wake),
+                None => break Ok((false, miot_wake)),
             }
         }
     }

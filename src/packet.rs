@@ -320,7 +320,7 @@ pub fn send_disconnect(
 ) -> Result<()> {
     use crate::SLEEP_10MS;
 
-    let dc = v5::Disconnect::from_reason_code(code);
+    let dc = v5::Disconnect::new(code, None);
     let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {

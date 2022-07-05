@@ -91,6 +91,7 @@ impl Algorithm {
 
 /// Compare the old and new topology to identify the migrating shards. For each
 /// migrating shards, there shall be an entry in the returned list.
+#[allow(dead_code)]
 pub fn diff_topology(olds: &[Topology], news: &[Topology]) -> Vec<(Topology, Topology)> {
     let mut olds = olds.to_vec();
     olds.sort_by_key(|x| x.shard);

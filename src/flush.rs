@@ -232,6 +232,10 @@ impl Flusher {
         };
         let prefix = format!("{}:{}:{}", self.prefix, socket.addr, *socket.client_id);
 
+        // We are finishing off pening packets from Session, Disconnect and close the
+        // socket.
+        // TODO: Would there be any system-level requirement to do upstream flushing ?
+
         info!("{} flush connection at {:?}", prefix, now);
         match rx_packets(&socket.wt.miot_rx, usize::MAX) {
             (qs, _empty, false) => {

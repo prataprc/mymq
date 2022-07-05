@@ -15,6 +15,7 @@ use crate::{Error, ErrorKind, Result};
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
 // TODO: Review assert macro calls.
 // TODO: Review `as` type-casting for numbers.
+// TODO: Review code for #[allow(dead_code)]
 // TODO: Validate and document all thread handles, cluster, listener, flusher, shard,
 //       miot.
 // TODO: Handle retain-messages in Will, Publish, Subscribe scenarios, retain_available.
@@ -615,25 +616,31 @@ pub enum ClusterState {
     /// Cluster is single-node.
     SingleNode { state: SingleNode },
     /// Cluster is in the process of updating its gods&nodes, and working out rebalance.
+    #[allow(dead_code)]
     Elastic { state: MultiNode },
     /// Cluster is stable.
+    #[allow(dead_code)]
     Stable { state: MultiNode },
 }
 
-pub struct MultiNode {
-    config: Config,
-    nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
-    topology: Vec<rebalance::Topology>, // list of shards mapped to node.
-}
-
+// TODO: Do we really needs all this field for a single node cluster ?
+#[allow(dead_code)]
 pub struct SingleNode {
     config: Config,
     node: Node,
     topology: Vec<rebalance::Topology>,
 }
 
+#[allow(dead_code)]
+pub struct MultiNode {
+    config: Config,
+    nodes: Vec<Node>, // TODO: should we split this into gods and nodes.
+    topology: Vec<rebalance::Topology>, // list of shards mapped to node.
+}
+
 impl ClusterState {
     /// Return the list of shard-numbers that are hosted in this node.
+    #[allow(dead_code)]
     fn shards_in_node(&self, node: &Uuid) -> Vec<u32> {
         use ClusterState::*;
 

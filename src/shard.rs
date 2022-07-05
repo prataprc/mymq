@@ -1,4 +1,4 @@
-use log::{debug, info, trace};
+use log::{debug, error, info, trace};
 use uuid::Uuid;
 
 use std::{collections::BTreeMap, mem, net, sync::Arc};
@@ -447,7 +447,7 @@ impl Shard {
             match allow_panic!(&self, miot.remove_connection(&client_id)) {
                 Some(socket) => {
                     let req = Request::FlushConnection { socket, err };
-                    self.handle_flush_connection(req)
+                    self.handle_flush_connection(req);
                 }
                 None => (),
             }
@@ -560,11 +560,7 @@ impl Shard {
         let (_would_block, _wake) = match session.flush_messages() {
             Ok(val) => val,
             Err(err) => {
-                error!(
-                    Disconnected,
-                    desc: "{} failed to send CONNACK, ignoring session for {}",
-                    self.prefix, session.addr
-                );
+                error!("{} fail to send CONNACK: {}", self.prefix, err);
                 return Response::Ok;
             }
         };
@@ -596,14 +592,18 @@ impl Shard {
 
         sessions.insert(client_id.clone(), session);
 
-        if let Some(_old_session) = old_session {
-            let socket = allow_panic!(self, miot.remove_connection(&client_id));
-            let err: Result<()> =
-                err!(SessionTakenOver, code: SessionTakenOver, "client {}", addr);
-            let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
-            mem::drop(sessions);
-            mem::drop(miot);
-            self.handle_flush_connection(arg);
+        let socket = allow_panic!(self, miot.remove_connection(&client_id));
+
+        match (old_session, socket) {
+            (Some(_old_session), Some(socket)) => {
+                let err: Result<()> =
+                    err!(SessionTakenOver, code: SessionTakenOver, "client {}", addr);
+                let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
+                mem::drop(sessions);
+                mem::drop(miot);
+                self.handle_flush_connection(arg);
+            }
+            (_, _) => (), // there no exiting session with same client_id
         }
 
         Response::Ok
