@@ -125,8 +125,8 @@ pub struct ClientOut {
     // This value is incremented for every new PUBLISH(qos>0), SUBSCRIBE, UNSUBSCRIBE
     // messages that is going out to the client.
     //
-    // We don't increment this value if index.len() + back_log.len() exceeds the
-    // receive_maximum set by client.
+    // We don't increment this value if index.len() exceeds the `receive_maximum`
+    // set by the client.
     pub next_packet_id: PacketID,
     // Back log of messages that needs to be flushed out to the client. All messages
     // meant for client first lands here.

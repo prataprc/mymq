@@ -190,7 +190,7 @@ impl Packetize for ConnAck {
 pub struct ConnAckProperties {
     pub session_expiry_interval: Option<u32>,
     pub receive_maximum: Option<u16>,
-    pub max_qos: Option<QoS>,
+    pub maximum_qos: Option<QoS>,
     pub retain_available: Option<bool>,
     pub max_packet_size: Option<u32>,
     pub assigned_client_identifier: Option<String>,
@@ -231,8 +231,11 @@ impl Packetize for ConnAckProperties {
 
             match property {
                 SessionExpiryInterval(val) => props.session_expiry_interval = Some(val),
+                ReceiveMaximum(0) => {
+                    err!(ProtocolError, code: ProtocolError, "{} receive_maximum:0", PP)?;
+                }
                 ReceiveMaximum(val) => props.receive_maximum = Some(val),
-                MaximumQoS(val) => props.max_qos = Some(val),
+                MaximumQoS(val) => props.maximum_qos = Some(val),
                 RetainAvailable(val) => {
                     props.retain_available =
                         Some(util::u8_to_bool(val, "retain_available")?);
@@ -282,11 +285,10 @@ impl Packetize for ConnAckProperties {
 
         enc_prop!(opt: data, SessionExpiryInterval, self.session_expiry_interval);
         enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
-        match &self.max_qos {
+        match &self.maximum_qos {
             Some(val) => enc_prop!(data, MaximumQoS, u8::from(*val)),
             None => (),
         }
-        enc_prop!(opt: data, ReceiveMaximum, self.receive_maximum);
         if let Some(val) = self.retain_available {
             let val = util::bool_to_u8(val);
             enc_prop!(data, RetainAvailable, val);
@@ -328,8 +330,8 @@ impl ConnAckProperties {
     pub const MAXIMUM_QOS: QoS = QoS::ExactlyOnce;
     pub const TOPIC_ALIAS_MAXIMUM: u16 = 0;
 
-    pub fn max_qos(&self) -> QoS {
-        self.max_qos.unwrap_or(Self::MAXIMUM_QOS)
+    pub fn maximum_qos(&self) -> QoS {
+        self.maximum_qos.unwrap_or(Self::MAXIMUM_QOS)
     }
 
     pub fn receive_maximum(&self) -> u16 {

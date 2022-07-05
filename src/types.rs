@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use std::ops::{Deref, DerefMut};
 
 use crate::util::{self, advance};
-use crate::Packetize;
 use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{IterTopicPath, Packetize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
@@ -52,7 +52,37 @@ impl AsRef<[u8]> for Blob {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub struct ClientID(pub String);
+
+impl Deref for ClientID {
+    type Target = String;
+
+    fn deref(&self) -> &String {
+        &self.0
+    }
+}
+
+impl DerefMut for ClientID {
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
+impl ClientID {
+    pub fn new_uuid_v4() -> ClientID {
+        ClientID(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn from_connect(client_id: &ClientID) -> ClientID {
+        match client_id.len() {
+            0 => Self::new_uuid_v4(),
+            _ => client_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TopicName(String);
 
 impl Deref for TopicName {
@@ -98,13 +128,15 @@ impl Packetize for TopicName {
     }
 }
 
-impl TopicName {
-    pub fn as_levels(&self) -> Vec<&str> {
-        self.split('/').collect()
+impl<'a> IterTopicPath<'a> for TopicName {
+    type Iter = std::str::Split<'a, char>;
+
+    fn iter_topic_path(&'a self) -> Self::Iter {
+        self.split('/')
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TopicFilter(String);
 
 impl Deref for TopicFilter {
@@ -148,26 +180,11 @@ impl Packetize for TopicFilter {
     }
 }
 
-impl TopicFilter {
-    pub fn as_levels(&self) -> Vec<&str> {
-        self.split('/').collect()
-    }
-}
+impl<'a> IterTopicPath<'a> for TopicFilter {
+    type Iter = std::str::Split<'a, char>;
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
-pub struct ClientID(pub String);
-
-impl Deref for ClientID {
-    type Target = String;
-
-    fn deref(&self) -> &String {
-        &self.0
-    }
-}
-
-impl DerefMut for ClientID {
-    fn deref_mut(&mut self) -> &mut String {
-        &mut self.0
+    fn iter_topic_path(&'a self) -> Self::Iter {
+        self.split('/')
     }
 }
 

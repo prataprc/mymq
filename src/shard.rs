@@ -1,12 +1,13 @@
 use log::{debug, info, trace};
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, net, sync::Arc};
+use std::{collections::BTreeMap, mem, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{queue, v5, AppTx};
-use crate::{ClientID, Cluster, Config, Flusher, Miot, Session, Shardable, TopicTrie};
-use crate::{Error, ErrorKind, Result};
+use crate::{queue, v5};
+use crate::{AppTx, ClientID, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
+use crate::{Cluster, Flusher, Miot};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -68,7 +69,9 @@ pub struct RunLoop {
     /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::topic_filters
-    topic_filters: TopicTrie,
+    topic_filters: SubscribedTrie,
+    /// MVCC clone of Cluster::retained_messages
+    retained_messages: RetainedTrie,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
@@ -103,8 +106,6 @@ impl Shardable for Shard {
 
 impl Drop for Shard {
     fn drop(&mut self) {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
@@ -120,7 +121,8 @@ impl Drop for Shard {
 pub struct SpawnArgs {
     pub cluster: Cluster,
     pub flusher: Flusher,
-    pub topic_filters: TopicTrie,
+    pub topic_filters: SubscribedTrie,
+    pub retained_messages: RetainedTrie,
 }
 
 impl Shard {
@@ -172,6 +174,7 @@ impl Shard {
                 sessions: BTreeMap::default(),
                 shard_queues: BTreeMap::default(),
                 topic_filters: args.topic_filters,
+                retained_messages: args.retained_messages,
 
                 app_tx: app_tx.clone(),
             }),
@@ -315,8 +318,6 @@ impl Shard {
     }
 
     pub fn close_wait(mut self) -> Shard {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(Handle { thrd, .. }) => {
@@ -420,8 +421,6 @@ impl Shard {
     }
 
     fn route(&mut self) {
-        use std::mem;
-
         let mut inner = mem::replace(&mut self.inner, Inner::Init);
         let RunLoop { sessions, .. } = match &mut inner {
             Inner::Main(run_loop) => run_loop,
@@ -449,7 +448,7 @@ impl Shard {
                     Inner::Main(run_loop) => run_loop,
                     _ => unreachable!(),
                 };
-                allow_panic!(&self, miot.remove_connection(client_id))
+                allow_panic!(&self, miot.remove_connection(&client_id))
             };
             self.handle_flush_connection(Request::FlushConnection { socket, err });
         }
@@ -493,7 +492,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let client_id = pkt.payload.client_id.clone();
+        let client_id = ClientID::from_connect(&pkt.payload.client_id);
 
         // TODO: handle pkt.flags.clean_start here.
 
@@ -528,6 +527,11 @@ impl Shard {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
+        // nuke existing session.
+        let old_session = match sessions.get(&client_id) {
+            Some(_) => sessions.remove(&client_id),
+            None => None,
+        };
 
         {
             let client_id = client_id.clone();
@@ -542,7 +546,17 @@ impl Shard {
             allow_panic!(&self, miot.add_connection(args));
         }
 
-        sessions.insert(client_id, session);
+        sessions.insert(client_id.clone(), session);
+
+        if let Some(_old_session) = old_session {
+            let socket = allow_panic!(self, miot.remove_connection(&client_id));
+            let err: Result<()> =
+                err!(SessionTakenOver, code: SessionTakenOver, "client {}", addr);
+            let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
+            mem::drop(sessions);
+            mem::drop(miot);
+            self.handle_flush_connection(arg);
+        }
 
         Response::Ok
     }
@@ -574,8 +588,6 @@ impl Shard {
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
-        use std::mem;
-
         match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(mut run_loop) => {
                 info!("{} close sessions:{} ...", self.prefix, run_loop.sessions.len());
@@ -589,6 +601,7 @@ impl Shard {
                 mem::drop(run_loop.msg_rx);
                 mem::drop(run_loop.shard_queues);
                 mem::drop(run_loop.topic_filters);
+                mem::drop(run_loop.retained_messages);
 
                 let mut new_sessions = BTreeMap::default();
                 for (client_id, sess) in run_loop.sessions.into_iter() {

@@ -11,7 +11,7 @@ const INVALID_RATIO: f32 = 0.001;
 pub struct Context {
     pub server: bool,
     pub packet_type: PacketType,
-    pub max_qos: QoS,
+    pub maximum_qos: QoS,
     pub invalid_ratio: BTreeMap<&'static str, f32>,
     // statistics
     pub type_stats: BTreeMap<&'static str, (usize, usize)>,
@@ -22,7 +22,7 @@ impl Default for Context {
         let mut ctx = Context {
             server: false,
             packet_type: PacketType::Publish,
-            max_qos: QoS::AtLeastOnce,
+            maximum_qos: QoS::AtLeastOnce,
             invalid_ratio: BTreeMap::new(),
             // statistics
             type_stats: BTreeMap::new(),

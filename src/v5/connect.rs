@@ -268,6 +268,13 @@ impl Connect {
             None => Config::DEF_MQTT_MAX_PACKET_SIZE,
         }
     }
+
+    pub fn session_expiry_interval(&self) -> Option<u32> {
+        match &self.properties {
+            Some(props) => props.session_expiry_interval(),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -370,8 +377,8 @@ impl ConnectProperties {
     pub const RECEIVE_MAXIMUM: u16 = 65535;
     pub const TOPIC_ALIAS_MAXIMUM: u16 = 0;
 
-    pub fn session_expiry_interval(&self) -> u32 {
-        self.session_expiry_interval.unwrap_or(0)
+    pub fn session_expiry_interval(&self) -> Option<u32> {
+        self.session_expiry_interval
     }
 
     pub fn receive_maximum(&self) -> u16 {

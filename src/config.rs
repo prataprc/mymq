@@ -92,29 +92,29 @@ pub struct Config {
 
     /// MQTT Keep Alive factor, the final value of `mqtt_keep_alive` is computed by
     /// multiplying the `mqtt_keep_alive` with this factor.
-    /// * **Default**: 1.5
+    /// * **Default**: [Config::DEF_MQTT_KEEP_ALIVE_FACTOR]
     /// * **Mutable**: No
-    pub mqtt_keep_alive_factor: f32,
+    pub mqtt_keep_alive_factor: Option<f32>,
 
     /// MQTT Receive-maximum, control the number of unacknowledged PUBLISH packets
     /// server can receive and process concurrently for the client.
     /// * **Default**: [Config::DEF_MQTT_RECEIVE_MAXIMUM]
     /// * **Mutable**: No
-    pub mqtt_receive_maximum: u16,
+    pub mqtt_receive_maximum: Option<u16>,
 
-    // TODO
-    /// Subscribe ack timeout, in secs, after receiving a subscribe/un-subscribe
-    /// message, broker immediately sends corresponding ACK. If outbound queue to the
-    /// client is full, tthis timeout will kick in. If broker cannot send an ACK
-    /// within that timeout, session/connection shall be closed.
-    pub subscribe_ack_timeout: Option<u32>,
+    /// MQTT `session_expiry_interval` on the broker side. If `session_expiry_interval`
+    /// is ZERO or None, then `session_expiry_interval` from CONNECT packet is used.
+    /// CONNECT has no `session_expiry_interval` interval or it is ZERO, then session
+    /// ends immediately at connection close.
+    /// * **Default**: None,
+    /// * **Mutable**: No
+    pub mqtt_session_expiry_interval: Option<u32>,
 
-    // TODO
-    /// Publish ack timeout, in secs, after receiving a publish message, with QoS-0 or
-    /// QoS-1, broker immediately sends corresponding ACK. If outbound queue to the
-    /// client is full, tthis timeout will kick in. If broker cannot send an ACK
-    /// within that timeout, session/connection shall be closed.
-    pub publish_ack_timeout: Option<u32>,
+    /// MQTT `maximum_qos` on the broker side. This is the advertised maximum supported
+    /// QoS level by the broker.
+    /// * **Default**: [Config::DEF_MQTT_MAX_QOS]
+    /// * **Mutable**: No
+    pub mqtt_maximum_qos: Option<u8>,
 }
 
 impl Default for Config {
@@ -135,10 +135,10 @@ impl Default for Config {
             mqtt_max_packet_size: Some(Self::DEF_MQTT_MAX_PACKET_SIZE),
             mqtt_msg_batch_size: Some(Self::DEF_MQTT_MSG_BATCH_SIZE),
             mqtt_keep_alive: None,
-            mqtt_keep_alive_factor: Self::DEF_MQTT_KEEP_ALIVE_FACTOR,
-            mqtt_receive_maximum: Self::DEF_MQTT_RECEIVE_MAXIMUM,
-            subscribe_ack_timeout: None,
-            publish_ack_timeout: None,
+            mqtt_keep_alive_factor: Some(Self::DEF_MQTT_KEEP_ALIVE_FACTOR),
+            mqtt_receive_maximum: Some(Self::DEF_MQTT_RECEIVE_MAXIMUM),
+            mqtt_session_expiry_interval: None,
+            mqtt_maximum_qos: Some(Self::DEF_MQTT_MAX_QOS),
         }
     }
 }
@@ -164,6 +164,8 @@ impl Config {
     pub const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]
     pub const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
+    /// Refer to [Config::mqtt_maximum_qos]
+    pub const DEF_MQTT_MAX_QOS: u8 = 1;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -224,11 +226,22 @@ impl Config {
     }
 
     pub fn mqtt_keep_alive_factor(&self) -> f32 {
-        self.mqtt_keep_alive_factor
+        self.mqtt_keep_alive_factor.unwrap_or(Self::DEF_MQTT_KEEP_ALIVE_FACTOR)
     }
 
     pub fn mqtt_receive_maximum(&self) -> u16 {
-        self.mqtt_receive_maximum
+        self.mqtt_receive_maximum.unwrap_or(Self::DEF_MQTT_RECEIVE_MAXIMUM)
+    }
+
+    pub fn mqtt_session_expiry_interval(&self, connect: Option<u32>) -> Option<u32> {
+        match connect {
+            Some(session_expiry_interval) => Some(session_expiry_interval),
+            None => self.mqtt_session_expiry_interval,
+        }
+    }
+
+    pub fn mqtt_maximum_qos(&self) -> u8 {
+        self.mqtt_maximum_qos.unwrap_or(Self::DEF_MQTT_MAX_QOS)
     }
 }
 

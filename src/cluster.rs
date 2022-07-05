@@ -7,15 +7,17 @@ use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{rebalance, util, v5};
-use crate::{AppTx, Config, ConfigNode, Hostable, TopicTrie};
-use crate::{Error, ErrorKind, Result};
+use crate::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
 use crate::{Flusher, Listener, Shard, Ticker};
+
+use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
 // TODO: Review assert macro calls.
 // TODO: Review `as` type-casting for numbers.
 // TODO: Validate and document all thread handles, cluster, listener, flusher, shard,
 //       miot.
+// TODO: Handle retain-messages in Will, Publish, Subscribe scenarios, retain_available.
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -58,9 +60,13 @@ pub struct RunLoop {
 
     /// Rebalancing algorithm.
     rebalancer: rebalance::Rebalancer,
-    /// List of subscribed topicfilters across all the sessions, local to this node.
+    /// Index of subscribed topicfilters across all the sessions, local to this node.
     // TODO: Should we make this part of the ClusterState ?
-    topic_filters: TopicTrie,
+    topic_filters: SubscribedTrie, // key=TopicFilter, val=(client_id, shard_id)
+    /// Index of retained messages for each topic-name, across all the sessions, local
+    /// to this node.
+    // TODO: should we make this part of the ClusterState
+    retained_messages: RetainedTrie,
 
     /// Back channel to communicate with application.
     app_tx: AppTx,
@@ -72,7 +78,8 @@ pub struct FinState {
     pub ticker: Ticker,
     pub flusher: Flusher,
     pub shards: BTreeMap<u32, Shard>,
-    pub topic_filters: TopicTrie,
+    pub topic_filters: SubscribedTrie,
+    pub retained_messages: RetainedTrie,
 }
 
 impl Default for Cluster {
@@ -164,7 +171,8 @@ impl Cluster {
         let shards = BTreeMap::default();
 
         let flusher_tx = flusher.to_tx();
-        let topic_filters = TopicTrie::default();
+        let topic_filters = SubscribedTrie::default();
+        let retained_messages = RetainedTrie::default();
         let mut cluster = Cluster {
             name: format!("{}-cluster-main", self.config.name),
             prefix: String::default(),
@@ -180,6 +188,7 @@ impl Cluster {
 
                 rebalancer,
                 topic_filters: topic_filters.clone(),
+                retained_messages: retained_messages.clone(),
 
                 app_tx: app_tx.clone(),
             }),
@@ -208,6 +217,7 @@ impl Cluster {
                         cluster: cluster_tx,
                         flusher: flusher_tx.to_tx(),
                         topic_filters: topic_filters.clone(),
+                        retained_messages: retained_messages.clone(),
                     };
                     Shard::from_config(config, shard_id)?.spawn(args, app_tx.clone())?
                 };
@@ -499,6 +509,7 @@ impl Cluster {
                     flusher,
                     shards,
                     topic_filters: run_loop.topic_filters,
+                    retained_messages: run_loop.retained_messages,
                 };
 
                 let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));

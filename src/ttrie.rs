@@ -1,32 +1,45 @@
+use std::marker::PhantomData;
 use std::sync::{atomic::AtomicPtr, Arc};
 
 use crate::Result;
-use crate::TopicFilter;
 
-// <TopicFilter, (ClientID, shard_id)
-pub struct TopicTrie {
-    inner: Arc<AtomicPtr<Inner>>,
+// K = TopicName or TopicFilter, indexes (ClientID, shard_id)
+pub struct TopicTrie<K, V> {
+    inner: Arc<AtomicPtr<Inner<K, V>>>,
 }
 
-struct Inner {
+struct Inner<K, V> {
     count: usize, // number of entries in the trie.
+    _key: PhantomData<K>,
+    _val: PhantomData<V>,
 }
 
-impl Default for TopicTrie {
-    fn default() -> TopicTrie {
-        let inner = Box::new(Inner { count: usize::default() });
+impl<K, V> Default for TopicTrie<K, V>
+where
+    K: Default,
+{
+    fn default() -> TopicTrie<K, V> {
+        let inner = Box::new(Inner {
+            count: usize::default(),
+            _key: PhantomData,
+            _val: PhantomData,
+        });
         TopicTrie { inner: Arc::new(AtomicPtr::new(Box::leak(inner))) }
     }
 }
 
-impl TopicTrie {
-    pub fn clone(&self) -> TopicTrie {
+impl<K, V> TopicTrie<K, V> {
+    pub fn clone(&self) -> TopicTrie<K, V> {
         todo!()
     }
 }
 
-impl TopicTrie {
-    pub fn unsubscribe(&self, _tfilter: &TopicFilter) -> Result<()> {
+impl<K, V> TopicTrie<K, V> {
+    pub fn subscribe(&self, _key: &K) -> Result<()> {
+        todo!()
+    }
+
+    pub fn unsubscribe(&self, _key: &K) -> Result<()> {
         todo!()
     }
 }

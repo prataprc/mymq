@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::{net, sync::mpsc};
 
 use crate::{queue, v5};
-use crate::{ClientID, Config, PacketID, TopicFilter, TopicName, TopicTrie};
+use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{KeepAlive, Shard};
 
@@ -60,6 +60,16 @@ use crate::{KeepAlive, Shard};
 // TODO: `authentication_data`
 // TODO: `payload.username`
 // TODO: `payload.password`
+//
+// *CONNACK Properties*
+//
+// TODO: `retain_available`
+// TODO: `topic_alias_maximum`
+// TODO: `shared_subscription_available`
+// TODO: `response_information`
+// TODO: `server_reference`
+// TODO: `authentication_method`
+// TODO: `authentication_data`
 
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
@@ -74,6 +84,7 @@ pub struct Session {
     prefix: String,
     client_receive_maximum: u16,
     client_max_packet_size: u32,
+    session_expiry_interval: Option<u32>,
     config: Config,
 
     // Outbound channel to Miot thread.
@@ -88,10 +99,10 @@ pub struct Session {
     // the ack is sent back, entry shall be removed from this index.
     timestamp: BTreeMap<ClientID, (u32, u64)>, // (shard_id, seqno)
 
-    keep_alive: KeepAlive,
-
     // MQTT Will-Delay-Publish
     will_message: Option<WillMessage>,
+    // MQTT Keep alive between client and broker.
+    keep_alive: KeepAlive,
 
     state: SessionState,
 }
@@ -102,13 +113,14 @@ struct SessionState {
     client_id: ClientID,
     /// List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
     /// messages are committed here, [Cluster::topic_filter] will also be updated.
-    subscriptions: Vec<Subscription>,
+    subscriptions: BTreeMap<TopicFilter, Subscription>,
     /// Manages out-bound messages to client.
     cout: queue::ClientOut,
 }
 
 struct Subscription {
     subscription_id: u32,
+    qos: v5::QoS,
     topic_filter: TopicFilter,
 }
 
@@ -135,7 +147,7 @@ impl Session {
         };
         let state = SessionState {
             client_id: args.client_id,
-            subscriptions: Vec::default(),
+            subscriptions: BTreeMap::default(),
             cout,
         };
 
@@ -152,11 +164,13 @@ impl Session {
         };
 
         let prefix = format!("session:{}", args.addr);
+        let sei = config.mqtt_session_expiry_interval(pkt.session_expiry_interval());
         Session {
             addr: args.addr,
             prefix: prefix.clone(),
             client_receive_maximum: pkt.receive_maximum(),
             client_max_packet_size: pkt.max_packet_size(),
+            session_expiry_interval: sei,
             config: config.clone(),
 
             miot_tx: args.miot_tx,
@@ -172,16 +186,26 @@ impl Session {
         }
     }
 
-    pub fn success_ack(&mut self, _pkt: &v5::Connect, _shard: &Shard) -> v5::ConnAck {
-        let props = v5::ConnAckProperties {
+    pub fn success_ack(&mut self, pkt: &v5::Connect, _shard: &Shard) -> v5::ConnAck {
+        let mut props = v5::ConnAckProperties {
+            session_expiry_interval: self.session_expiry_interval,
             receive_maximum: Some(self.config.mqtt_receive_maximum()),
+            maximum_qos: Some(self.config.mqtt_maximum_qos().try_into().unwrap()),
+            retain_available: None,
+            max_packet_size: Some(self.config.mqtt_max_packet_size()),
+            assigned_client_identifier: None,
+            wildcard_subscription_available: Some(true),
+            subscription_identifiers_available: Some(true),
+            shared_subscription_available: None,
             ..v5::ConnAckProperties::default()
         };
+        if pkt.payload.client_id.len() == 0 {
+            props.assigned_client_identifier = Some((*self.state.client_id).clone());
+        }
+        if let Some(keep_alive) = self.keep_alive.keep_alive() {
+            props.server_keep_alive = Some(keep_alive)
+        }
         let connack = v5::ConnAck::new_success(Some(props));
-        // TODO: session_present
-        // TODO: max_packet_size
-        // TODO: receive_maximum
-        // TODO: topic_alias_maximum
 
         connack
     }
@@ -198,9 +222,9 @@ impl Session {
 }
 
 impl Session {
-    pub fn remove_topic_filters(&mut self, topic_filters: &TopicTrie) {
-        for subsc in self.state.subscriptions.iter() {
-            topic_filters.unsubscribe(&subsc.topic_filter).ok();
+    pub fn remove_topic_filters(&mut self, topic_filters: &SubscribedTrie) {
+        for (topic_filter, _) in self.state.subscriptions.iter() {
+            topic_filters.unsubscribe(topic_filter).ok();
         }
     }
 

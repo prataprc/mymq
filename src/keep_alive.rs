@@ -5,7 +5,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub struct KeepAlive {
     prefix: String,
-    interval: Option<u32>,
+    interval: Option<u16>,
     alive_at: time::Instant,
 }
 
@@ -13,12 +13,16 @@ impl KeepAlive {
     pub fn new(prefix: &str, pkt: &v5::Connect, config: &Config) -> KeepAlive {
         let factor = config.mqtt_keep_alive_factor();
         let interval = match config.mqtt_keep_alive() {
-            Some(val) => Some(((val as f32) * factor) as u32),
+            Some(val) => Some(((val as f32) * factor) as u16),
             None if pkt.keep_alive == 0 => None,
-            None => Some(((pkt.keep_alive as f32) * factor) as u32),
+            None => Some(((pkt.keep_alive as f32) * factor) as u16),
         };
         let prefix = format!("{}-keepalive", prefix);
         KeepAlive { prefix, interval, alive_at: time::Instant::now() }
+    }
+
+    pub fn keep_alive(&self) -> Option<u16> {
+        self.interval
     }
 
     pub fn expired(&self) -> Result<()> {

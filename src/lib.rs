@@ -83,6 +83,12 @@ pub type PacketID = u16;
 /// Type alias for back-channel to application.
 pub type AppTx = mpsc::SyncSender<String>;
 
+/// Type alias for TopicTrie for managing subscriptions.
+pub type SubscribedTrie = TopicTrie<TopicFilter, (ClientID, u32)>; // (_, shard_id)
+
+/// Type alias for TopicTrie for managing retain messages.
+pub type RetainedTrie = TopicTrie<TopicName, v5::Packet>;
+
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
 /// following error-kind: `ProtocolError`, `PacketEncode`, `PacketDecode`,
 /// `MalformedPacket`.
@@ -107,6 +113,12 @@ pub trait Hostable {
 
 pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
+}
+
+pub trait IterTopicPath<'a> {
+    type Iter: Iterator<Item = &'a str>;
+
+    fn iter_topic_path(&'a self) -> Self::Iter;
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`

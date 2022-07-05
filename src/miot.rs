@@ -179,7 +179,9 @@ impl Miot {
         }
     }
 
-    pub fn remove_connection(&self, client_id: ClientID) -> Result<queue::Socket> {
+    pub fn remove_connection(&self, client_id: &ClientID) -> Result<queue::Socket> {
+        let client_id = client_id.clone();
+
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
                 match thrd.request(Request::RemoveConnection { client_id })?? {

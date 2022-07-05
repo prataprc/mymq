@@ -15,11 +15,11 @@ impl FixedHeader {
         let dup: bool = uns.arbitrary().unwrap();
         let qos: QoS = uns.arbitrary().unwrap();
         let byte1 = match pkt_type {
-            PacketType::Publish if ctx.max_qos < QoS::AtLeastOnce => {
+            PacketType::Publish if ctx.maximum_qos < QoS::AtLeastOnce => {
                 let qos = [QoS::AtLeastOnce, QoS::ExactlyOnce][rng.gen::<usize>() % 2];
                 fixed_byte!(u8::from(pkt_type), retain, qos, dup)
             }
-            PacketType::Publish if ctx.max_qos < QoS::ExactlyOnce => {
+            PacketType::Publish if ctx.maximum_qos < QoS::ExactlyOnce => {
                 let qos = QoS::ExactlyOnce;
                 fixed_byte!(u8::from(pkt_type), retain, qos, dup)
             }
@@ -99,7 +99,7 @@ impl Fuzzy for FixedHeader {
     fn validate(&self, ctx: &mut fuzzy::Context) -> Result<()> {
         let (pkt_type, _, qos, _) = self.unwrap()?;
         match pkt_type {
-            PacketType::Publish if qos > ctx.max_qos => {
+            PacketType::Publish if qos > ctx.maximum_qos => {
                 err!(MalformedPacket, code: MalformedPacket, "")
             }
             _ => Ok(()),
