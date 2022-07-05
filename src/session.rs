@@ -233,37 +233,63 @@ impl Session {
     }
 }
 
+// handle incoming packets.
 impl Session {
     pub fn route_packets(&mut self, shard: &Shard) -> Result<()> {
         use crate::miot::rx_packets;
 
-        match rx_packets(&self.session_rx, self.config.mqtt_msg_batch_size() as usize) {
+        let batch_size = self.config.mqtt_msg_batch_size() as usize;
+        let msgs = match rx_packets(&self.session_rx, batch_size) {
             (pkts, _empty, true) => {
                 self.handle_packets(shard, pkts)?;
                 err!(Disconnected, desc: "{} downstream disconnect", self.prefix)?
             }
-            (pkts, _empty, _disconnected) => self.handle_packets(shard, pkts)?,
+            (pkts, _empty, _disconnected) => {
+                self.handle_packets(shard, pkts)?;
+            }
+        };
+
+        // msgs is locally generate Message::ClientAck
+        self.in_messages(msgs);
+
+        // flush any locally generate Message::ClientAck
+        let (_would_block, wake) = self.flush_messages()?;
+        if wake {
+            allow_panic!(self, shard.miot.wake());
         }
 
         self.keep_alive.check_expired()
     }
 
-    fn handle_packets(&mut self, shard: &Shard, pkts: Vec<v5::Packet>) -> Result<()> {
+    // handle incoming packets
+    fn handle_packets(
+        &mut self,
+        shard: &Shard,
+        pkts: Vec<v5::Packet>,
+    ) -> Result<Vec<queue::Message>> {
         if pkts.len() > 0 {
             self.keep_alive.live();
         }
 
+        let mut msgs = vec![];
         for pkt in pkts.into_iter() {
-            self.handle_packet(shard, pkt)?
+            msgs.push(self.handle_packet(shard, pkt)?);
         }
 
         Ok(())
     }
 
-    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<()> {
+    // handle incoming packet
+    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<queue::Message> {
+        // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
         self.check_protocol_error(&pkt)?;
 
-        Ok(())
+        // SUBSCRIBE, UNSUBSCRIBE, PINGREQ
+        let msg = match pkt {
+            v5::Packet::PingReq => queue::Message::new_client_ack(v5::Packet::PingReq),
+        };
+
+        Ok(msg)
     }
 
     fn check_protocol_error(&self, pkt: &v5::Packet) -> Result<()> {
@@ -293,7 +319,8 @@ impl Session {
     }
 }
 
-// Handle incoming messages.
+// Handle incoming messages, incoming messages could be from owning shard's message queue
+// or locally generated (like Message::ClientAck)
 impl Session {
     pub fn in_messages(&mut self, msgs: Vec<queue::Message>) {
         for msg in msgs.into_iter() {
@@ -308,7 +335,7 @@ impl Session {
     }
 
     // return (would_block,miot_wake)
-    pub fn flush_messages(&mut self) -> (bool, bool) {
+    pub fn flush_messages(&mut self) -> Result<(bool, bool)> {
         let mut miot_wake = false;
         loop {
             let ok = self.state.cout.index.len() < self.client_receive_maximum.into();
@@ -327,7 +354,7 @@ impl Session {
                     break (true, miot_wake);
                 }
                 Some(mut msg @ queue::Message::Packet { .. }) => {
-                    let (would_block, wake) = self.flush_message(&msg);
+                    let (would_block, wake) = self.flush_message(&msg)?;
                     miot_wake = miot_wake | wake;
                     if would_block {
                         self.state.cout.back_log.push_front(msg);
@@ -339,7 +366,7 @@ impl Session {
                     }
                 }
                 Some(msg @ queue::Message::ClientAck { .. }) => {
-                    let (would_block, wake) = self.flush_message(&msg);
+                    let (would_block, wake) = self.flush_message(&msg)?;
                     miot_wake = miot_wake | wake;
                     if would_block {
                         self.state.cout.back_log.push_front(msg);
@@ -352,20 +379,18 @@ impl Session {
     }
 
     // return (would_block,miot_wake)
-    // TODO: use ClientOut::seqno in outgoing PUBLISH messages.
-    fn flush_message(&mut self, msg: &queue::Message) -> (bool, bool) {
+    // TODO: use ClientOut::seqno in outgoing PUBLISH messages as UserProp
+    fn flush_message(&mut self, msg: &queue::Message) -> Result<(bool, bool)> {
         let packet = match &msg {
             queue::Message::ClientAck { packet } => packet.clone(),
             queue::Message::Packet { packet, .. } => packet.clone(),
             _ => unreachable!(),
         };
         match self.miot_tx.try_send(packet) {
-            Ok(()) => (false, true),
-            Err(mpsc::TrySendError::Full(_)) => (true, false),
+            Ok(()) => Ok((false, true)),
+            Err(mpsc::TrySendError::Full(_)) => Ok((true, false)),
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                // TODO: we ignore this disconnect because if miot-rx has closed, it will
-                // lead to cycle back here via miot->shard.flush_connection
-                (false, false)
+                err!(IPCFail, desc: "{} miot_tx failed", self.prefix)
             }
         }
     }

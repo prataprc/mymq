@@ -557,7 +557,19 @@ impl Shard {
         // send back the connection acknowledgment CONNACK here.
         let packet = v5::Packet::ConnAck(session.success_ack(&pkt, self));
         session.in_messages(vec![queue::Message::new_client_ack(packet)]);
-        let (_, _) = session.flush_messages(); // add_connection will wake miot-thread.
+        let (_would_block, _wake) = match session.flush_messages() {
+            Ok(val) => val,
+            Err(err) => {
+                error!(
+                    Disconnected,
+                    desc: "{} failed to send CONNACK, ignoring session for {}",
+                    self.prefix, session.addr
+                );
+                return Response::Ok;
+            }
+        };
+
+        // add_connection further down shall wake miot-thread.
 
         let RunLoop { sessions, miot, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
