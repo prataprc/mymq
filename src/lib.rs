@@ -89,10 +89,10 @@ pub type PacketID = u16;
 pub type AppTx = mpsc::SyncSender<String>;
 
 /// Type alias for TopicTrie for managing subscriptions.
-pub type SubscribedTrie = TopicTrie<TopicFilter, (ClientID, u32)>; // (_, shard_id)
+pub type SubscribedTrie = TopicTrie<(ClientID, u32)>; // (_, shard_id)
 
 /// Type alias for TopicTrie for managing retain messages.
-pub type RetainedTrie = TopicTrie<TopicName, v5::Packet>;
+pub type RetainedTrie = TopicTrie<v5::Packet>;
 
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
 /// following error-kind: `ProtocolError`, `MalformedPacket`.

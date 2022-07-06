@@ -548,6 +548,7 @@ impl Shard {
             let args = SessionArgs {
                 addr,
                 client_id: client_id.clone(),
+                shard_id: self.shard_id,
                 miot_tx,
                 session_rx,
             };

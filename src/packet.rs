@@ -96,7 +96,7 @@ impl MQTTRead {
 
                             let fh = v5::FixedHeader { byte1, remaining_len };
                             data.reserve(pkt_len);
-                            data.resize(pkt_len);
+                            data.resize(pkt_len, 0);
                             Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
                         }
                         None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),

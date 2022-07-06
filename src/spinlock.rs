@@ -22,8 +22,7 @@
 //! 4. A **writer** can enter the room only when the door is un-locked and, un-latched
 //!    and, there are no other **reader** or **writer** in the room.
 //! 5. A **writer** shall spin, until it can latch the door, which can happen only
-//!    when no other reader/writer are inside the room and no other writer has already
-//!    acquired the latch.
+//!    when no other writer has already latched it.
 //! 6. Once the door is latched by a **writer**, no other **writer** or **reader** can
 //!    enter the room because of (3) and (4) properties. But all **readers** who are
 //!    already inside the room can finish their job and then exit.
@@ -112,7 +111,7 @@ impl<T> Spinlock<T> {
     }
 
     /// Acquire latch & lock for write permission.
-    pub fn write(&mut self) -> WriteGuard<T> {
+    pub fn write(&self) -> WriteGuard<T> {
         loop {
             let old = self.latchlock.load(SeqCst);
             if (old & Self::LATCH_FLAG) == 0 {
@@ -141,7 +140,11 @@ impl<T> Spinlock<T> {
                     if cfg!(feature = "debug") {
                         self.write_locks.fetch_add(1, SeqCst);
                     }
-                    break WriteGuard { door: self };
+                    let door = unsafe {
+                        let door = self as *const Self as *mut Self;
+                        door.as_mut().unwrap()
+                    };
+                    break WriteGuard { door };
                 }
                 panic!(concat!(
                     "latch is acquired, ZERO readers, but unable to lock! ",

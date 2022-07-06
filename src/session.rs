@@ -74,6 +74,7 @@ use crate::{KeepAlive, Message, PktRx, PktTx, Shard};
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
     pub client_id: ClientID,
+    pub shard_id: u32,
     pub miot_tx: PktTx,
     pub session_rx: PktRx,
 }
@@ -111,6 +112,8 @@ pub struct Session {
 struct SessionState {
     /// Client's ClientID that created this session.
     client_id: ClientID,
+    /// Client's ClientID that created this session.
+    shard_id: u32,
     /// List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
     /// messages are committed here, [Cluster::topic_filter] will also be updated.
     subscriptions: BTreeMap<TopicFilter, Subscription>,
@@ -149,6 +152,7 @@ impl Session {
         };
         let state = SessionState {
             client_id: args.client_id,
+            shard_id: args.shard_id,
             subscriptions: BTreeMap::default(),
             cout,
         };
@@ -223,9 +227,10 @@ impl Session {
 }
 
 impl Session {
-    pub fn remove_topic_filters(&mut self, topic_filters: &SubscribedTrie) {
+    pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
+        let value = (self.state.client_id.clone(), self.state.shard_id);
         for (topic_filter, _) in self.state.subscriptions.iter() {
-            topic_filters.unsubscribe(topic_filter).ok();
+            topic_filters.unsubscribe(topic_filter, &value).ok();
         }
     }
 
