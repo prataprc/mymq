@@ -79,6 +79,12 @@ pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 pub const POLL_EVENTS_SIZE: usize = 1024;
 pub const CONTROL_CHAN_SIZE: usize = 1024;
 
+pub enum QueueStatus<T> {
+    Ok(Vec<T>),           // holds remaining (for tx) or received (for rx) values
+    Block(Vec<T>),        // holds remaining (for tx) or received (for rx) values
+    Disconnected(Vec<T>), // holds remaining (for tx) or received (for rx) values
+}
+
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 

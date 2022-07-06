@@ -1,11 +1,84 @@
+use log::{error, warn};
+
 use std::collections::{BTreeMap, VecDeque};
-use std::{sync::mpsc, time};
+use std::sync::{mpsc, Arc};
+use std::time;
 
-use crate::{v5, ClientID, PacketID};
+use crate::{v5, ClientID, PacketID, QueueStatus};
 
-pub type MsgTx = mpsc::SyncSender<Message>;
-pub type MsgRx = mpsc::Receiver<Message>;
+#[derive(Clone)]
+pub struct MsgTx {
+    shard_id: u32,                 // message queue for shard.
+    tx: mpsc::SyncSender<Message>, // shard's incoming message queue.
+    waker: Arc<mio::Waker>,        // receiving shard's waker
+    count: usize,
+}
 
+impl Drop for MsgTx {
+    fn drop(&mut self) {
+        if self.count > 0 {
+            match self.waker.wake() {
+                Ok(()) => (),
+                Err(err) => {
+                    error!("shard-{} waking the receiving shard: {}", self.shard_id, err)
+                }
+            }
+        }
+    }
+}
+
+impl MsgTx {
+    pub fn try_sends(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        let mut iter = msgs.into_iter();
+        loop {
+            match iter.next() {
+                Some(msg) => match self.tx.try_send(msg) {
+                    Ok(()) => self.count += 1,
+                    Err(mpsc::TrySendError::Full(msg)) => {
+                        let mut msgs: Vec<Message> = Vec::from_iter(iter);
+                        msgs.insert(0, msg);
+                        break QueueStatus::Block(msgs);
+                    }
+                    Err(mpsc::TrySendError::Disconnected(msg)) => {
+                        warn!("shard-{} shard disconnected ...", self.shard_id);
+                        let mut msgs: Vec<Message> = Vec::from_iter(iter);
+                        msgs.insert(0, msg);
+                        break QueueStatus::Disconnected(msgs);
+                    }
+                },
+                None => break QueueStatus::Ok(vec![]),
+            }
+        }
+    }
+}
+
+pub struct MsgRx {
+    shard_id: u32, // message queue for shard.
+    msg_batch_size: usize,
+    rx: mpsc::Receiver<Message>,
+}
+
+impl MsgRx {
+    pub fn try_recvs(&self) -> QueueStatus<Message> {
+        let mut msgs = vec![];
+        loop {
+            match self.rx.try_recv() {
+                Ok(msg) if msgs.len() < self.msg_batch_size => msgs.push(msg),
+                Ok(msg) => {
+                    msgs.push(msg);
+                    break QueueStatus::Ok(msgs);
+                }
+                Err(mpsc::TryRecvError::Empty) => break QueueStatus::Block(msgs),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    warn!("shard-{} shard disconnected ...", self.shard_id);
+                    break QueueStatus::Disconnected(msgs);
+                }
+            }
+        }
+    }
+}
+
+// This is per-session data structure.
 // Note that Session::timestamp is related to ClientInp::timestamp.
 pub struct ClientInp {
     // Monotonically increasing `seqno`, starting from 1, that is bumped up for every
@@ -27,10 +100,10 @@ pub struct ClientInp {
     // This index is also used to detect duplicate PUBLISH, SUBSCRIBE, and UNSUBSCRIBE
     // packets.
     pub index: BTreeMap<PacketID, Message>,
-    // For N active sessions in this node, there snall be N-1 entries in this index.
+    // For N active sessions in this node, there can be upto be N-1 entries in this index.
     //
-    // Entry-value is (ClientInp::seqno, last-ack-instant), where seqno cycles-back from
-    // the other local-session via Messages::LocalAck.
+    // Entry-value is (ClientInp::seqno, last-ack-instant), where seqno is this session's
+    // ClientInp::seqno.
     //
     // Periodically, the minimum value of this list shall be computed and Messages older
     // than the computed-minium shall be purged from the `index`.
@@ -41,6 +114,7 @@ pub struct ClientInp {
     pub timestamp: BTreeMap<ClientID, (u64, time::Instant)>,
 }
 
+// This is per-session data structure.
 pub struct ClientOut {
     // Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     // out going message for this session. This will also be sent in PUBLISH UserProp.
@@ -70,8 +144,19 @@ pub struct ClientOut {
     // Back log of messages that needs to be flushed out to the client. All messages
     // meant for client first lands here.
     //
-    // CONNACK, PUBLISH, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP, DISCONNECT, AUTH
+    // CONNACK, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP, AUTH
+    // PUBLISH
     pub back_log: VecDeque<Message>,
+}
+
+// This is per-session data structure
+pub struct RouteOut {
+    // This is the outgoing buffer for all messages that published to other local-sessions.
+    // When a packet is going to be published to other local-session, it first lands here
+    // Subsequently the hosting shard's MsgTx is used to send the message out. In this,
+    // index there is one entry for each shard, the maximum size of Vec<Message> cannot
+    // be more that `msg_batch_size`.
+    pub index: BTreeMap<u32, Vec<Message>>,
 }
 
 pub enum Message {
@@ -112,9 +197,20 @@ impl Message {
             _ => unreachable!(),
         }
     }
+
+    pub fn as_client_id(&self) -> &ClientID {
+        match self {
+            Message::LocalAck { client_id, .. } => client_id,
+            Message::Packet { client_id, .. } => client_id,
+            _ => unreachable!(),
+        }
+    }
 }
 
-#[inline]
-pub fn msg_channel(size: usize) -> (MsgTx, MsgRx) {
-    mpsc::sync_channel(size)
+pub fn msg_channel(shard_id: u32, size: usize, waker: Arc<mio::Waker>) -> (MsgTx, MsgRx) {
+    let (tx, rx) = mpsc::sync_channel(size);
+    let msg_tx = MsgTx { shard_id, tx, waker, count: usize::default() };
+    let msg_rx = MsgRx { shard_id, msg_batch_size: size, rx };
+
+    (msg_tx, msg_rx)
 }

@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, VecDeque};
-use std::{net, sync::mpsc};
+use log::error;
 
-use crate::{message, socket, v5};
+use std::collections::{BTreeMap, VecDeque};
+use std::net;
+
+use crate::{message, v5};
 use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{KeepAlive, Message, PktRx, PktTx, Shard};
+use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
@@ -121,6 +123,8 @@ struct SessionState {
     cout: message::ClientOut,
 }
 
+pub struct SessionStats;
+
 #[allow(dead_code)]
 struct Subscription {
     subscription_id: u32,
@@ -215,14 +219,9 @@ impl Session {
         connack
     }
 
-    pub fn close(mut self) -> Self {
-        use std::mem;
-
-        let (tx, rx) = socket::pkt_channel(1); // DUMMY channels
-        mem::drop(mem::replace(&mut self.miot_tx, tx));
-        mem::drop(mem::replace(&mut self.session_rx, rx));
-
-        self
+    pub fn close(mut self) -> SessionStats {
+        std::mem::drop(self);
+        SessionStats
     }
 }
 
@@ -241,28 +240,29 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
-    pub fn route_packets(&mut self, shard: &Shard) -> Result<()> {
-        use crate::miot::rx_packets;
-
-        let batch_size = self.config.mqtt_msg_batch_size() as usize;
-        let msgs = match rx_packets(&self.session_rx, batch_size) {
-            (_pkts, _empty, true) => {
-                // TODO: is it okay to leave pkts hanging ?
-                err!(Disconnected, desc: "{} downstream disconnect", self.prefix)?
+    pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
+        match self.session_rx.try_recvs() {
+            QueueStatus::Ok(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(vec![])),
+            QueueStatus::Block(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(vec![])),
+            QueueStatus::Ok(pkts) => {
+                self.keep_alive.check_expired();
+                let msgs = self.handle_packets(shard, pkts)?;
+                self.in_messages(msgs); // pkts is locally generate Message::ClientAck
+                self.flush_messages(); // flush any locally generate Message::ClientAck
+                Ok(QueueStatus::Ok(vec![]))
             }
-            (pkts, _empty, _disconnected) => self.handle_packets(shard, pkts)?,
-        };
-
-        // msgs is locally generate Message::ClientAck
-        self.in_messages(msgs);
-
-        // flush any locally generate Message::ClientAck
-        let (_would_block, wake) = self.flush_messages()?;
-        if wake {
-            shard.as_miot().wake()?;
+            QueueStatus::Block(pkts) => {
+                self.keep_alive.check_expired();
+                let msgs = self.handle_packets(shard, pkts)?;
+                self.in_messages(msgs); // pkts is locally generate Message::ClientAck
+                self.flush_messages(); // flush any locally generate Message::ClientAck
+                Ok(QueueStatus::Block(vec![]))
+            }
+            QueueStatus::Disconnected(pkts) => {
+                error!("{} downstream disconnect", self.prefix);
+                Ok(QueueStatus::Disconnected(vec![]))
+            }
         }
-
-        self.keep_alive.check_expired()
     }
 
     // handle incoming packets
@@ -348,70 +348,75 @@ impl Session {
         }
     }
 
-    // return (would_block,miot_wake)
-    pub fn flush_messages(&mut self) -> Result<(bool, bool)> {
-        let mut miot_wake = false;
-        loop {
-            let ok = self.state.cout.index.len() < self.client_receive_maximum.into();
-            let msg = self.state.cout.back_log.pop_front();
-            match msg {
-                Some(Message::LocalAck { client_id, seqno, instant }) => {
-                    let old_seqno = match self.cinp.timestamp.get(&client_id) {
-                        Some((seqno, _)) => *seqno,
-                        None => 0,
-                    };
-                    assert!(old_seqno < seqno);
-                    self.cinp.timestamp.insert(client_id, (seqno, instant));
-                }
-                Some(msg @ Message::Packet { .. }) if !ok => {
-                    self.state.cout.back_log.push_front(msg);
-                    break Ok((true, miot_wake));
-                }
-                Some(mut msg @ Message::Packet { .. }) => {
-                    let (would_block, wake) = self.flush_message(&msg)?;
-                    miot_wake = miot_wake | wake;
-                    if would_block {
-                        self.state.cout.back_log.push_front(msg);
-                        break Ok((would_block, miot_wake));
-                    } else {
-                        let (curr_seqno, curr_packet_id) = self.incr_cout_seqno();
-                        msg.set_seqno(curr_seqno, curr_packet_id);
-                        self.state.cout.index.insert(curr_packet_id, msg);
-                    }
-                }
-                Some(msg @ Message::ClientAck { .. }) => {
-                    let (would_block, wake) = self.flush_message(&msg)?;
-                    miot_wake = miot_wake | wake;
-                    if would_block {
-                        self.state.cout.back_log.push_front(msg);
-                        break Ok((would_block, miot_wake));
-                    }
-                }
-                None => break Ok((false, miot_wake)),
-            }
-        }
-    }
+    pub fn flush_messages(&mut self) -> QueueStatus<Message> {
+        let miot_tx = self.miot_tx.clone(); // when this value is dropped miot woken up.
 
-    // return (would_block,miot_wake)
-    // TODO: use ClientOut::seqno in outgoing PUBLISH messages as UserProp
-    fn flush_message(&mut self, msg: &Message) -> Result<(bool, bool)> {
-        let packet = match &msg {
-            Message::ClientAck { packet } => packet.clone(),
-            Message::Packet { packet, .. } => packet.clone(),
-            _ => unreachable!(),
-        };
-        match self.miot_tx.try_send(packet) {
-            Ok(()) => Ok((false, true)),
-            Err(mpsc::TrySendError::Full(_)) => Ok((true, false)),
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                err!(IPCFail, desc: "{} miot_tx failed", self.prefix)
+        if self.state.cout.index.len() > self.client_receive_maximum.into() {
+            return QueueStatus::Block(vec![]);
+        }
+
+        let msgs: Vec<Message> = self.state.cout.back_log.drain(..).collect();
+        let mut iter = msgs.into_iter();
+        loop {
+            let msg = iter.next();
+            if msg.is_none() {
+                break QueueStatus::Ok(vec![]);
+            }
+            match msg.unwrap() {
+                Message::LocalAck { client_id, seqno, instant } => {
+                    match self.cinp.timestamp.insert(client_id, (seqno, instant)) {
+                        Some((old_seqno, _)) => assert!(old_seqno < seqno),
+                        None => (),
+                    }
+                }
+                Message::Packet { client_id, shard_id, seqno, packet_id, packet } => {
+                    match miot_tx.try_sends(vec![packet.clone()]) {
+                        QueueStatus::Ok(_) => {
+                            let (seqno, packet_id) = self.incr_cout_seqno();
+                            let msg = Message::Packet {
+                                client_id,
+                                shard_id,
+                                seqno,
+                                packet_id,
+                                packet,
+                            };
+                            self.state.cout.index.insert(packet_id, msg);
+                        }
+                        QueueStatus::Block(pkts) => {
+                            let msg = Message::Packet {
+                                client_id,
+                                shard_id,
+                                seqno,
+                                packet_id,
+                                packet,
+                            };
+                            self.state.cout.back_log.push_front(msg);
+                            break QueueStatus::Block(vec![]);
+                        }
+                        QueueStatus::Disconnected(_) => {
+                            break QueueStatus::Disconnected(vec![]);
+                        }
+                    }
+                }
+                Message::ClientAck { packet } => {
+                    match miot_tx.try_sends(vec![packet.clone()]) {
+                        QueueStatus::Ok(_) => (),
+                        QueueStatus::Block(pkts) => {
+                            let msg = Message::ClientAck { packet };
+                            self.state.cout.back_log.push_front(msg);
+                        }
+                        QueueStatus::Disconnected(pkts) => {
+                            break QueueStatus::Disconnected(vec![]);
+                        }
+                    }
+                }
             }
         }
     }
 
     fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
         let (seqno, packet_id) = (self.state.cout.seqno, self.state.cout.next_packet_id);
-        self.state.cout.seqno = self.state.cout.seqno + 1;
+        self.state.cout.seqno = self.state.cout.seqno.saturating_add(1);
         self.state.cout.next_packet_id =
             match self.state.cout.next_packet_id.wrapping_add(1) {
                 0 => 1,

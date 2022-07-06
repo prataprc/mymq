@@ -1,12 +1,12 @@
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use std::{collections::BTreeMap, mem, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{message, socket, v5};
+use crate::{message, session, socket, v5};
 use crate::{AppTx, ClientID, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::{Cluster, Flusher, Message, Miot, Socket};
+use crate::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -47,6 +47,8 @@ pub struct RunLoop {
     /// Mio poller for asynchronous handling, all events are from consensus port and
     /// thread-waker.
     poll: mio::Poll,
+    /// Self waker
+    waker: Arc<mio::Waker>,
     /// Cluster::Tx handle to communicate back to cluster.
     /// Shall be dropped after close_wait call, when the thread returns, will point
     /// to Inner::Init
@@ -63,10 +65,7 @@ pub struct RunLoop {
     // TODO: remove session only when Session::session_rx channel has disconnected.
     sessions: BTreeMap<ClientID, Session>,
 
-    /// Every shard has an input queue for [Message], which receives all locally
-    /// hopping MQTT messages for sessions managed by this shard.
-    msg_rx: message::MsgRx,
-    /// Corresponding Tx handle for all other shards, as Shard::MsgTx,
+    /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::topic_filters
     topic_filters: SubscribedTrie,
@@ -79,7 +78,7 @@ pub struct RunLoop {
 
 pub struct FinState {
     pub miot: Miot,
-    pub sessions: BTreeMap<ClientID, Session>,
+    pub sessions: BTreeMap<ClientID, session::SessionStats>,
 }
 
 impl Default for Shard {
@@ -156,7 +155,7 @@ impl Shard {
         // in this shard, hence the queue-capacity is correspondingly large.
         let (msg_tx, msg_rx) = {
             let size = self.config.mqtt_msg_batch_size() * self.config.num_shards();
-            message::msg_channel(size as usize)
+            message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
         let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
@@ -166,11 +165,11 @@ impl Shard {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
+                waker,
                 cluster: Box::new(args.cluster),
                 flusher: args.flusher,
                 miot: Miot::default(),
 
-                msg_rx,
                 sessions: BTreeMap::default(),
                 shard_queues: BTreeMap::default(),
                 topic_filters: args.topic_filters,
@@ -200,7 +199,7 @@ impl Shard {
             };
             match &shard.inner {
                 Inner::Handle(Handle { thrd, .. }) => {
-                    thrd.request(Request::SetMiot(miot))??;
+                    thrd.request(Request::SetMiot(miot, msg_rx))??;
                 }
                 _ => unreachable!(),
             }
@@ -256,8 +255,9 @@ impl Shard {
 }
 
 pub enum Request {
-    SetMiot(Miot),
+    SetMiot(Miot, MsgRx),
     SetShardQueues(BTreeMap<u32, Shard>),
+    SetMsgRx(MsgRx),
     AddSession(AddSessionArgs),
     FlushConnection { socket: Socket, err: Error },
     Close,
@@ -281,7 +281,6 @@ impl Shard {
                 err!(IOError, try: waker.wake(), "shard-wake")
             }
             Inner::Tx(waker, _) => err!(IOError, try: waker.wake(), "shard-wake"),
-            Inner::MsgTx(waker, _) => err!(IOError, try: waker.wake(), "shard-wake"),
             _ => unreachable!(),
         }
     }
@@ -338,6 +337,20 @@ impl Threadable for Shard {
 
         info!("{} spawn ...", self.prefix);
 
+        let req = allow_panic!(self, rx.recv());
+        let msg_rx = match req {
+            (Request::SetMiot(miot, msg_rx), Some(tx)) => {
+                let run_loop = match &mut self.inner {
+                    Inner::Main(run_loop) => run_loop,
+                    _ => unreachable!(),
+                };
+                run_loop.miot = miot;
+                allow_panic!(&self, tx.send(Ok(Response::Ok)));
+                msg_rx
+            }
+            _ => unreachable!(),
+        };
+
         let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
@@ -348,8 +361,12 @@ impl Threadable for Shard {
                 false => (),
             };
 
+            self.in_messages(&msg_rx);
+            self.flush_messages();
             self.route_packets();
-            self.route_messages();
+
+            // wake up miot every time shard wakes up
+            allow_panic!(self, self.as_miot().wake())
         }
 
         self.handle_close(Request::Close);
@@ -398,9 +415,6 @@ impl Shard {
 
         for q in qs.into_iter() {
             match q {
-                (q @ SetMiot(_), Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_set_miot(q))));
-                }
                 (q @ SetShardQueues(_), Some(tx)) => {
                     allow_panic!(&self, tx.send(Ok(self.handle_set_shard_queues(q))));
                 }
@@ -421,6 +435,56 @@ impl Shard {
         (empty, disconnected)
     }
 
+    fn in_messages(&mut self, msg_rx: &MsgRx) -> QueueStatus<Message> {
+        let RunLoop { sessions, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        // receive messages targeting all the sessions.
+        let msgs = match msg_rx.try_recvs() {
+            QueueStatus::Ok(msgs) => msgs,
+            QueueStatus::Block(msgs) => msgs,
+            QueueStatus::Disconnected(_) => {
+                return QueueStatus::Disconnected(vec![]);
+            }
+        };
+
+        // partition the messages for each session.
+        let mut session_msgs: BTreeMap<ClientID, Vec<Message>> = BTreeMap::default();
+        for msg in msgs.into_iter() {
+            let client_id = msg.as_client_id();
+            match session_msgs.get_mut(client_id) {
+                Some(msgs) => msgs.push(msg),
+                None => {
+                    session_msgs.insert(client_id.clone(), vec![msg]);
+                }
+            }
+        }
+
+        // book the partitioned messages under each session
+        for (client_id, msgs) in session_msgs.into_iter() {
+            match sessions.get_mut(&client_id) {
+                Some(session) => session.in_messages(msgs),
+                None => warn!("{} msg-rx, session {} is gone", self.prefix, *client_id),
+            }
+        }
+
+        QueueStatus::Ok(vec![])
+    }
+
+    // flush the booked messages down stream
+    fn flush_messages(&mut self) {
+        let RunLoop { sessions, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        for (_, session) in sessions.iter_mut() {
+            session.flush_messages();
+        }
+    }
+
     // For each session interface convert packets to messages and route them to other
     // shards/bridges and consume messages from other shards.
     fn route_packets(&mut self) {
@@ -433,7 +497,7 @@ impl Shard {
         let mut failed_sessions = vec![];
         for (client_id, session) in sessions.iter_mut() {
             match session.route_packets(self) {
-                Ok(()) => (),
+                Ok(status) => todo!(),
                 Err(err) => failed_sessions.push((client_id.clone(), err)),
             }
         }
@@ -492,20 +556,6 @@ impl Shard {
 }
 
 impl Shard {
-    fn handle_set_miot(&mut self, req: Request) -> Response {
-        let miot = match req {
-            Request::SetMiot(miot) => miot,
-            _ => unreachable!(),
-        };
-        let run_loop = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-
-        run_loop.miot = miot;
-        Response::Ok
-    }
-
     fn handle_set_shard_queues(&mut self, req: Request) -> Response {
         let shard_queues = match req {
             Request::SetShardQueues(shard_queues) => shard_queues,
@@ -537,13 +587,13 @@ impl Shard {
             // and there is a separate queue for every session.
             let (upstream, session_rx) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
-                socket::pkt_channel(size)
+                socket::pkt_channel(self.shard_id, size, self.as_waker())
             };
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
             let (miot_tx, downstream) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
-                socket::pkt_channel(size)
+                socket::pkt_channel(self.shard_id, size, self.as_miot().to_waker())
             };
             let args = SessionArgs {
                 addr,
@@ -558,56 +608,60 @@ impl Shard {
         // send back the connection acknowledgment CONNACK here.
         let packet = v5::Packet::ConnAck(session.success_ack(&pkt, self));
         session.in_messages(vec![Message::new_client_ack(packet)]);
-        let (_would_block, _wake) = match session.flush_messages() {
-            Ok(val) => val,
-            Err(err) => {
-                error!("{} fail to send CONNACK: {}", self.prefix, err);
-                return Response::Ok;
+        match session.flush_messages() {
+            QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
+                error!("{} fail to send CONNACK in add_session", self.prefix);
+                Response::Ok
             }
-        };
+            _ => {
+                // add_connection further down shall wake miot-thread.
+                let RunLoop { sessions, miot, .. } = match &mut self.inner {
+                    Inner::Main(run_loop) => run_loop,
+                    _ => unreachable!(),
+                };
+                // nuke existing session.
+                let old_session = match sessions.get(&client_id) {
+                    Some(_) => sessions.remove(&client_id),
+                    None => None,
+                };
 
-        // add_connection further down shall wake miot-thread.
+                {
+                    let client_id = client_id.clone();
+                    let args = AddConnectionArgs {
+                        client_id,
+                        conn,
+                        addr,
+                        upstream,
+                        downstream,
+                        client_max_packet_size: session.client_max_packet_size(),
+                    };
+                    allow_panic!(&self, miot.add_connection(args));
+                }
 
-        let RunLoop { sessions, miot, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-        // nuke existing session.
-        let old_session = match sessions.get(&client_id) {
-            Some(_) => sessions.remove(&client_id),
-            None => None,
-        };
+                sessions.insert(client_id.clone(), session);
 
-        {
-            let client_id = client_id.clone();
-            let args = AddConnectionArgs {
-                client_id,
-                conn,
-                addr,
-                upstream,
-                downstream,
-                client_max_packet_size: session.client_max_packet_size(),
-            };
-            allow_panic!(&self, miot.add_connection(args));
-        }
+                let socket = allow_panic!(self, miot.remove_connection(&client_id));
 
-        sessions.insert(client_id.clone(), session);
+                match (old_session, socket) {
+                    (Some(_old_session), Some(socket)) => {
+                        let err: Result<()> = err!(
+                            SessionTakenOver,
+                            code: SessionTakenOver,
+                            "client {}",
+                            addr
+                        );
+                        let err = err.unwrap_err();
+                        let arg = Request::FlushConnection { socket, err };
+                        mem::drop(sessions);
+                        mem::drop(miot);
+                        self.handle_flush_connection(arg);
+                    }
+                    (_, _) => (), // there no exiting session with same client_id
+                }
 
-        let socket = allow_panic!(self, miot.remove_connection(&client_id));
-
-        match (old_session, socket) {
-            (Some(_old_session), Some(socket)) => {
-                let err: Result<()> =
-                    err!(SessionTakenOver, code: SessionTakenOver, "client {}", addr);
-                let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
-                mem::drop(sessions);
-                mem::drop(miot);
-                self.handle_flush_connection(arg);
+                Response::Ok
             }
-            (_, _) => (), // there no exiting session with same client_id
         }
-
-        Response::Ok
     }
 
     fn handle_flush_connection(&mut self, req: Request) -> Response {
@@ -647,7 +701,6 @@ impl Shard {
                 mem::drop(run_loop.cluster);
                 mem::drop(run_loop.flusher);
 
-                mem::drop(run_loop.msg_rx);
                 mem::drop(run_loop.shard_queues);
                 mem::drop(run_loop.topic_filters);
                 mem::drop(run_loop.retained_messages);
@@ -690,6 +743,13 @@ impl Shard {
     pub fn as_miot(&self) -> &Miot {
         match &self.inner {
             Inner::Main(RunLoop { miot, .. }) => miot,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_waker(&self) -> Arc<mio::Waker> {
+        match &self.inner {
+            Inner::Main(RunLoop { waker, .. }) => Arc::clone(waker),
             _ => unreachable!(),
         }
     }

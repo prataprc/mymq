@@ -3,7 +3,7 @@ use log::{debug, error, info, trace, warn};
 use std::{thread, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{v5, AppTx, Config, Socket, SLEEP_10MS};
+use crate::{v5, AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -216,7 +216,6 @@ impl Threadable for Flusher {
 
 impl Flusher {
     fn handle_flush_connection(&self, req: Request) -> Response {
-        use crate::miot::{rx_packets, Miot};
         use crate::packet::send_disconnect;
 
         let now = time::Instant::now();
@@ -233,33 +232,30 @@ impl Flusher {
         // socket.
         // TODO: Would there be any system-level requirement to do upstream flushing ?
 
-        info!("{} flush connection at {:?}", prefix, now);
-        match rx_packets(&socket.wt.miot_rx, usize::MAX) {
-            (qs, _empty, false) => {
-                socket.wt.packets.extend_from_slice(&qs);
-                error!("{} unexpected fatality, usize::MAX exhausted", prefix);
-            }
-            (qs, _empty, true) => {
-                socket.wt.packets.extend_from_slice(&qs);
-                info!("{} flush last batch, qs:{}", prefix, qs.len());
-            }
-        }
-
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
+        info!("{} flush connection at {:?}", prefix, now);
         loop {
-            match Miot::flush_packets(&prefix, &self.config, &mut socket) {
-                Ok(true /*would_block*/) if time::Instant::now() > timeout => {
+            match socket.wt.miot_rx.try_recvs() {
+                QueueStatus::Ok(pkts) | QueueStatus::Block(pkts) => {
+                    socket.wt.packets.extend(pkts.into_iter());
+                }
+                QueueStatus::Disconnected(pkts) => {
+                    socket.wt.packets.extend(pkts.into_iter());
+                    info!("{} flush last batch, pkts:{}", prefix, pkts.len());
+                }
+            }
+
+            match socket.flush_packets(&prefix, &self.config) {
+                QueueStatus::Ok(_) => (),
+                QueueStatus::Block(_) if time::Instant::now() > timeout => {
                     error!("{} give up flush_packets after {:?}", prefix, timeout);
                     break;
                 }
-
-                Ok(true) => thread::sleep(SLEEP_10MS),
-                Ok(false) => break,
-                Err(err) if err.kind() == ErrorKind::Disconnected => {
-                    warn!("{} stop flush, socket disconnected {}", prefix, err);
+                QueueStatus::Block(_) => thread::sleep(SLEEP_10MS),
+                QueueStatus::Disconnected(_) => {
+                    warn!("{} stop flush, socket disconnected", prefix);
                     break;
                 }
-                Err(err) => unreachable!("unexpected err: {}", err),
             }
         }
 
