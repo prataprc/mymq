@@ -10,6 +10,7 @@ use crate::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
+type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
 pub struct Shard {
     /// Human readable name for shard.
@@ -72,7 +73,7 @@ pub struct RunLoop {
     /// MVCC clone of Cluster::retained_messages
     retained_messages: RetainedTrie,
 
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
@@ -165,7 +166,7 @@ impl Shard {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
-                waker,
+                waker: Arc::clone(&waker),
                 cluster: Box::new(args.cluster),
                 flusher: args.flusher,
                 miot: Miot::default(),
@@ -337,6 +338,7 @@ impl Threadable for Shard {
 
         info!("{} spawn ...", self.prefix);
 
+        // this a work around to wire up all the threads without using unsafe.
         let req = allow_panic!(self, rx.recv());
         let msg_rx = match req {
             (Request::SetMiot(miot, msg_rx), Some(tx)) => {
@@ -357,8 +359,8 @@ impl Threadable for Shard {
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                true /*disconnected*/ => break,
-                false => (),
+                true => break,
+                _exit => (),
             };
 
             self.in_messages(&msg_rx);
@@ -366,10 +368,14 @@ impl Threadable for Shard {
             self.route_packets();
 
             // wake up miot every time shard wakes up
-            allow_panic!(self, self.as_miot().wake())
+            self.as_miot().wake()
         }
 
-        self.handle_close(Request::Close);
+        match &self.inner {
+            Inner::Main(_) => self.handle_close(Request::Close),
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        };
 
         info!("{} thread exit ...", self.prefix);
 
@@ -378,7 +384,7 @@ impl Threadable for Shard {
 }
 
 impl Shard {
-    // (disconnected,)
+    // (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
@@ -390,49 +396,50 @@ impl Shard {
         loop {
             // keep repeating until all control requests are drained.
             match self.drain_control_chan(rx) {
-                (_empty, true) => break true,
-                (true, _disconnected) => break false,
-                (false, false) => (),
+                (_status, true) => break true,
+                (QueueStatus::Ok(_), _exit) => (),
+                (QueueStatus::Block(_), _) => break false,
+                (QueueStatus::Disconnected(_), _) => break true,
             }
         }
     }
 }
 
 impl Shard {
-    // Return (empty, disconnected)
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+    // Return (queue-status, disconnected)
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+        let reqs = status.take_values();
+        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
-        if matches!(&self.inner, Inner::Close(_)) {
-            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
-            qs.drain(..);
-        } else {
-            debug!("{} process {} requests closed:false", self.prefix, qs.len());
-        }
-
-        for q in qs.into_iter() {
-            match q {
-                (q @ SetShardQueues(_), Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_set_shard_queues(q))));
+        let mut closed = false;
+        for req in reqs.into_iter() {
+            match req {
+                (req @ SetShardQueues(_), Some(tx)) => {
+                    let resp = self.handle_set_shard_queues(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ AddSession { .. }, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_add_session(q))));
+                (req @ AddSession { .. }, Some(tx)) => {
+                    let resp = self.handle_add_session(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ FlushConnection { .. }, None) => {
-                    let _resp = self.handle_flush_connection(q);
+                (req @ FlushConnection { .. }, None) => {
+                    self.handle_flush_connection(req);
                 }
-                (q @ Close, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
+                (req @ Close, Some(tx)) => {
+                    let resp = self.handle_close(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    closed = true;
                 }
 
                 (_, _) => unreachable!(),
             };
         }
 
-        (empty, disconnected)
+        (status, closed)
     }
 
     fn in_messages(&mut self, msg_rx: &MsgRx) -> QueueStatus<Message> {
@@ -446,7 +453,7 @@ impl Shard {
             QueueStatus::Ok(msgs) => msgs,
             QueueStatus::Block(msgs) => msgs,
             QueueStatus::Disconnected(_) => {
-                return QueueStatus::Disconnected(vec![]);
+                return QueueStatus::Disconnected(Vec::new());
             }
         };
 
@@ -470,7 +477,7 @@ impl Shard {
             }
         }
 
-        QueueStatus::Ok(vec![])
+        QueueStatus::Ok(Vec::new())
     }
 
     // flush the booked messages down stream
@@ -494,7 +501,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let mut failed_sessions = vec![];
+        let mut failed_sessions = Vec::new(); // TODO: with_capacity ?
         for (client_id, session) in sessions.iter_mut() {
             match session.route_packets(self) {
                 Ok(status) => todo!(),
@@ -587,7 +594,7 @@ impl Shard {
             // and there is a separate queue for every session.
             let (upstream, session_rx) = {
                 let size = self.config.mqtt_msg_batch_size() as usize;
-                socket::pkt_channel(self.shard_id, size, self.as_waker())
+                socket::pkt_channel(self.shard_id, size, self.to_waker())
             };
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
@@ -747,7 +754,7 @@ impl Shard {
         }
     }
 
-    pub fn as_waker(&self) -> Arc<mio::Waker> {
+    pub fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
             Inner::Main(RunLoop { waker, .. }) => Arc::clone(waker),
             _ => unreachable!(),

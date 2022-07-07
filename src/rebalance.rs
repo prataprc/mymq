@@ -81,7 +81,7 @@ impl Algorithm {
                     .map(|shard| Topology {
                         shard,
                         master: node.clone(),
-                        replicas: vec![],
+                        replicas: Vec::new(), // TODO: with_capacity ?
                     })
                     .collect()
             }
@@ -100,7 +100,7 @@ pub fn diff_topology(olds: &[Topology], news: &[Topology]) -> Vec<(Topology, Top
 
     assert_eq!(olds.len(), news.len());
 
-    let mut diffs = vec![];
+    let mut diffs = Vec::new(); // TODO: with_capacity
     for (old, new) in olds.into_iter().zip(news.into_iter()) {
         assert_eq!(old.shard, new.shard);
         if old == new {

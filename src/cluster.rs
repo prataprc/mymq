@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, net, path, time};
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{rebalance, util, v5};
 use crate::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
-use crate::{Flusher, Listener, Shard, Ticker};
+use crate::{Flusher, Listener, QueueStatus, Shard, Ticker};
 
 use crate::{Error, ErrorKind, Result};
 
@@ -21,6 +21,7 @@ use crate::{Error, ErrorKind, Result};
 // TODO: Handle retain-messages in Will, Publish, Subscribe scenarios, retain_available.
 
 type ThreadRx = Rx<Request, Result<Response>>;
+type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
 /// Cluster is the global configuration state for multi-node MQTT cluster.
 pub struct Cluster {
@@ -69,7 +70,7 @@ pub struct RunLoop {
     // TODO: should we make this part of the ClusterState
     retained_messages: RetainedTrie,
 
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
@@ -161,7 +162,7 @@ impl Cluster {
         };
 
         let state = {
-            let topology = rebalancer.rebalance(&vec![node.clone()], vec![]);
+            let topology = rebalancer.rebalance(&vec![node.clone()], Vec::new());
             ClusterState::SingleNode {
                 state: SingleNode { config: self.config.clone(), node, topology },
             }
@@ -207,7 +208,7 @@ impl Cluster {
         cluster.prefix = cluster.prefix();
 
         {
-            let mut ticker_shards = vec![];
+            let mut ticker_shards = Vec::new();
             let mut shard_queues = BTreeMap::default();
 
             let mut shards = BTreeMap::default();
@@ -337,25 +338,28 @@ impl Threadable for Cluster {
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                true /*disconnected*/ => break,
-                false => (),
+                true => break,
+                _exit => (),
             };
         }
 
-        self.handle_close(Request::Close);
+        match &self.inner {
+            Inner::Main(_) => self.handle_close(Request::Close),
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        };
 
         info!("{}, thread exit ...", self.prefix);
-
         self
     }
 }
 
 impl Cluster {
-    // return (disconnected,)
+    // return (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
         let mut iter = events.iter();
-        let disconnected = 'outer: loop {
+        let exit = 'outer: loop {
             match iter.next() {
                 Some(event) => {
                     trace!("{}, poll-event token:{}", self.prefix, event.token().0);
@@ -365,9 +369,10 @@ impl Cluster {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
                             match self.drain_control_chan(rx) {
-                                (_empty, true) => break 'outer true,
-                                (true, _disconnected) => break,
-                                (false, false) => (),
+                                (_status, true) => break 'outer true,
+                                (QueueStatus::Ok(_), _exit) => (),
+                                (QueueStatus::Block(_), _) => break,
+                                (QueueStatus::Disconnected(_), _) => break 'outer true,
                             }
                         },
                         Self::TOKEN_CONSENSUS => todo!(),
@@ -379,43 +384,43 @@ impl Cluster {
         };
 
         debug!("{}, polled and got {} events", self.prefix, count);
-        disconnected
+        exit
     }
 
-    // Return (empty, disconnected)
+    // Return (queue-status, exit)
     // IPCFail,
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
-
-        if matches!(&self.inner, Inner::Close(_)) {
-            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
-            qs.drain(..);
-        } else {
-            debug!("{} process {} requests closed:false", self.prefix, qs.len());
-        }
+        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+        let reqs = status.take_values();
+        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
         // TODO: review control-channel handling for all threads. Should we panic or
         // return error.
-        for q in qs.into_iter() {
-            match q {
-                (q @ Set { .. }, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_set(q))));
+        let mut closed = false;
+        for req in reqs.into_iter() {
+            match req {
+                (req @ Set { .. }, Some(tx)) => {
+                    let resp = self.handle_set(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ AddConnection(_), Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_add_connection(q))));
+                (req @ AddConnection(_), Some(tx)) => {
+                    let resp = self.handle_add_connection(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ Close, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
+                (req @ Close, Some(tx)) => {
+                    let resp = self.handle_close(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    closed = true;
                 }
 
                 (_, _) => unreachable!(), // TODO: log meaning message.
             };
         }
 
-        (empty, disconnected)
+        (status, closed)
     }
 }
 

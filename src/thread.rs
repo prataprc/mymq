@@ -4,10 +4,14 @@
 //! expected to hold onto its own state, and handle all inter-thread communication
 //! via channels and message queues.
 
+use log::warn;
+
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use crate::{Error, ErrorKind, Result};
+use crate::{Error, ErrorKind, QueueStatus, Result};
+
+pub type QueueReq<Q, R> = QueueStatus<(Q, Option<mpsc::Sender<R>>)>;
 
 pub trait Threadable: Sized {
     type Req;
@@ -42,14 +46,18 @@ impl<Q, R> Tx<Q, R> {
     {
         match self {
             Tx::N(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((msg, None)));
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((msg, None)))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake()),
+                    None => Ok(()),
+                }
             }
             Tx::S(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((msg, None)));
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((msg, None)))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake()),
+                    None => Ok(()),
+                }
             }
         }
     }
@@ -63,14 +71,18 @@ impl<Q, R> Tx<Q, R> {
         let (stx, srx) = mpsc::channel();
         match self {
             Tx::N(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((request, Some(stx))))?;
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((request, Some(stx))))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake())?,
+                    None => (),
+                }
             }
             Tx::S(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((request, Some(stx))))?;
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((request, Some(stx))))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake())?,
+                    None => (),
+                }
             }
         }
 
@@ -86,14 +98,18 @@ impl<Q, R> Tx<Q, R> {
     {
         match self {
             Tx::N(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((request, Some(resp_tx))));
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((request, Some(resp_tx))))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake()),
+                    None => Ok(()),
+                }
             }
             Tx::S(tx, waker) => {
-                let res = err!(IPCFail, try: tx.send((request, Some(resp_tx))));
-                waker.as_ref().map(|w| w.wake().ok());
-                res
+                err!(IPCFail, try: tx.send((request, Some(resp_tx))))?;
+                match waker {
+                    Some(waker) => err!(IOError, try: waker.wake()),
+                    None => Ok(()),
+                }
             }
         }
     }
@@ -239,41 +255,40 @@ where
     }
 }
 
-/// Return (requests, empty, disconnected), uses non-blocking `try_recv`. For blocking
-/// read, use get_requests.
-pub fn pending_requests<Q, R>(
-    rx: &Rx<Q, R>,
-    max: usize,
-) -> (Vec<(Q, Option<mpsc::Sender<R>>)>, bool, bool) {
-    let mut reqs = vec![];
+/// Uses non-blocking `try_recv`. For blocking read, use get_requests.
+pub fn pending_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueReq<Q, R> {
+    let mut reqs = Vec::new(); // TODO: with capacity ?
     loop {
         match rx.try_recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),
             Ok(req) => {
                 reqs.push(req);
-                break (reqs, false, false);
+                break QueueReq::Ok(reqs);
             }
-            Err(mpsc::TryRecvError::Disconnected) => break (reqs, false, true),
-            Err(mpsc::TryRecvError::Empty) => break (reqs, true, false),
+            Err(mpsc::TryRecvError::Empty) => break QueueReq::Block(reqs),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                warn!("{} req-channel disconnected ...", prefix);
+                break QueueReq::Disconnected(reqs);
+            }
         }
     }
 }
 
 /// Return (requests, disconnected), uses blocking `recv`. For nond-blocking version
 /// use pending_requests.
-pub fn get_requests<Q, R>(
-    rx: &Rx<Q, R>,
-    max: usize,
-) -> (Vec<(Q, Option<mpsc::Sender<R>>)>, bool) {
-    let mut reqs = vec![];
+pub fn get_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueReq<Q, R> {
+    let mut reqs = Vec::new(); // TODO: with capacity ?
     loop {
         match rx.recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),
             Ok(req) => {
                 reqs.push(req);
-                break (reqs, false);
+                break QueueReq::Ok(reqs);
             }
-            Err(mpsc::RecvError) => break (reqs, true),
+            Err(mpsc::RecvError) => {
+                warn!("{} req-channel disconnected ...", prefix);
+                break QueueReq::Disconnected(reqs);
+            }
         }
     }
 }

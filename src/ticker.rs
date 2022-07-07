@@ -28,7 +28,8 @@ pub struct RunLoop {
     /// Shard-Tx handle to all shards hosted in this node.
     shards: Vec<Shard>,
 
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
+    #[allow(dead_code)]
     app_tx: AppTx,
 }
 
@@ -138,23 +139,19 @@ impl Threadable for Ticker {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Request, Result<Response>>) -> Self {
-        loop {
+        'outer: loop {
             thread::sleep(SLEEP_10MS);
 
-            let exit = loop {
+            loop {
                 match rx.try_recv() {
                     Ok((Request::Close, Some(tx))) => {
-                        allow_panic!(&self, tx.send(Ok(Response::Ok)));
-                        break true;
+                        err!(IPCFail, try: tx.send(Ok(Response::Ok))).ok();
+                        break 'outer;
                     }
-                    Err(mpsc::TryRecvError::Empty) => break false,
-                    Err(mpsc::TryRecvError::Disconnected) => break true,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break 'outer,
                     Ok(_) => unreachable!(),
                 }
-            };
-
-            if exit {
-                break;
             }
 
             let RunLoop { ticker_count, shards, .. } = match &mut self.inner {
@@ -162,23 +159,13 @@ impl Threadable for Ticker {
                 _ => unreachable!(),
             };
 
-            let shards0 = mem::replace(shards, Vec::default());
+            *ticker_count += 1;
 
-            let mut shards1 = vec![];
-            for shard in shards0.into_iter() {
-                match shard.wake() {
-                    Ok(()) => shards1.push(shard),
-                    Err(err) => {
-                        error!(
-                            "{} fail waking shard {}: {}",
-                            self.prefix, shard.shard_id, err
-                        )
-                    }
+            for shard in shards.iter() {
+                if let Err(e) = shard.wake() {
+                    error!("{} waking shard {}: {}", self.prefix, shard.shard_id, e);
                 }
             }
-
-            let _empty = mem::replace(shards, shards1);
-            *ticker_count += 1;
         }
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
@@ -199,6 +186,7 @@ impl Ticker {
         format!("{}-ticker", self.name)
     }
 
+    #[allow(dead_code)]
     fn as_app_tx(&self) -> &mpsc::SyncSender<String> {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,

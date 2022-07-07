@@ -46,7 +46,7 @@ impl MsgTx {
                         break QueueStatus::Disconnected(msgs);
                     }
                 },
-                None => break QueueStatus::Ok(vec![]),
+                None => break QueueStatus::Ok(Vec::new()),
             }
         }
     }
@@ -60,7 +60,7 @@ pub struct MsgRx {
 
 impl MsgRx {
     pub fn try_recvs(&self) -> QueueStatus<Message> {
-        let mut msgs = vec![];
+        let mut msgs = Vec::new(); // TODO: with_capacity ?
         loop {
             match self.rx.try_recv() {
                 Ok(msg) if msgs.len() < self.msg_batch_size => msgs.push(msg),

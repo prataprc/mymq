@@ -29,7 +29,8 @@ pub enum Inner {
 }
 
 pub struct RunLoop {
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
+    #[allow(dead_code)]
     app_tx: AppTx,
 }
 
@@ -177,39 +178,40 @@ impl Threadable for Flusher {
         let flush_timeout = self.config.mqtt_flush_timeout();
         info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
 
-        loop {
-            let (mut qs, disconnected) = get_requests(&rx, CONTROL_CHAN_SIZE);
+        'outer: loop {
+            let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+            let reqs = status.take_values();
+            debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
-            if matches!(&self.inner, Inner::Close(_)) {
-                info!("{} skipping {} requests closed:true", self.prefix, qs.len());
-                qs.drain(..);
-            } else {
-                debug!("{} process {} requests closed:false", self.prefix, qs.len());
-            }
+            for req in reqs.into_iter() {
+                match req {
+                    (req @ FlushConnection { .. }, Some(tx)) => {
+                        let resp = self.handle_flush_connection(req);
+                        err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    }
+                    (req @ Close, Some(tx)) => {
+                        let resp = self.handle_close(req);
+                        err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                        break 'outer;
+                    }
 
-            for q in qs.into_iter() {
-                match q {
-                    (q @ FlushConnection { .. }, Some(tx)) => {
-                        let resp = self.handle_flush_connection(q);
-                        allow_panic!(&self, tx.send(Ok(resp)));
-                    }
-                    (q @ Close, Some(tx)) => {
-                        allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
-                    }
                     (_, _) => unreachable!(),
                 }
             }
 
-            match disconnected {
-                true => break,
-                false => (),
+            match status {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                QueueStatus::Disconnected(_) => break,
             };
         }
 
-        self.handle_close(Request::Close);
+        match &self.inner {
+            Inner::Main(_) => self.handle_close(Request::Close),
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        };
 
         info!("{}, thread exit ...", self.prefix);
-
         self
     }
 }
@@ -240,8 +242,9 @@ impl Flusher {
                     socket.wt.packets.extend(pkts.into_iter());
                 }
                 QueueStatus::Disconnected(pkts) => {
+                    let n = pkts.len();
                     socket.wt.packets.extend(pkts.into_iter());
-                    info!("{} flush last batch, pkts:{}", prefix, pkts.len());
+                    info!("{} flush last batch, pkts:{}", prefix, n);
                 }
             }
 
@@ -290,6 +293,7 @@ impl Flusher {
         format!("{}:flush", self.name)
     }
 
+    #[allow(dead_code)]
     fn as_app_tx(&self) -> &AppTx {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,

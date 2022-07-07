@@ -79,12 +79,6 @@ pub const FIRST_TOKEN: mio::Token = mio::Token(2);
 pub const POLL_EVENTS_SIZE: usize = 1024;
 pub const CONTROL_CHAN_SIZE: usize = 1024;
 
-pub enum QueueStatus<T> {
-    Ok(Vec<T>),           // holds remaining (for tx) or received (for rx) values
-    Block(Vec<T>),        // holds remaining (for tx) or received (for rx) values
-    Disconnected(Vec<T>), // holds remaining (for tx) or received (for rx) values
-}
-
 /// Result returned by this methods and functions defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -129,6 +123,25 @@ pub trait IterTopicPath<'a> {
     type Iter: Iterator<Item = &'a str>;
 
     fn iter_topic_path(&'a self) -> Self::Iter;
+}
+
+pub enum QueueStatus<T> {
+    Ok(Vec<T>),           // holds remaining (for tx) or received (for rx) values
+    Block(Vec<T>),        // holds remaining (for tx) or received (for rx) values
+    Disconnected(Vec<T>), // holds remaining (for tx) or received (for rx) values
+}
+
+impl<T> QueueStatus<T> {
+    fn take_values(&mut self) -> Vec<T> {
+        use std::mem;
+
+        let val = match self {
+            QueueStatus::Ok(val) => val,
+            QueueStatus::Block(val) => val,
+            QueueStatus::Disconnected(val) => val,
+        };
+        mem::replace(val, Vec::new())
+    }
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`

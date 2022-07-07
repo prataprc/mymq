@@ -219,7 +219,7 @@ impl Session {
         connack
     }
 
-    pub fn close(mut self) -> SessionStats {
+    pub fn close(self) -> SessionStats {
         std::mem::drop(self);
         SessionStats
     }
@@ -241,26 +241,27 @@ impl Session {
 // handle incoming packets.
 impl Session {
     pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
+        let empty = Vec::new();
         match self.session_rx.try_recvs() {
-            QueueStatus::Ok(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(vec![])),
-            QueueStatus::Block(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(vec![])),
+            QueueStatus::Ok(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(empty)),
+            QueueStatus::Block(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(empty)),
             QueueStatus::Ok(pkts) => {
-                self.keep_alive.check_expired();
+                self.keep_alive.check_expired()?;
                 let msgs = self.handle_packets(shard, pkts)?;
                 self.in_messages(msgs); // pkts is locally generate Message::ClientAck
                 self.flush_messages(); // flush any locally generate Message::ClientAck
-                Ok(QueueStatus::Ok(vec![]))
+                Ok(QueueStatus::Ok(empty))
             }
             QueueStatus::Block(pkts) => {
-                self.keep_alive.check_expired();
+                self.keep_alive.check_expired()?;
                 let msgs = self.handle_packets(shard, pkts)?;
                 self.in_messages(msgs); // pkts is locally generate Message::ClientAck
                 self.flush_messages(); // flush any locally generate Message::ClientAck
-                Ok(QueueStatus::Block(vec![]))
+                Ok(QueueStatus::Block(empty))
             }
-            QueueStatus::Disconnected(pkts) => {
+            QueueStatus::Disconnected(_pkts) => {
                 error!("{} downstream disconnect", self.prefix);
-                Ok(QueueStatus::Disconnected(vec![]))
+                Ok(QueueStatus::Disconnected(empty))
             }
         }
     }
@@ -275,7 +276,7 @@ impl Session {
             self.keep_alive.live();
         }
 
-        let mut msgs = vec![];
+        let mut msgs = Vec::new(); // TODO: with capacity ?
         for pkt in pkts.into_iter() {
             msgs.push(self.handle_packet(shard, pkt)?);
         }
@@ -349,19 +350,21 @@ impl Session {
     }
 
     pub fn flush_messages(&mut self) -> QueueStatus<Message> {
-        let miot_tx = self.miot_tx.clone(); // when this value is dropped miot woken up.
+        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
 
         if self.state.cout.index.len() > self.client_receive_maximum.into() {
-            return QueueStatus::Block(vec![]);
+            return QueueStatus::Block(Vec::new());
         }
 
         let msgs: Vec<Message> = self.state.cout.back_log.drain(..).collect();
         let mut iter = msgs.into_iter();
         loop {
             let msg = iter.next();
+
             if msg.is_none() {
-                break QueueStatus::Ok(vec![]);
+                break QueueStatus::Ok(Vec::new());
             }
+
             match msg.unwrap() {
                 Message::LocalAck { client_id, seqno, instant } => {
                     match self.cinp.timestamp.insert(client_id, (seqno, instant)) {
@@ -370,7 +373,7 @@ impl Session {
                     }
                 }
                 Message::Packet { client_id, shard_id, seqno, packet_id, packet } => {
-                    match miot_tx.try_sends(vec![packet.clone()]) {
+                    match miot_tx.try_sends(&self.prefix, vec![packet.clone()]) {
                         QueueStatus::Ok(_) => {
                             let (seqno, packet_id) = self.incr_cout_seqno();
                             let msg = Message::Packet {
@@ -382,7 +385,7 @@ impl Session {
                             };
                             self.state.cout.index.insert(packet_id, msg);
                         }
-                        QueueStatus::Block(pkts) => {
+                        QueueStatus::Block(_pkts) => {
                             let msg = Message::Packet {
                                 client_id,
                                 shard_id,
@@ -391,22 +394,22 @@ impl Session {
                                 packet,
                             };
                             self.state.cout.back_log.push_front(msg);
-                            break QueueStatus::Block(vec![]);
+                            break QueueStatus::Block(Vec::new());
                         }
                         QueueStatus::Disconnected(_) => {
-                            break QueueStatus::Disconnected(vec![]);
+                            break QueueStatus::Disconnected(Vec::new());
                         }
                     }
                 }
                 Message::ClientAck { packet } => {
-                    match miot_tx.try_sends(vec![packet.clone()]) {
+                    match miot_tx.try_sends(&self.prefix, vec![packet.clone()]) {
                         QueueStatus::Ok(_) => (),
-                        QueueStatus::Block(pkts) => {
+                        QueueStatus::Block(_pkts) => {
                             let msg = Message::ClientAck { packet };
                             self.state.cout.back_log.push_front(msg);
                         }
-                        QueueStatus::Disconnected(pkts) => {
-                            break QueueStatus::Disconnected(vec![]);
+                        QueueStatus::Disconnected(_pkts) => {
+                            break QueueStatus::Disconnected(Vec::new());
                         }
                     }
                 }

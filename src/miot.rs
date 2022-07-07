@@ -2,7 +2,7 @@ use log::{debug, error, info, trace};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::{mem, net, ops::Deref, time};
+use std::{mem, net, time};
 
 use crate::packet::{MQTTRead, MQTTWrite};
 use crate::thread::{Rx, Thread, Threadable};
@@ -10,6 +10,7 @@ use crate::{socket, AppTx, ClientID, Config, QueueStatus, Shard, Socket};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
+type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
 pub struct Miot {
     /// Human readable name for this miot thread.
@@ -43,7 +44,7 @@ pub struct RunLoop {
     /// collection of all active socket connections, and its associated data.
     conns: BTreeMap<ClientID, Socket>,
 
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
@@ -74,7 +75,7 @@ impl Drop for Miot {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => info!("{} invalid drop ...", self.prefix),
+            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
         }
@@ -114,6 +115,7 @@ impl Miot {
             miot_id: self.miot_id,
             prefix: String::default(),
             config: self.config.clone(),
+
             inner: Inner::Main(RunLoop {
                 poll,
                 shard: Box::new(shard),
@@ -170,17 +172,21 @@ pub struct AddConnectionArgs {
 
 // calls to interface with miot-thread, and shall wake the thread
 impl Miot {
-    pub fn wake(&self) -> Result<()> {
+    pub fn wake(&self) {
         match &self.inner {
-            Inner::Handle(waker, _thrd) => err!(IOError, try: waker.wake(), "miot-wake"),
+            Inner::Handle(waker, _thrd) => allow_panic!(self, waker.wake()),
             _ => unreachable!(),
         }
     }
+
     pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
-                thrd.request(Request::AddConnection(args))??;
-                Ok(())
+                let req = Request::AddConnection(args);
+                match thrd.request(req)?? {
+                    Response::Ok => Ok(()),
+                    _ => unreachable!("{} unxpected response", self.prefix),
+                }
             }
             _ => unreachable!(),
         }
@@ -203,8 +209,11 @@ impl Miot {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(_waker, thrd) => {
-                thrd.request(Request::Close).ok();
-                thrd.close_wait()
+                let req = Request::Close;
+                match thrd.request(req).ok().map(|x| x.ok()).flatten() {
+                    Some(Response::Ok) => thrd.close_wait(),
+                    _ => unreachable!("{} unxpected response", self.prefix),
+                }
             }
             _ => unreachable!(),
         }
@@ -226,12 +235,16 @@ impl Threadable for Miot {
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                true /*disconnected*/ => break,
-                false => (),
+                true => break,
+                _exit => (),
             };
         }
 
-        self.handle_close(Request::Close);
+        match &self.inner {
+            Inner::Main(_) => self.handle_close(Request::Close),
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        };
 
         info!("{} thread exit...", self.prefix);
         self
@@ -239,7 +252,8 @@ impl Threadable for Miot {
 }
 
 impl Miot {
-    // return (disconnected,)
+    // return (exit,)
+    // can happen because the control channel has disconnected, or Request::Close
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
@@ -248,53 +262,54 @@ impl Miot {
         }
         debug!("{} polled {} events", self.prefix, count);
 
-        let disconnected = loop {
+        let exit = loop {
             // keep repeating until all control requests are drained.
             match self.drain_control_chan(rx) {
-                (_empty, true) => break true,
-                (true, _disconnected) => break false,
-                (false, false) => (),
+                (_status, true) => break true,
+                (QueueStatus::Ok(_), _exit) => (),
+                (QueueStatus::Block(_), _) => break false,
+                (QueueStatus::Disconnected(_), _) => break true,
             }
         };
 
-        if !disconnected && !matches!(&self.inner, Inner::Close(_)) {
+        if !exit && !matches!(&self.inner, Inner::Close(_)) {
             self.socket_to_session();
             self.session_to_socket();
         }
 
-        disconnected
+        exit
     }
 
-    // Return (empty, disconnected)
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+    // Return (queue-status, exit)
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let (mut qs, empty, disconnected) = pending_requests(&rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
+        let reqs = status.take_values();
+        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
-        if matches!(&self.inner, Inner::Close(_)) {
-            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
-            qs.drain(..);
-        } else {
-            debug!("{} process {} requests closed:false", self.prefix, qs.len());
-        }
-
-        for q in qs.into_iter() {
-            match q {
-                (q @ AddConnection { .. }, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_add_connection(q))));
+        let mut closed = false;
+        for req in reqs.into_iter() {
+            match req {
+                (req @ AddConnection { .. }, Some(tx)) => {
+                    let resp = self.handle_add_connection(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ RemoveConnection { .. }, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_remove_connection(q))));
+                (req @ RemoveConnection { .. }, Some(tx)) => {
+                    let resp = self.handle_remove_connection(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (q @ Close, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
+                (req @ Close, Some(tx)) => {
+                    let resp = self.handle_close(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    closed = true
                 }
                 (_, _) => unreachable!(),
             }
         }
 
-        (empty, disconnected)
+        (status, closed)
     }
 }
 
@@ -306,18 +321,17 @@ impl Miot {
         };
         let shard = shard.to_tx();
 
-        let mut fail_queues = vec![];
+        let mut fail_queues = Vec::new(); // TODO: with_capacity ?
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("rconn:{}:{}", socket.addr, client_id.deref());
+            let prefix = format!("rconn:{}:{}", socket.addr, **client_id);
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
-                    error!("{} disconnected read_packets ...", prefix);
                     let err: Result<()> = err!(Disconnected, desc: "");
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
                 }
                 Err(err) => {
-                    error!("{} error in read_packets ...", prefix);
+                    error!("{} error in read_packets : {}", prefix, err);
                     fail_queues.push((client_id.clone(), err));
                 }
             }
@@ -342,9 +356,9 @@ impl Miot {
         let shard = shard.to_tx();
 
         // if thread is closed conns will be empty.
-        let mut fail_queues = vec![];
+        let mut fail_queues = Vec::new(); // TODO: with_capacity ?
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("wconn:{}:{}", socket.addr, client_id.deref());
+            let prefix = format!("wconn:{}:{}", socket.addr, **client_id);
             match socket.write_packets(&prefix, &self.config) {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => {
                     // TODO: should we wake the session here.
@@ -383,21 +397,14 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let AddConnectionArgs {
-            client_id,
-            mut conn,
-            addr,
-            upstream,
-            downstream,
-            client_max_packet_size,
-        } = match req {
+        let mut args = match req {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
-        let (session_tx, miot_rx) = (upstream, downstream);
+        let (session_tx, miot_rx) = (args.upstream, args.downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
-        allow_panic!(&self, poll.registry().register(&mut conn, token, interests));
+        allow_panic!(&self, poll.registry().register(&mut args.conn, token, interests));
 
         let rd = socket::Source {
             pr: MQTTRead::new(self.config.mqtt_max_packet_size()),
@@ -406,14 +413,14 @@ impl Miot {
             packets: VecDeque::default(),
         };
         let wt = socket::Sink {
-            pw: MQTTWrite::new(&[], client_max_packet_size),
+            pw: MQTTWrite::new(&[], args.client_max_packet_size),
             timeout: None,
             miot_rx,
             packets: VecDeque::default(),
         };
-        let id = client_id.clone();
+        let (client_id, conn, addr) = (args.client_id.clone(), args.conn, args.addr);
         let socket = socket::Socket { client_id, conn, addr, token, rd, wt };
-        conns.insert(id, socket);
+        conns.insert(args.client_id, socket);
 
         Response::Ok
     }
@@ -441,40 +448,36 @@ impl Miot {
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
-        match mem::replace(&mut self.inner, Inner::Init) {
-            Inner::Main(run_loop) => {
-                info!("{} closing connections:{} ...", self.prefix, run_loop.conns.len());
-
-                mem::drop(run_loop.poll);
-                mem::drop(run_loop.shard);
-
-                let mut client_ids = vec![];
-                let mut addrs = vec![];
-                let mut tokens = vec![];
-
-                for (cid, socket) in run_loop.conns.into_iter() {
-                    info!(
-                        "{} closing socket {:?} client-id:{:?}",
-                        self.prefix, socket.addr, *cid
-                    );
-                    client_ids.push(socket.client_id);
-                    addrs.push(socket.addr);
-                    tokens.push(socket.token);
-                }
-
-                let fin_state = FinState {
-                    next_token: run_loop.next_token,
-                    client_ids,
-                    addrs,
-                    tokens,
-                };
-                let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
-
-                Response::Ok
-            }
-            Inner::Close(_) => Response::Ok,
+        let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
+        };
+
+        info!("{} closing connections:{} ...", self.prefix, run_loop.conns.len());
+
+        mem::drop(run_loop.poll);
+        mem::drop(run_loop.shard);
+
+        let mut client_ids = Vec::with_capacity(run_loop.conns.len());
+        let mut addrs = Vec::with_capacity(run_loop.conns.len());
+        let mut tokens = Vec::with_capacity(run_loop.conns.len());
+
+        for (cid, sock) in run_loop.conns.into_iter() {
+            info!("{} closing socket {:?} client-id:{:?}", self.prefix, sock.addr, *cid);
+            client_ids.push(sock.client_id);
+            addrs.push(sock.addr);
+            tokens.push(sock.token);
         }
+
+        let fin_state = FinState {
+            next_token: run_loop.next_token,
+            client_ids,
+            addrs,
+            tokens,
+        };
+        let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+
+        Response::Ok
     }
 }
 

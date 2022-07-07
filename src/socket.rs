@@ -31,7 +31,7 @@ impl Drop for PktTx {
 }
 
 impl PktTx {
-    pub fn try_sends(&mut self, pkts: Vec<v5::Packet>) -> QueueStatus<v5::Packet> {
+    pub fn try_sends(&mut self, prefix: &str, pkts: Vec<v5::Packet>) -> QueuePkt {
         let mut iter = pkts.into_iter();
         loop {
             match iter.next() {
@@ -43,13 +43,13 @@ impl PktTx {
                         break QueueStatus::Block(pkts);
                     }
                     Err(mpsc::TrySendError::Disconnected(pkt)) => {
-                        warn!("shard-{} shard disconnected ...", self.miot_id);
+                        warn!("{} receiver disconnected ...", prefix);
                         let mut pkts: Vec<v5::Packet> = Vec::from_iter(iter);
                         pkts.insert(0, pkt);
                         break QueueStatus::Disconnected(pkts);
                     }
                 },
-                None => break QueueStatus::Ok(vec![]),
+                None => break QueueStatus::Ok(Vec::new()),
             }
         }
     }
@@ -63,7 +63,7 @@ pub struct PktRx {
 
 impl PktRx {
     pub fn try_recvs(&self) -> QueueStatus<v5::Packet> {
-        let mut pkts = vec![];
+        let mut pkts = Vec::new(); // TODO: with_capacity ?
         loop {
             match self.rx.try_recv() {
                 Ok(pkt) if pkts.len() < self.msg_batch_size => pkts.push(pkt),
@@ -94,6 +94,7 @@ pub struct Source {
     pub pr: MQTTRead,
     pub timeout: Option<time::Instant>,
     pub session_tx: PktTx,
+    // All incoming MQTT packets on this socket first land here.
     pub packets: VecDeque<v5::Packet>,
 }
 
@@ -148,26 +149,23 @@ impl Socket {
         loop {
             match self.send_upstream(prefix) {
                 QueueStatus::Ok(_) => (),
-                QueueStatus::Block(_) => break,
-                res @ QueueStatus::Disconnected(_) => return Ok(res),
+                status @ QueueStatus::Block(_) => break Ok(status),
+                status @ QueueStatus::Disconnected(_) => break Ok(status),
             }
 
-            match self.read_packet(prefix, config)? {
-                QueueStatus::Ok(pkts) if self.rd.packets.len() < msg_batch_size => {
-                    self.rd.packets.extend(pkts.into_iter());
+            let mut status = self.read_packet(prefix, config)?;
+            self.rd.packets.extend(status.take_values().into_iter());
+
+            match status {
+                QueueStatus::Ok(_) if self.rd.packets.len() < msg_batch_size => (),
+                QueueStatus::Ok(_) => break Ok(self.send_upstream(prefix)),
+                QueueStatus::Block(_) => break Ok(self.send_upstream(prefix)),
+                status @ QueueStatus::Disconnected(_) if self.rd.packets.len() == 0 => {
+                    break Ok(status)
                 }
-                QueueStatus::Block(pkts) => {
-                    self.rd.packets.extend(pkts.into_iter());
-                    break;
-                }
-                QueueStatus::Disconnected(pkts) => {
-                    self.rd.packets.extend(pkts.into_iter());
-                    return Ok(QueueStatus::Disconnected(vec![]));
-                }
-            }
+                QueueStatus::Disconnected(_) => break Ok(self.send_upstream(prefix)),
+            };
         }
-
-        Ok(self.send_upstream(prefix))
     }
 
     // MalformedPacket, implies a DISCONNECT and socket close
@@ -175,28 +173,26 @@ impl Socket {
     fn read_packet(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
         use crate::packet::MQTTRead::{Fin, Header, Init, Remain};
 
+        let disconnected = QueuePkt::Disconnected(Vec::new());
+
         let timeout = config.mqtt_read_timeout();
         let pr = mem::replace(&mut self.rd.pr, MQTTRead::default());
         let mut pr = match pr.read(&self.conn) {
             Ok((pr, _would_block)) => pr,
-            Err(err) if err.kind() == ErrorKind::Disconnected => {
-                return Ok(QueueStatus::Disconnected(vec![]));
-            }
-            Err(err) => {
-                return Err(err);
-            }
+            Err(err) if err.kind() == ErrorKind::Disconnected => return Ok(disconnected),
+            Err(err) => return Err(err),
         };
 
-        let res = match &pr {
+        let status = match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !self.read_elapsed() => {
                 trace!("{} read retrying", prefix);
                 self.set_read_timeout(true, timeout);
-                QueueStatus::Block(vec![])
+                QueueStatus::Block(Vec::new())
             }
             Init { .. } | Header { .. } | Remain { .. } => {
                 self.set_read_timeout(false, timeout);
-                error!("{} packet read fail after {:?}", prefix, self.wt.timeout);
-                QueueStatus::Disconnected(vec![])
+                error!("{} disconnect, pkt-read timesout {:?}", prefix, self.wt.timeout);
+                QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
                 self.set_read_timeout(false, timeout);
@@ -208,23 +204,18 @@ impl Socket {
         };
 
         let _pr_none = mem::replace(&mut self.rd.pr, pr);
-        Ok(res)
+        Ok(status)
     }
 
     // QueueStatus shall not carry any packets
     pub fn send_upstream(&mut self, prefix: &str) -> QueuePkt {
-        let session_tx = &self.rd.session_tx.clone(); // shard woken when dropped
-        match session_tx.try_sends(self.rd.packets.drain(..).collect()) {
-            res @ QueueStatus::Ok(_pkts) => res,
-            QueueStatus::Block(pkts) => {
-                self.rd.packets = pkts.into();
-                QueueStatus::Block(vec![])
-            }
-            QueueStatus::Disconnected(pkts) => {
-                self.rd.packets = pkts.into();
-                QueueStatus::Disconnected(vec![])
-            }
-        }
+        let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
+
+        let pkts = self.rd.packets.drain(..).collect();
+        let mut status = session_tx.try_sends(prefix, pkts);
+        self.rd.packets = status.take_values().into();
+
+        status
     }
 }
 
@@ -262,7 +253,10 @@ impl Socket {
     // QueueStatus shall not carry any packets
     pub fn flush_packets(&mut self, prefix: &str, config: &Config) -> QueuePkt {
         let mut pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
-        let mut iter = self.wt.packets.drain(..);
+        let mut iter = {
+            let packets = self.wt.packets.drain(..).collect::<Vec<v5::Packet>>();
+            packets.into_iter()
+        };
         let res = loop {
             match self.write_packet(prefix, config) {
                 QueueStatus::Ok(_) => (),
@@ -280,7 +274,7 @@ impl Socket {
                 };
                 pw = pw.reset(blob.as_ref());
             } else {
-                break QueueStatus::Ok(vec![]);
+                break QueueStatus::Ok(Vec::new());
             }
         };
 
@@ -299,25 +293,25 @@ impl Socket {
         let pw = match pw.write(&self.conn) {
             Ok((pw, _would_block)) => pw,
             Err(err) if err.kind() == ErrorKind::Disconnected => {
-                return QueueStatus::Disconnected(vec![]);
+                return QueueStatus::Disconnected(Vec::new());
             }
-            Err(err) => unreachable!(),
+            Err(err) => unreachable!("unexpected error: {}", err),
         };
 
         let res = match &pw {
             Init { .. } | Remain { .. } if !self.write_elapsed() => {
                 trace!("{} write retrying", prefix);
                 self.set_write_timeout(true, timeout);
-                QueueStatus::Block(vec![])
+                QueueStatus::Block(Vec::new())
             }
             Init { .. } | Remain { .. } => {
                 self.set_write_timeout(false, timeout);
                 error!("{} packet write fail after {:?}", prefix, self.wt.timeout);
-                QueueStatus::Disconnected(vec![])
+                QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
                 self.set_write_timeout(false, timeout);
-                QueueStatus::Ok(vec![])
+                QueueStatus::Ok(Vec::new())
             }
             MQTTWrite::None => unreachable!(),
         };

@@ -68,7 +68,7 @@ impl Packetize for UnsubAck {
             m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
-        let mut return_codes: Vec<UnsubAckReasonCode> = vec![];
+        let mut return_codes: Vec<UnsubAckReasonCode> = Vec::new(); // TODO: with_capacity
         for code in payload.into_iter() {
             return_codes.push(code.try_into()?);
         }

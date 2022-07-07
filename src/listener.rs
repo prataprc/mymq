@@ -4,10 +4,11 @@ use mio::event::Events;
 use std::{net, sync::Arc, time};
 
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{AppTx, Cluster, Config};
+use crate::{AppTx, Cluster, Config, QueueStatus};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
+type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
 pub struct Listener {
     /// Human readable name for this mio thread.
@@ -38,7 +39,7 @@ pub struct RunLoop {
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
 
-    /// Back channel to communicate with application.
+    /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
@@ -179,12 +180,16 @@ impl Threadable for Listener {
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
 
             match self.mio_events(&rx, &events) {
-                true /*disconnected*/ => break,
-                false => (),
+                true => break,
+                _exit => (),
             };
         }
 
-        self.handle_close(Request::Close);
+        match &self.inner {
+            Inner::Main(_) => self.handle_close(Request::Close),
+            Inner::Close(_) => Response::Ok,
+            _ => unreachable!(),
+        };
 
         info!("{}, thread exit ...", self.prefix);
         self
@@ -192,11 +197,11 @@ impl Threadable for Listener {
 }
 
 impl Listener {
-    // return (disconnected,)
+    // return (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
         let mut iter = events.iter();
-        let res = 'outer: loop {
+        let exit = 'outer: loop {
             match iter.next() {
                 Some(event) => {
                     trace!("{}r poll-event token:{}", self.prefix, event.token().0);
@@ -206,15 +211,17 @@ impl Listener {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
                             match self.drain_control_chan(rx) {
-                                (_empty, true) => break 'outer true,
-                                (true, _disconnected) => break,
-                                (false, false) => (),
+                                (_status, true) => break 'outer true,
+                                (QueueStatus::Ok(_), _exit) => (),
+                                (QueueStatus::Block(_), _) => break,
+                                (QueueStatus::Disconnected(_), _) => break 'outer true,
                             }
                         },
                         Self::TOKEN_SERVER => loop {
                             match self.accept_conn() {
-                                true => break,
-                                false => (),
+                                QueueStatus::Ok(_) => (),
+                                QueueStatus::Block(_) => break,
+                                QueueStatus::Disconnected(_) => break 'outer true,
                             };
                         },
                         _ => unreachable!(),
@@ -225,37 +232,34 @@ impl Listener {
         };
 
         debug!("{}, polled and got {} events", self.prefix, count);
-        res
+        exit
     }
 
-    // Return (empty, disconnected)
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (bool, bool) {
+    // return (queue-status, exit)
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
         use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let (mut qs, empty, disconnected) = pending_requests(rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
+        let reqs = status.take_values();
+        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
-        if matches!(&self.inner, Inner::Close(_)) {
-            info!("{} skipping {} requests closed:true", self.prefix, qs.len());
-            qs.drain(..);
-        } else {
-            debug!("{} process {} requests closed:false", self.prefix, qs.len());
-        }
-
-        for q in qs.into_iter() {
-            match q {
-                (q @ Close, Some(tx)) => {
-                    allow_panic!(&self, tx.send(Ok(self.handle_close(q))));
+        let mut closed = false;
+        for req in reqs.into_iter() {
+            match req {
+                (req @ Close, Some(tx)) => {
+                    let resp = self.handle_close(req);
+                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    closed = true;
                 }
                 (_, _) => unreachable!(),
             }
         }
 
-        (empty, disconnected)
+        (status, closed)
     }
 
-    // Return (would_block,)
-    fn accept_conn(&mut self) -> bool {
+    fn accept_conn(&mut self) -> QueueStatus<()> {
         use crate::Handshake;
         use std::io;
 
@@ -275,12 +279,14 @@ impl Listener {
                     cluster: cluster.to_tx(),
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
-                false
+                QueueStatus::Ok(Vec::new())
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                QueueStatus::Block(Vec::new())
+            }
             Err(err) => {
                 error!("{}, connection accept error, {}", self.prefix, err);
-                false
+                QueueStatus::Disconnected(Vec::new())
             }
         }
     }
