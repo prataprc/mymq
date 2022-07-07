@@ -185,6 +185,9 @@ impl Packetize for SubscribeProperties {
             dups[pt as usize] = true;
 
             match property {
+                SubscriptionIdentifier(VarU32(0)) => {
+                    err!(ProtocolError, code: ProtocolError, "{} subcr_ide:0", PP)?;
+                }
                 SubscriptionIdentifier(val) => props.subscription_id = Some(val),
                 UserProp(val) => props.user_properties.push(val),
                 _ => {

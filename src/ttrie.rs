@@ -303,40 +303,46 @@ impl<V> Node<V> {
         }
     }
 
-    fn match_topic<'a, K>(node: &Node<V>, mut in_levels: K) -> Result<Option<Vec<V>>>
+    fn match_topic<'a, I>(node: &Node<V>, mut in_levels: I) -> Result<Option<Vec<V>>>
     where
-        K: Iterator<Item = &'a str>,
+        I: Iterator<Item = &'a str> + Clone,
         V: Clone,
     {
-        match in_levels.next() {
-            Some(in_level) => {
-                let mut children = match node {
-                    Node::Root { children } => children.iter(),
-                    Node::Child { children, .. } => children.iter(),
-                };
-                loop {
-                    match children.next() {
-                        Some(child) => match match_level(in_level, child.as_name())? {
-                            (_level_match, true) => match child.borrow() {
-                                Node::Child { values, .. } => {
-                                    break Ok(Some(values.to_vec()));
-                                }
-                                Node::Root { .. } => unreachable!(),
-                            },
-                            (true, _multi_level) => {
-                                break Node::match_topic(child, in_levels);
-                            }
-                            (false, false) => break Ok(None),
-                        },
-                        None => break Ok(None),
+        let in_level = in_levels.next();
+
+        if in_level == None {
+            match node {
+                Node::Child { values, .. } => return Ok(Some(values.to_vec())),
+                Node::Root { .. } => return Ok(None),
+            }
+        }
+
+        let in_level = in_level.unwrap();
+
+        let children = match node {
+            Node::Root { children } => children.iter(),
+            Node::Child { children, .. } => children.iter(),
+        };
+
+        let mut acc = vec![];
+        for child in children {
+            match match_level(in_level, child.as_name())? {
+                (_slevel, true) => {
+                    if let Node::Child { values, .. } = child.borrow() {
+                        acc.extend(values.to_vec().into_iter());
                     }
                 }
+                (true, _mlevel) => (),
+                (false, false) if acc.len() == 0 => return Ok(None),
+                (false, false) => return Ok(Some(acc)),
             }
-            None => match node {
-                Node::Child { values, .. } => Ok(Some(values.to_vec())),
-                Node::Root { .. } => Ok(None),
-            },
+            match Node::match_topic(child, in_levels.clone())? {
+                Some(values) => acc.extend(values.into_iter()),
+                None => (),
+            }
         }
+
+        Ok(Some(acc))
     }
 }
 
@@ -353,6 +359,7 @@ fn match_level(in_lvl: &str, trie_level: &str) -> Result<(bool, bool)> {
 }
 
 fn compare_level(in_level: &str, trie_level: &str) -> Result<bool> {
+    // TODO: If inputs are already validated we may not need wildcard checks
     if in_level.chars().any(|ch| ch == '#' || ch == '+') {
         err!(InvalidInput, desc: "wildcards cannot mix with chars inp:{}", in_level)
     } else if in_level.chars().any(|ch| ch == '#' || ch == '+') {

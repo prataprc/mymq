@@ -1,8 +1,11 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
 
-use crate::{util::advance, Blob, Packetize, Result, TopicName, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode};
+use std::cmp;
+
+use crate::util::advance;
+use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, UserProperty, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 // TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
 //       ProtocolError.
@@ -113,6 +116,41 @@ pub use sub::Subscribe;
 pub use suback::SubAck;
 pub use unsub::UnSubscribe;
 pub use unsuback::UnsubAck;
+
+#[derive(Clone)]
+pub struct Subscription {
+    pub shard_id: u32,
+    pub client_id: ClientID,
+    pub subscription_id: Option<u32>,
+    pub qos: QoS,
+    pub topic_filter: TopicFilter,
+}
+
+impl PartialEq for Subscription {
+    fn eq(&self, other: &Self) -> bool {
+        self.client_id == other.client_id
+            && self.subscription_id == other.subscription_id
+            && self.qos == other.qos
+            && self.topic_filter == other.topic_filter
+    }
+}
+
+impl Eq for Subscription {}
+
+impl PartialOrd for Subscription {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        match self.client_id.cmp(&other.client_id) {
+            cmp::Ordering::Equal => Some(self.topic_filter.cmp(&other.topic_filter)),
+            val => Some(val),
+        }
+    }
+}
+
+impl Ord for Subscription {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
 
 /// MQTT packet type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -79,7 +79,7 @@ pub type PacketID = u16;
 pub type AppTx = mpsc::SyncSender<String>;
 
 /// Type alias for TopicTrie for managing subscriptions.
-pub type SubscribedTrie = TopicTrie<(ClientID, u32)>; // (_, shard_id)
+pub type SubscribedTrie = TopicTrie<(ClientID, v5::Subscription)>; // (_, shard_id)
 
 /// Type alias for TopicTrie for managing retain messages.
 pub type RetainedTrie = TopicTrie<v5::Packet>;
@@ -110,7 +110,7 @@ pub trait Shardable {
 }
 
 pub trait IterTopicPath<'a> {
-    type Iter: Iterator<Item = &'a str>;
+    type Iter: Iterator<Item = &'a str> + Clone;
 
     fn iter_topic_path(&'a self) -> Self::Iter;
 }
