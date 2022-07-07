@@ -5,16 +5,6 @@
 #![feature(backtrace)]
 #![feature(error_iter)]
 
-// TODO: remove this ?
-#[macro_export]
-macro_rules! tx_pkt_miot {
-    ($session:ident, $shard:ident, $resp:expr) => {{
-        let res = $session.miot_tx.send($resp);
-        $shard.as_miot().wake().ok(); // TODO: allow_panic ?
-        err!(IPCFail, try: res)
-    }};
-}
-
 #[macro_use]
 mod error;
 #[macro_use]
@@ -125,6 +115,7 @@ pub trait IterTopicPath<'a> {
     fn iter_topic_path(&'a self) -> Self::Iter;
 }
 
+#[derive(Clone)]
 pub enum QueueStatus<T> {
     Ok(Vec<T>),           // holds remaining (for tx) or received (for rx) values
     Block(Vec<T>),        // holds remaining (for tx) or received (for rx) values

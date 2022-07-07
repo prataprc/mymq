@@ -56,13 +56,12 @@ impl PktTx {
 }
 
 pub struct PktRx {
-    miot_id: u32, // packet queue for shard/miot is same for both.
     msg_batch_size: usize,
     rx: mpsc::Receiver<v5::Packet>,
 }
 
 impl PktRx {
-    pub fn try_recvs(&self) -> QueueStatus<v5::Packet> {
+    pub fn try_recvs(&self, prefix: &str) -> QueueStatus<v5::Packet> {
         let mut pkts = Vec::new(); // TODO: with_capacity ?
         loop {
             match self.rx.try_recv() {
@@ -73,7 +72,7 @@ impl PktRx {
                 }
                 Err(mpsc::TryRecvError::Empty) => break QueueStatus::Block(pkts),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    warn!("shard-{} shard disconnected ...", self.miot_id);
+                    warn!("{} senders disconnected ...", prefix);
                     break QueueStatus::Disconnected(pkts);
                 }
             }
@@ -102,6 +101,7 @@ pub struct Sink {
     pub pw: MQTTWrite,
     pub timeout: Option<time::Instant>,
     pub miot_rx: PktRx,
+    // All out-going MQTT packets on this socket first land here.
     pub packets: VecDeque<v5::Packet>,
 }
 
@@ -225,29 +225,19 @@ impl Socket {
         loop {
             match self.flush_packets(prefix, config) {
                 QueueStatus::Ok(_) => (),
-                QueueStatus::Block(_) => break,
-                res @ QueueStatus::Disconnected(_) => return res,
+                status @ QueueStatus::Block(_) => break status,
+                status @ QueueStatus::Disconnected(_) => break status,
             }
 
-            match self.wt.miot_rx.try_recvs() {
-                QueueStatus::Ok(pkts) => {
-                    self.wt.packets.extend(pkts.into_iter());
-                }
-                QueueStatus::Block(pkts) => {
-                    self.wt.packets.extend(pkts.into_iter());
-                    break;
-                }
-                QueueStatus::Disconnected(pkts) if pkts.len() == 0 => {
-                    return QueueStatus::Disconnected(pkts)
-                }
-                QueueStatus::Disconnected(pkts) => {
-                    self.wt.packets.extend(pkts.into_iter());
-                    break;
-                }
+            let mut status = self.wt.miot_rx.try_recvs(prefix);
+            self.wt.packets.extend(status.take_values().into_iter());
+
+            match status {
+                QueueStatus::Ok(_) => (),
+                QueueStatus::Block(_) => break self.flush_packets(prefix, config),
+                status @ QueueStatus::Disconnected(_) => break status,
             }
         }
-
-        self.flush_packets(prefix, config)
     }
 
     // QueueStatus shall not carry any packets
@@ -324,7 +314,7 @@ impl Socket {
 pub fn pkt_channel(miot_id: u32, size: usize, waker: Arc<mio::Waker>) -> (PktTx, PktRx) {
     let (tx, rx) = mpsc::sync_channel(size);
     let pkt_tx = PktTx { miot_id, tx, waker, count: usize::default() };
-    let pkt_rx = PktRx { miot_id, msg_batch_size: size, rx };
+    let pkt_rx = PktRx { msg_batch_size: size, rx };
 
     (pkt_tx, pkt_rx)
 }

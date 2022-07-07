@@ -241,47 +241,28 @@ impl Session {
 // handle incoming packets.
 impl Session {
     pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
-        let empty = Vec::new();
-        match self.session_rx.try_recvs() {
-            QueueStatus::Ok(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(empty)),
-            QueueStatus::Block(pkts) if pkts.len() == 0 => Ok(QueueStatus::Ok(empty)),
-            QueueStatus::Ok(pkts) => {
-                self.keep_alive.check_expired()?;
-                let msgs = self.handle_packets(shard, pkts)?;
-                self.in_messages(msgs); // pkts is locally generate Message::ClientAck
-                self.flush_messages(); // flush any locally generate Message::ClientAck
-                Ok(QueueStatus::Ok(empty))
-            }
-            QueueStatus::Block(pkts) => {
-                self.keep_alive.check_expired()?;
-                let msgs = self.handle_packets(shard, pkts)?;
-                self.in_messages(msgs); // pkts is locally generate Message::ClientAck
-                self.flush_messages(); // flush any locally generate Message::ClientAck
-                Ok(QueueStatus::Block(empty))
-            }
-            QueueStatus::Disconnected(_pkts) => {
-                error!("{} downstream disconnect", self.prefix);
-                Ok(QueueStatus::Disconnected(empty))
-            }
-        }
-    }
+        self.keep_alive.check_expired()?;
 
-    // handle incoming packets
-    fn handle_packets(
-        &mut self,
-        shard: &Shard,
-        pkts: Vec<v5::Packet>,
-    ) -> Result<Vec<Message>> {
+        let mut status = self.session_rx.try_recvs(&self.prefix);
+        let pkts = status.take_values();
+
         if pkts.len() > 0 {
-            self.keep_alive.live();
+            self.keep_alive.live()
         }
 
-        let mut msgs = Vec::new(); // TODO: with capacity ?
+        let mut msgs = Vec::with_capacity(pkts.len());
         for pkt in pkts.into_iter() {
             msgs.push(self.handle_packet(shard, pkt)?);
         }
 
-        Ok(msgs)
+        self.in_messages(msgs); // msgs is locally generate Message::ClientAck
+        self.flush_messages(); // flush any locally generate Message::ClientAck
+
+        if let QueueStatus::Disconnected(_) = status.clone() {
+            error!("{} downstream disconnect", self.prefix);
+        }
+
+        Ok(status)
     }
 
     // handle incoming packet
@@ -291,14 +272,14 @@ impl Session {
         // PUBLISH, PUBLISH-ack lead to message routing.
 
         let msg = match pkt {
+            v5::Packet::PingReq => Message::new_client_ack(v5::Packet::PingReq),
+            v5::Packet::Subscribe(_sub) => todo!(),
+            v5::Packet::UnSubscribe(_unsub) => todo!(),
             v5::Packet::Publish(_publish) => todo!(),
             v5::Packet::PubAck(_puback) => todo!(),
             v5::Packet::PubRec(_puback) => todo!(),
             v5::Packet::PubRel(_puback) => todo!(),
             v5::Packet::PubComp(_puback) => todo!(),
-            v5::Packet::Subscribe(_sub) => todo!(),
-            v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::PingReq => Message::new_client_ack(v5::Packet::PingReq),
             v5::Packet::Disconnect(_disconn) => {
                 // TODO: handle disconnect packet, its header and properties.
                 err!(Disconnected, code: Success, "{} client disconnect", self.prefix)?

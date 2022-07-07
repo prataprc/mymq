@@ -237,16 +237,8 @@ impl Flusher {
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
         info!("{} flush connection at {:?}", prefix, now);
         loop {
-            match socket.wt.miot_rx.try_recvs() {
-                QueueStatus::Ok(pkts) | QueueStatus::Block(pkts) => {
-                    socket.wt.packets.extend(pkts.into_iter());
-                }
-                QueueStatus::Disconnected(pkts) => {
-                    let n = pkts.len();
-                    socket.wt.packets.extend(pkts.into_iter());
-                    info!("{} flush last batch, pkts:{}", prefix, n);
-                }
-            }
+            let mut status = socket.wt.miot_rx.try_recvs(&self.prefix);
+            socket.wt.packets.extend(status.take_values().into_iter());
 
             match socket.flush_packets(&prefix, &self.config) {
                 QueueStatus::Ok(_) => (),
@@ -259,6 +251,14 @@ impl Flusher {
                     warn!("{} stop flush, socket disconnected", prefix);
                     break;
                 }
+            }
+
+            // after flushing the packets see, the source `miot_tx` is disconnected.
+            // we will have to run this loop under `miot_tx` has disconnected or
+            // downstream socket has disconnected, or timeout exceeds.
+
+            if let QueueStatus::Disconnected(_) = status {
+                break;
             }
         }
 
