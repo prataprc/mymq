@@ -112,8 +112,8 @@ pub use disconnect::{DisconnReasonCode, Disconnect};
 pub use ping::{PingReq, PingResp};
 pub use pubaclc::Pub;
 pub use publish::Publish;
-pub use sub::Subscribe;
-pub use suback::SubAck;
+pub use sub::{RetainForwardRule, Subscribe};
+pub use suback::{SubAck, SubAckReasonCode};
 pub use unsub::UnSubscribe;
 pub use unsuback::UnsubAck;
 
@@ -122,16 +122,23 @@ pub struct Subscription {
     pub shard_id: u32,
     pub client_id: ClientID,
     pub subscription_id: Option<u32>,
-    pub qos: QoS,
     pub topic_filter: TopicFilter,
+    // subscription-options
+    pub qos: QoS,
+    pub no_local: bool,
+    pub retain_as_published: bool,
+    pub retain_forward_rule: RetainForwardRule,
 }
 
 impl PartialEq for Subscription {
     fn eq(&self, other: &Self) -> bool {
         self.client_id == other.client_id
             && self.subscription_id == other.subscription_id
-            && self.qos == other.qos
             && self.topic_filter == other.topic_filter
+            && self.qos == other.qos
+            && self.no_local == other.no_local
+            && self.retain_as_published == other.retain_as_published
+            && self.retain_forward_rule == other.retain_forward_rule
     }
 }
 
@@ -355,7 +362,7 @@ impl Packet {
 }
 
 /// Quality of service
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub enum QoS {
     AtMostOnce = 0,

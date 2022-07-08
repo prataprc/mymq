@@ -86,10 +86,8 @@ pub struct ClientInp {
     pub seqno: u64,
     // This index is a collection of un-acked collection of incoming packets.
     // All incoming SUBSCRIBE, UNSUBSCRIBE, PUBLISH (QoS-!,2) shall be indexed here
-    // using the packet_id. It will be deleted only when corresponding ACK is queued
-    // in the outbound channel. And this ACK shall be dispatched Only when:
-    // * PUBLISH-ack is received from other local-sessions.
-    // * SUBSCRIBE/UNSUBSCRIBE committed to SessionState.
+    // using the packet_id. It will be deleted only when corresponding ACK is recieved
+    // from other local-session.
     //
     // Periodically purge this index based on `min(timestamp:seqno)`. To effeciently
     // implement this index-purge cycle, we use the `timestamp` collection. When ever
@@ -145,18 +143,8 @@ pub struct ClientOut {
     // meant for client first lands here.
     //
     // CONNACK, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP, AUTH
-    // PUBLISH
+    // PUBLISH, Retain-PUBLISH
     pub back_log: VecDeque<Message>,
-}
-
-// This is per-session data structure
-pub struct RouteOut {
-    // This is the outgoing buffer for all messages that published to other local-sessions.
-    // When a packet is going to be published to other local-session, it first lands here
-    // Subsequently the hosting shard's MsgTx is used to send the message out. In this,
-    // index there is one entry for each shard, the maximum size of Vec<Message> cannot
-    // be more that `msg_batch_size`.
-    pub index: BTreeMap<u32, Vec<Message>>,
 }
 
 pub enum Message {

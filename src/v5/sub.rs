@@ -13,18 +13,22 @@ impl Packetize for SubscriptionOpt {
 
         let (opt, n) = dec_field!(u8, stream, 0);
         let val = SubscriptionOpt(opt);
-        val.unwrap()?;
 
         Ok((val, n))
     }
 
     fn encode(&self) -> Result<Blob> {
-        self.unwrap()?;
         self.0.encode()
     }
 }
 
 impl SubscriptionOpt {
+    const MAXIMUM_QOS: u8 = 0b0000_0011;
+    const NO_LOCAL: u8 = 0b0000_0100;
+    const RETAIN_AS_PUBLISHED: u8 = 0b0000_1000;
+    const RETAIN_HANDLING: u8 = 0b0011_0000;
+    const RESERVED: u8 = 0b1100_0000;
+
     pub fn new(rfr: RetainForwardRule, rap: bool, nl: bool, qos: QoS) -> Self {
         let rfr: u8 = u8::from(rfr) << 4;
         let rap: u8 = if rap { 0b1000 } else { 0b0000 };
@@ -34,22 +38,17 @@ impl SubscriptionOpt {
         SubscriptionOpt(rfr | rap | nl | qos)
     }
 
-    fn unwrap(&self) -> Result<(RetainForwardRule, bool, bool, QoS)> {
-        if (self.0 & 0b11000000) > 0 {
-            err!(
-                MalformedPacket,
-                code: MalformedPacket,
-                "{} sub-opt reserved bit != 0 {:?}",
-                PP,
-                self.0
-            )?
-        }
-
-        let qos: QoS = (self.0 & 0b0011).try_into()?;
-        let nl: bool = (self.0 & 0b0100) > 0;
-        let rap: bool = (self.0 & 0b1000) > 0;
-        let rfr: RetainForwardRule = ((self.0 >> 4) & 0b0011).try_into()?;
-        Ok((rfr, rap, nl, qos))
+    // return (retain_forward_rule, retain_as_published, no_local, qos)
+    pub fn unwrap(&self) -> (RetainForwardRule, bool, bool, QoS) {
+        let qos: QoS = (self.0 & Self::MAXIMUM_QOS).try_into().unwrap();
+        let nl: bool = (self.0 & Self::NO_LOCAL) > 0;
+        let rap: bool = (self.0 & Self::RETAIN_AS_PUBLISHED) > 0;
+        (
+            RetainForwardRule::try_from((self.0 >> 4) & Self::RETAIN_HANDLING).unwrap(),
+            rap,
+            nl,
+            qos,
+        )
     }
 }
 
@@ -126,6 +125,8 @@ impl Packetize for Subscribe {
     fn encode(&self) -> Result<Blob> {
         use crate::v5::insert_fixed_header;
 
+        self.validate()?;
+
         let mut data = Vec::with_capacity(64);
 
         data.extend_from_slice(self.packet_id.encode()?.as_ref());
@@ -150,6 +151,29 @@ impl Subscribe {
     fn validate(&self) -> Result<()> {
         if self.filters.len() == 0 {
             err!(ProtocolError, code: ProtocolError, "{} missing topic filter", PP)?
+        }
+
+        for filter in self.filters.iter() {
+            if (filter.opt.0 & SubscriptionOpt::RESERVED) > 0 {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "{} sub-opt reserved bit != 0 0x{:x}",
+                    PP,
+                    filter.opt.0
+                )?
+            } else if ((filter.opt.0 & SubscriptionOpt::RETAIN_HANDLING) >> 4) == 3 {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    "{} invalid retain handling 0x{:x}",
+                    PP,
+                    filter.opt.0
+                )?
+            }
+            QoS::try_from(filter.opt.0 & SubscriptionOpt::MAXIMUM_QOS)?;
+
+            // TODO: validate topic_filter.
         }
 
         Ok(())

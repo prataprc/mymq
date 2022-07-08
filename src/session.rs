@@ -1,7 +1,7 @@
 use log::error;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::net;
+use std::{cmp, net};
 
 use crate::{message, v5};
 use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
@@ -218,8 +218,7 @@ impl Session {
 impl Session {
     pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
         for (topic_filter, value) in self.state.subscriptions.iter() {
-            let value = (value.client_id.clone(), value.clone());
-            topic_filters.unsubscribe(topic_filter, &value).ok();
+            topic_filters.unsubscribe(topic_filter, value);
         }
     }
 
@@ -242,7 +241,7 @@ impl Session {
 
         let mut msgs = Vec::with_capacity(pkts.len());
         for pkt in pkts.into_iter() {
-            msgs.push(self.handle_packet(shard, pkt)?);
+            msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
         self.in_messages(msgs); // msgs is locally generate Message::ClientAck
@@ -256,14 +255,14 @@ impl Session {
     }
 
     // handle incoming packet
-    fn handle_packet(&self, _shard: &Shard, pkt: v5::Packet) -> Result<Message> {
+    fn handle_packet(&mut self, shard: &Shard, pkt: v5::Packet) -> Result<Vec<Message>> {
         // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
         // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
         // PUBLISH, PUBLISH-ack lead to message routing.
 
-        let msg = match pkt {
-            v5::Packet::PingReq => Message::new_client_ack(v5::Packet::PingReq),
-            v5::Packet::Subscribe(_sub) => todo!(),
+        let msgs = match pkt {
+            v5::Packet::PingReq => vec![Message::new_client_ack(v5::Packet::PingReq)],
+            v5::Packet::Subscribe(sub) => self.handle_subscribe(shard, sub),
             v5::Packet::UnSubscribe(_unsub) => todo!(),
             v5::Packet::Publish(_publish) => todo!(),
             v5::Packet::PubAck(_puback) => todo!(),
@@ -297,11 +296,52 @@ impl Session {
             )?,
         };
 
-        Ok(msg)
+        Ok(msgs)
     }
 
-    pub fn route_messages(&mut self) -> Result<()> {
-        todo!()
+    // return suback and retained-messages if any.
+    fn handle_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Vec<Message> {
+        let subscription_id: Option<u32> = match &sub.properties {
+            Some(props) => props.subscription_id.clone().map(|x| *x),
+            None => None,
+        };
+
+        let mut return_codes = Vec::with_capacity(sub.filters.len());
+        for filter in sub.filters.iter() {
+            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
+            let subscription = v5::Subscription {
+                shard_id: shard.shard_id,
+                client_id: self.state.client_id.clone(),
+                subscription_id: subscription_id,
+                topic_filter: filter.topic_filter.clone(),
+                qos,
+                no_local,
+                retain_as_published,
+                retain_forward_rule: rfr,
+            };
+
+            shard.as_topic_filters().subscribe(
+                &filter.topic_filter,
+                subscription.clone(),
+                false,
+            );
+            self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
+
+            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+            let rc = match cmp::max(server_qos, qos) {
+                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
+                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
+                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
+            };
+            return_codes.push(rc)
+        }
+
+        let sub_ack = v5::SubAck {
+            packet_id: sub.packet_id,
+            properties: None,
+            return_codes,
+        };
+        vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }]
     }
 }
 

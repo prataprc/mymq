@@ -741,6 +741,13 @@ impl Shard {
         }
     }
 
+    pub fn as_topic_filters(&self) -> &SubscribedTrie {
+        match &self.inner {
+            Inner::Main(RunLoop { topic_filters, .. }) => topic_filters,
+            _ => unreachable!(),
+        }
+    }
+
     pub fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
             Inner::Main(RunLoop { waker, .. }) => Arc::clone(waker),

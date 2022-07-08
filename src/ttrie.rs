@@ -44,7 +44,7 @@ impl<V> TopicTrie<V> {
 }
 
 impl<V> TopicTrie<V> {
-    pub fn subscribe<'b, K>(&mut self, key: &'b K, value: V) -> Result<()>
+    pub fn subscribe<'b, K>(&self, key: &'b K, value: V, replace: bool)
     where
         K: IterTopicPath<'b>,
         V: Clone + Ord,
@@ -56,7 +56,7 @@ impl<V> TopicTrie<V> {
             (inner.stats, Arc::clone(&inner.root))
         };
 
-        let (root, first, r) = Node::sub(root, in_levels, value);
+        let (root, first, r) = Node::sub(root, in_levels, value, replace);
         if first {
             stats.count = stats.count.saturating_add(1);
         }
@@ -66,11 +66,9 @@ impl<V> TopicTrie<V> {
 
         let inner = Inner { stats, root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
-
-        Ok(())
     }
 
-    pub fn unsubscribe<'a, K>(&mut self, key: &'a K, value: &V) -> Result<()>
+    pub fn unsubscribe<'a, K>(&self, key: &'a K, value: &V)
     where
         K: IterTopicPath<'a>,
         V: Clone + Ord,
@@ -94,11 +92,9 @@ impl<V> TopicTrie<V> {
 
         let inner = Inner { stats, root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
-
-        Ok(())
     }
 
-    pub fn match_key<'b, K>(&mut self, key: &'b K) -> Result<Option<Vec<V>>>
+    pub fn match_key<'b, K>(&self, key: &'b K) -> Option<Vec<V>>
     where
         K: IterTopicPath<'b>,
         V: Clone,
@@ -112,12 +108,12 @@ impl<V> TopicTrie<V> {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let res = match Node::match_topic(root.as_ref(), in_levels)? {
+        let res = match Node::match_topic(root.as_ref(), in_levels) {
             Some(vals) => {
                 stats.hits = stats.hits.saturating_add(1);
-                Ok(Some(vals))
+                Some(vals)
             }
-            None => Ok(None),
+            None => None,
         };
 
         let inner = Inner { stats, root: Arc::clone(&root) };
@@ -199,6 +195,25 @@ impl<V> Node<V> {
         }
     }
 
+    // return (first, repeat)
+    // `first` is whether this is the first time a topic is subscribed.
+    fn replace_value(&mut self, value: V) -> (bool, bool)
+    where
+        V: Ord,
+    {
+        match self {
+            Node::Child { values, .. } if values.len() == 0 => {
+                *values = vec![value];
+                (true, false)
+            }
+            Node::Child { values, .. } => {
+                *values = vec![value];
+                (false, false)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     // return (last, missing)
     // `last` is the last value for this topic.
     fn remove_value(&mut self, value: &V) -> (bool, bool)
@@ -228,7 +243,12 @@ impl<V> Node<V> {
     }
 
     // return (root, first, repeat)
-    fn sub<'a, K>(node: Arc<Node<V>>, mut in_levels: K, value: V) -> (Node<V>, bool, bool)
+    fn sub<'a, K>(
+        node: Arc<Node<V>>,
+        mut in_levels: K,
+        value: V,
+        replace: bool,
+    ) -> (Node<V>, bool, bool)
     where
         K: Iterator<Item = &'a str>,
         V: Clone + Ord,
@@ -244,15 +264,19 @@ impl<V> Node<V> {
                 let r = match children.binary_search_by_key(&in_level, |n| n.as_name()) {
                     Ok(off) => {
                         let child = children.remove(off);
-                        (Node::sub(child, in_levels, value), off)
+                        (Node::sub(child, in_levels, value, replace), off)
                     }
                     Err(off) => {
                         let child = Arc::new(Node::<V>::new_node(in_level.to_string()));
-                        (Node::sub(child, in_levels, value), off)
+                        (Node::sub(child, in_levels, value, replace), off)
                     }
                 };
                 let ((child, first, repeat), off) = r;
                 children.insert(off, Arc::new(child));
+                (cow_node, first, repeat)
+            }
+            None if replace => {
+                let (first, repeat) = cow_node.replace_value(value);
                 (cow_node, first, repeat)
             }
             None => {
@@ -303,7 +327,7 @@ impl<V> Node<V> {
         }
     }
 
-    fn match_topic<'a, I>(node: &Node<V>, mut in_levels: I) -> Result<Option<Vec<V>>>
+    fn match_topic<'a, I>(node: &Node<V>, mut in_levels: I) -> Option<Vec<V>>
     where
         I: Iterator<Item = &'a str> + Clone,
         V: Clone,
@@ -312,8 +336,8 @@ impl<V> Node<V> {
 
         if in_level == None {
             match node {
-                Node::Child { values, .. } => return Ok(Some(values.to_vec())),
-                Node::Root { .. } => return Ok(None),
+                Node::Child { values, .. } => return Some(values.to_vec()),
+                Node::Root { .. } => return None,
             }
         }
 
@@ -326,27 +350,28 @@ impl<V> Node<V> {
 
         let mut acc = vec![];
         for child in children {
-            match match_level(in_level, child.as_name())? {
+            match match_level(in_level, child.as_name()).unwrap() {
                 (_slevel, true) => {
                     if let Node::Child { values, .. } = child.borrow() {
                         acc.extend(values.to_vec().into_iter());
                     }
                 }
                 (true, _mlevel) => (),
-                (false, false) if acc.len() == 0 => return Ok(None),
-                (false, false) => return Ok(Some(acc)),
+                (false, false) if acc.len() == 0 => return None,
+                (false, false) => return Some(acc),
             }
-            match Node::match_topic(child, in_levels.clone())? {
+            match Node::match_topic(child, in_levels.clone()) {
                 Some(values) => acc.extend(values.into_iter()),
                 None => (),
             }
         }
 
-        Ok(Some(acc))
+        Some(acc)
     }
 }
 
 // (level_match, multi_level_match)
+// input key must have be already validated !!
 fn match_level(in_lvl: &str, trie_level: &str) -> Result<(bool, bool)> {
     match (in_lvl, trie_level) {
         ("#", _) => Ok((true, true)),

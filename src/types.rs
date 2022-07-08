@@ -85,7 +85,7 @@ impl ClientID {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TopicName(String);
 
 impl Deref for TopicName {
@@ -139,7 +139,7 @@ impl<'a> IterTopicPath<'a> for TopicName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TopicFilter(String);
 
 impl Deref for TopicFilter {

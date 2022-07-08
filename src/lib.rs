@@ -79,7 +79,7 @@ pub type PacketID = u16;
 pub type AppTx = mpsc::SyncSender<String>;
 
 /// Type alias for TopicTrie for managing subscriptions.
-pub type SubscribedTrie = TopicTrie<(ClientID, v5::Subscription)>; // (_, shard_id)
+pub type SubscribedTrie = TopicTrie<v5::Subscription>;
 
 /// Type alias for TopicTrie for managing retain messages.
 pub type RetainedTrie = TopicTrie<v5::Packet>;
