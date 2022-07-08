@@ -15,8 +15,11 @@ pub struct Ticker {
 
 pub enum Inner {
     Init,
+    // Held by Cluster
     Handle(Thread<Ticker, Request, Result<Response>>),
+    // Thread
     Main(RunLoop),
+    // Held by Cluser, replacing both Handle and Main.
     Close(FinState),
 }
 
