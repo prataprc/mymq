@@ -54,7 +54,7 @@ pub use spinlock::Spinlock;
 pub use thread::{Thread, Threadable};
 pub use ticker::Ticker;
 pub use timer::{TimeoutValue, Timer};
-pub use ttrie::TopicTrie;
+pub use ttrie::{RetainedTrie, SubscribedTrie};
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
@@ -79,12 +79,6 @@ pub type PacketID = u16;
 
 /// Type alias for back-channel to application.
 pub type AppTx = mpsc::SyncSender<String>;
-
-/// Type alias for TopicTrie for managing subscriptions.
-pub type SubscribedTrie = TopicTrie<v5::Subscription>;
-
-/// Type alias for TopicTrie for managing retain messages.
-pub type RetainedTrie = TopicTrie<v5::Packet>;
 
 /// Trait for protocol framing, data-encoding and decoding. Shall return one of the
 /// following error-kind: `ProtocolError`, `MalformedPacket`.

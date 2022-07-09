@@ -320,11 +320,9 @@ impl Session {
                 retain_forward_rule: rfr,
             };
 
-            shard.as_topic_filters().subscribe(
-                &filter.topic_filter,
-                subscription.clone(),
-                false,
-            );
+            shard
+                .as_topic_filters()
+                .subscribe(&filter.topic_filter, subscription.clone());
             self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
 
             let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
