@@ -1,3 +1,5 @@
+use std::cmp;
+
 use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, TopicName, UserProperty, VarU32};
@@ -5,7 +7,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Publish";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Publish {
     pub retain: bool,
     pub qos: QoS,
@@ -14,6 +16,18 @@ pub struct Publish {
     pub packet_id: Option<u16>,
     pub properties: Option<PublishProperties>,
     pub payload: Option<Vec<u8>>,
+}
+
+impl PartialOrd for Publish {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.topic_name.partial_cmp(&other.topic_name)
+    }
+}
+
+impl Ord for Publish {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.topic_name.cmp(&other.topic_name)
+    }
 }
 
 impl Packetize for Publish {
@@ -108,7 +122,7 @@ impl Publish {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublishProperties {
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary
     pub message_expiry_interval: Option<u32>,

@@ -757,6 +757,20 @@ impl Shard {
         }
     }
 
+    pub fn as_cluster(&self) -> &Cluster {
+        match &self.inner {
+            Inner::Main(RunLoop { cluster, .. }) => cluster,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_retained_messages(&self) -> &RetainedTrie {
+        match &self.inner {
+            Inner::Main(RunLoop { retained_messages, .. }) => retained_messages,
+            _ => unreachable!(),
+        }
+    }
+
     pub fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
             Inner::Main(RunLoop { waker, .. }) => Arc::clone(waker),

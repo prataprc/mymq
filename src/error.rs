@@ -9,7 +9,7 @@ use std::{self, fmt, result};
 /// ```
 ///
 /// ```ignore
-/// err!(MalformedPacket, code: InvalidQoS, "qos={}", qos);
+/// err!(MalformedPacket, code: QoSNotSupported, "qos={}", qos);
 /// ```
 ///
 /// ```ignore
@@ -342,7 +342,7 @@ pub enum ReasonCode {
     AdminAction = 0x98,
     PayloadFormatInvalid = 0x99,
     RetainNotSupported = 0x9A,
-    InvalidQoS = 0x9B,
+    QoSNotSupported = 0x9B,
     UseAnotherServer = 0x9C,
     ServerMoved = 0x9D,
     UnsupportedSharedSubscription = 0x9E,
@@ -392,7 +392,7 @@ impl fmt::Display for ReasonCode {
             AdminAction => "Administrative action",
             PayloadFormatInvalid => "Payload format invalid",
             RetainNotSupported => "Retain not supported",
-            InvalidQoS => "QoS not supported",
+            QoSNotSupported => "QoS not supported",
             UseAnotherServer => "Use another server",
             ServerMoved => "Server moved",
             UnsupportedSharedSubscription => "Shared Subscriptions not supported",

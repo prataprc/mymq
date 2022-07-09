@@ -143,7 +143,7 @@ impl<'a> IterTopicPath<'a> for TopicName {
 
 impl TopicName {
     fn validate(&self) -> Result<()> {
-        Ok(())
+        todo!()
     }
 }
 
@@ -203,7 +203,7 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
 
 impl TopicFilter {
     fn validate(&self) -> Result<()> {
-        Ok(())
+        todo!()
     }
 }
 

@@ -115,6 +115,12 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_MAX_QOS]
     /// * **Mutable**: No
     pub mqtt_maximum_qos: Option<u8>,
+
+    /// MQTT retain available and supported by broker. Disabling this would disable
+    /// retain-messaes on the borker side.
+    /// * **Default**: [Config::DEF_MQTT_RETAIN_AVAILABLE]
+    /// * **Mutable**: No
+    pub mqtt_retain_available: Option<bool>,
 }
 
 impl Default for Config {
@@ -139,6 +145,7 @@ impl Default for Config {
             mqtt_receive_maximum: Some(Self::DEF_MQTT_RECEIVE_MAXIMUM),
             mqtt_session_expiry_interval: None,
             mqtt_maximum_qos: Some(Self::DEF_MQTT_MAX_QOS),
+            mqtt_retain_available: Some(Self::DEF_MQTT_RETAIN_AVAILABLE),
         }
     }
 }
@@ -166,6 +173,8 @@ impl Config {
     pub const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
     /// Refer to [Config::mqtt_maximum_qos]
     pub const DEF_MQTT_MAX_QOS: u8 = 1;
+    /// Refer to [Config::mqtt_retain_available]
+    pub const DEF_MQTT_RETAIN_AVAILABLE: bool = true;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -242,6 +251,10 @@ impl Config {
 
     pub fn mqtt_maximum_qos(&self) -> u8 {
         self.mqtt_maximum_qos.unwrap_or(Self::DEF_MQTT_MAX_QOS)
+    }
+
+    pub fn mqtt_retain_available(&self) -> bool {
+        self.mqtt_retain_available.unwrap_or(Self::DEF_MQTT_RETAIN_AVAILABLE)
     }
 }
 

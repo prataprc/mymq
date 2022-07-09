@@ -8,6 +8,8 @@ use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
+type Messages = Vec<Message>;
+
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
 // TODO Revisit 2.2.1 Packet Identifier
@@ -65,7 +67,6 @@ use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 //
 // *CONNACK Properties*
 //
-// TODO: `retain_available`
 // TODO: `topic_alias_maximum`
 // TODO: `shared_subscription_available`
 // TODO: `response_information`
@@ -190,7 +191,7 @@ impl Session {
             session_expiry_interval: self.session_expiry_interval,
             receive_maximum: Some(self.config.mqtt_receive_maximum()),
             maximum_qos: Some(self.config.mqtt_maximum_qos().try_into().unwrap()),
-            retain_available: None,
+            retain_available: Some(self.config.mqtt_retain_available()),
             max_packet_size: Some(self.config.mqtt_max_packet_size()),
             assigned_client_identifier: None,
             wildcard_subscription_available: Some(true),
@@ -255,16 +256,15 @@ impl Session {
     }
 
     // handle incoming packet
-    fn handle_packet(&mut self, shard: &Shard, pkt: v5::Packet) -> Result<Vec<Message>> {
-        // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
+    fn handle_packet(&mut self, shard: &Shard, pkt: v5::Packet) -> Result<Messages> {
         // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
         // PUBLISH, PUBLISH-ack lead to message routing.
 
         let msgs = match pkt {
             v5::Packet::PingReq => vec![Message::new_client_ack(v5::Packet::PingReq)],
-            v5::Packet::Subscribe(sub) => self.handle_subscribe(shard, sub),
+            v5::Packet::Subscribe(sub) => self.pkt_subscribe(shard, sub)?,
             v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::Publish(_publish) => todo!(),
+            v5::Packet::Publish(publish) => self.pkt_publish(shard, publish)?,
             v5::Packet::PubAck(_puback) => todo!(),
             v5::Packet::PubRec(_puback) => todo!(),
             v5::Packet::PubRel(_puback) => todo!(),
@@ -274,6 +274,8 @@ impl Session {
                 err!(Disconnected, code: Success, "{} client disconnect", self.prefix)?
             }
             v5::Packet::Auth(_auth) => todo!(),
+
+            // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
             v5::Packet::Connect(_) => err!(
                 ProtocolError,
                 code: ProtocolError,
@@ -300,7 +302,7 @@ impl Session {
     }
 
     // return suback and retained-messages if any.
-    fn handle_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Vec<Message> {
+    fn pkt_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
         let subscription_id: Option<u32> = match &sub.properties {
             Some(props) => props.subscription_id.clone().map(|x| *x),
             None => None,
@@ -339,7 +341,57 @@ impl Session {
             properties: None,
             return_codes,
         };
-        vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }]
+
+        // When a new Non‑shared Subscription is made, the last retained message, if any,
+        // on each matching topic name is sent to the Client as directed by the
+        // Retain Handling Subscription Option. These messages are sent with the RETAIN
+        // flag set to 1. Which retained messages are sent is controlled by the Retain
+        // Handling Subscription Option. At the time of the Subscription:
+        //
+        // * If Retain Handling is set to 0 the Server MUST send the retained messages
+        //   matching the Topic Filter of the subscription to the Client [MQTT-3.3.1-9].
+        // * If Retain Handling is set to 1 then if the subscription did not already exist,
+        //   the Server MUST send all retained message matching the Topic Filter of the
+        //   subscription to the Client, and if the subscription did exist the Server
+        //   MUST NOT send the retained messages. [MQTT-3.3.1-10].
+        // * If Retain Handling is set to 2, the Server MUST NOT send the retained
+        //   messages [MQTT-3.3.1-11].
+
+        Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
+    }
+
+    fn pkt_publish(&mut self, shard: &Shard, publ: v5::Publish) -> Result<Messages> {
+        // TODO: If the DUP flag is set to 1, it indicates that this _might_ be
+        //       re-delivery of an earlier attempt to send the packet. Does this mean
+        //       we will have to use a config-param to blindly ignore DUP publish ?
+        //       Or, because this is over TCP, we can always ignore DUP publish ?
+
+        if publ.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap() {
+            err!(
+                ProtocolError,
+                code: QoSNotSupported,
+                "{} publish-qos exceeds server-qos {:?}",
+                self.prefix,
+                publ.qos
+            )?;
+        }
+
+        if publ.retain {
+            if self.config.mqtt_retain_available() {
+                err!(
+                    ProtocolError,
+                    code: RetainNotSupported,
+                    "{} retain unavailable",
+                    self.prefix
+                )?;
+            } else if publ.payload.as_ref().map(|x| x.len() == 0).unwrap_or(true) {
+                shard.as_cluster().reset_retain_topic(publ.topic_name.clone())?;
+            } else {
+                shard.as_cluster().set_retain_topic(publ.clone())?;
+            }
+        }
+
+        todo!()
     }
 }
 

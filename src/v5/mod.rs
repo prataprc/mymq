@@ -378,7 +378,7 @@ impl TryFrom<u8> for QoS {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             2 => QoS::ExactlyOnce,
-            _ => err!(MalformedPacket, code: InvalidQoS, "reserved QoS")?,
+            _ => err!(MalformedPacket, code: MalformedPacket, "reserved QoS")?,
         };
 
         Ok(val)
