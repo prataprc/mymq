@@ -5,10 +5,21 @@
 
 use std::{mem, time};
 
+/// Trait needs to be implemented by values that are managed by [Timer].
+pub trait TimeoutValue {
+    /// Call this to mark this value as deleted. Once it is marked as deleted, [
+    /// [Timeout::expired] won't return this value when it expires. On the other hand,
+    /// it will be quitely deleted by `GC`.
+    fn delete(&self);
+
+    /// Return whether this value was marked as deleted.
+    fn is_deleted(&self) -> bool;
+}
+
 // in seconds.
 pub struct Timer<T> {
     instant: time::Instant,
-    head: Titem<T>,
+    head: Box<Titem<T>>,
 }
 
 enum Titem<T> {
@@ -27,15 +38,15 @@ impl<T> Default for Timer<T> {
     fn default() -> Timer<T> {
         Timer {
             instant: time::Instant::now(),
-            head: Titem::Head { next: Box::new(Titem::Sentinel) },
+            head: Box::new(Titem::Head { next: Box::new(Titem::Sentinel) }),
         }
     }
 }
 
 impl<T> Timer<T> {
-    pub fn count_down(&mut self) -> impl Iterator<Item = T>
+    pub fn expired(&mut self) -> impl Iterator<Item = T>
     where
-        T: Clone,
+        T: Clone + TimeoutValue,
     {
         let secs = self.instant.elapsed().as_secs() as u32;
         self.instant += time::Duration::from_secs(secs as u64);
@@ -54,7 +65,12 @@ impl<T> Timer<T> {
                     self.head.set_next(next);
                     break;
                 }
+                Titem::Timeout { value, next, .. } if value.is_deleted() => {
+                    // quitely remove and ignore this item.
+                    self.head.set_next(*next);
+                }
                 Titem::Timeout { value, next, .. } => {
+                    // exipired, remove and return this item.
                     expired.push(value);
                     self.head.set_next(*next);
                 }
@@ -68,7 +84,7 @@ impl<T> Timer<T> {
     pub fn add_timeout(&mut self, secs: u32, value: T) {
         let mut ndelta = secs.saturating_sub(self.instant.elapsed().as_secs() as u32);
 
-        let mut prev = &mut self.head;
+        let mut prev = self.head.as_mut();
         loop {
             match prev.take_next() {
                 n @ Titem::Sentinel => {
@@ -87,6 +103,33 @@ impl<T> Timer<T> {
                     ndelta = ndelta - nn.to_delta();
                     prev.set_next(nn);
                     prev = prev.as_mut_next();
+                }
+                Titem::Head { .. } => unreachable!(),
+            }
+        }
+    }
+
+    pub fn gc(&mut self)
+    where
+        T: TimeoutValue,
+    {
+        let mut prev = self.head.as_mut();
+        loop {
+            match prev.take_next() {
+                next @ Titem::Sentinel => {
+                    prev.set_next(next);
+                    break;
+                }
+                Titem::Timeout { value, mut next, .. } if value.is_deleted() => {
+                    let next = mem::replace(&mut next, Box::new(Titem::Sentinel));
+                    prev.set_next(*next);
+                }
+                n @ Titem::Timeout { .. } => {
+                    prev.set_next(n);
+                    prev = match prev {
+                        Titem::Timeout { next, .. } => next.as_mut(),
+                        _ => unreachable!(),
+                    };
                 }
                 Titem::Head { .. } => unreachable!(),
             }

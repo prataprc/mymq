@@ -53,7 +53,7 @@ pub use socket::{PktRx, PktTx, Socket};
 pub use spinlock::Spinlock;
 pub use thread::{Thread, Threadable};
 pub use ticker::Ticker;
-pub use timer::Timer;
+pub use timer::{TimeoutValue, Timer};
 pub use ttrie::TopicTrie;
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
