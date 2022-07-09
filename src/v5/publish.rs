@@ -22,7 +22,7 @@ impl Packetize for Publish {
 
         let (fh, fh_len) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
-        let (_, retain, qos, duplicate) = fh.unwrap()?;
+        let (_, retain, qos, duplicate) = fh.unwrap();
 
         let (topic_name, n) = dec_field!(TopicName, stream, fh_len);
         let (packet_id, n) = dec_field!(
@@ -48,8 +48,8 @@ impl Packetize for Publish {
             properties,
             payload,
         };
-        val.validate()?;
 
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -85,6 +85,10 @@ impl Packetize for Publish {
 
 impl Publish {
     fn validate(&self) -> Result<()> {
+        if self.qos == QoS::AtMostOnce && self.duplicate {
+            err!(MalformedPacket, code: MalformedPacket, "{} DUP is set for QoS-0", PP)?;
+        }
+
         match (self.payload.as_ref(), self.properties.as_ref().map(|p| p.is_utf8())) {
             (Some(payload), Some(true)) => {
                 if let Err(err) = std::str::from_utf8(&payload) {

@@ -38,6 +38,7 @@ impl Packetize for ConnackFlags {
         let flags = ConnackFlags(flags);
         flags.unwrap()?;
 
+        flags.validate()?;
         Ok((flags, n))
     }
 
@@ -60,6 +61,10 @@ impl ConnackFlags {
         }
 
         Ok(self.0 & (*Self::SESSION_PRESENT) > 0)
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -163,6 +168,8 @@ impl Packetize for ConnAck {
         let (properties, n) = dec_props!(ConnAckProperties, stream, n);
 
         let val = ConnAck { flags, code, properties };
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -183,6 +190,12 @@ impl Packetize for ConnAck {
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl ConnAck {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

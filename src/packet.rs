@@ -135,7 +135,7 @@ impl MQTTRead {
     // ProtocolError, implies DISCONNECT and socket close
     pub fn parse(&self) -> Result<v5::Packet> {
         let (pkt, n, m) = match self {
-            MQTTRead::Fin { data, fh, .. } => match fh.unwrap()?.0 {
+            MQTTRead::Fin { data, fh, .. } => match fh.unwrap().0 {
                 v5::PacketType::Connect => {
                     let (pkt, n) = v5::Connect::decode(&data)?;
                     (v5::Packet::Connect(pkt), n, data.len())

@@ -254,7 +254,7 @@ impl Packetize for Packet {
         let stream: &[u8] = stream.as_ref();
         let (fh, _) = FixedHeader::decode(stream)?;
 
-        match fh.unwrap()?.0 {
+        match fh.unwrap().0 {
             PacketType::Connect => {
                 let (pkt, n) = Connect::decode(stream)?;
                 Ok((Packet::Connect(pkt), n))
@@ -436,12 +436,14 @@ impl Packetize for FixedHeader {
         let (remaining_len, n) = dec_field!(VarU32, stream, n);
 
         let fh = FixedHeader { byte1, remaining_len };
-        fh.validate()?;
 
+        fh.validate()?;
         Ok((fh, n))
     }
 
     fn encode(&self) -> Result<Blob> {
+        self.validate()?;
+
         let byte1 = self.byte1.encode()?;
         let remaining_len = self.remaining_len.encode()?;
         let (m, n) = (byte1.as_ref().len(), remaining_len.as_ref().len());
@@ -455,6 +457,11 @@ impl Packetize for FixedHeader {
 }
 
 impl FixedHeader {
+    pub const HDR_RETAIN: u8 = 0b_0000_0001;
+    pub const HDR_QOS: u8 = 0b_0000_0110;
+    pub const HDR_DUP: u8 = 0b_0000_1000;
+    pub const HDR_PKT_TYPE: u8 = 0b_1111_0000;
+
     pub fn new(pkt_type: PacketType, remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
             err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
@@ -523,23 +530,13 @@ impl FixedHeader {
     }
 
     /// Unwrap the fixed header into (packet-type, retain, qos, dup).
-    pub fn unwrap(self) -> Result<(PacketType, bool, QoS, bool)> {
-        let pkt_type: PacketType = (self.byte1 >> 4).try_into()?;
-        let retain = (self.byte1 & 0b0001) > 0;
-        let qos: QoS = match (self.byte1 & 0b0110) >> 1 {
-            0 => QoS::AtMostOnce,
-            1 => QoS::AtLeastOnce,
-            2 => QoS::ExactlyOnce,
-            qos => err!(
-                ProtocolError,
-                code: InvalidQoS,
-                "FixedHeader qos:{} not supported",
-                qos
-            )?,
-        };
-        let dup = (self.byte1 & 0b1000) > 0;
+    pub fn unwrap(self) -> (PacketType, bool, QoS, bool) {
+        let pkt_type = PacketType::try_from(self.byte1 >> 4).unwrap();
+        let retain = (self.byte1 & Self::HDR_RETAIN) > 0;
+        let qos = QoS::try_from((self.byte1 & Self::HDR_QOS) >> 1).unwrap();
+        let dup = (self.byte1 & Self::HDR_DUP) > 0;
 
-        Ok((pkt_type, retain, qos, dup))
+        (pkt_type, retain, qos, dup)
     }
 
     /// Length of fixed header. Byte 1 + (1..4) bytes. So fixed header
@@ -566,7 +563,10 @@ impl FixedHeader {
         use PacketType::*;
         use QoS::{AtLeastOnce, AtMostOnce};
 
-        let (pkt_type, retain, qos, dup) = self.unwrap()?;
+        let _qos = QoS::try_from((self.byte1 & Self::HDR_QOS) >> 1)?;
+        let _pkt_type = PacketType::try_from((self.byte1 & Self::HDR_PKT_TYPE) >> 4)?;
+
+        let (pkt_type, retain, qos, dup) = self.unwrap();
         match pkt_type {
             Connect if qos == AtMostOnce && !retain && !dup => Ok(()),
             ConnAck if qos == AtMostOnce && !retain && !dup => Ok(()),

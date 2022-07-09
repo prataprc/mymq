@@ -45,6 +45,7 @@ impl Packetize for Auth {
 
         let val = Auth { code, properties };
 
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -65,6 +66,12 @@ impl Packetize for Auth {
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl Auth {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

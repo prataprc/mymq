@@ -123,6 +123,7 @@ impl Packetize for Disconnect {
             }
         };
 
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -143,6 +144,12 @@ impl Packetize for Disconnect {
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl Disconnect {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

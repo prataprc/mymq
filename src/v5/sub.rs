@@ -14,6 +14,7 @@ impl Packetize for SubscriptionOpt {
         let (opt, n) = dec_field!(u8, stream, 0);
         let val = SubscriptionOpt(opt);
 
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -49,6 +50,10 @@ impl SubscriptionOpt {
             nl,
             qos,
         )
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -117,8 +122,8 @@ impl Packetize for Subscribe {
         }
 
         let val = Subscribe { packet_id, properties, filters };
-        val.validate()?;
 
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -254,6 +259,8 @@ impl Packetize for SubscribeFilter {
         let (opt, n) = dec_field!(SubscriptionOpt, stream, n);
 
         let val = SubscribeFilter { topic_filter, opt };
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -264,5 +271,11 @@ impl Packetize for SubscribeFilter {
         data.extend_from_slice(self.opt.encode()?.as_ref());
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl SubscribeFilter {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }

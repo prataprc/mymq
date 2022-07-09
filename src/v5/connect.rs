@@ -31,6 +31,7 @@ impl Packetize for ConnectFlags {
         let (flags, n) = dec_field!(u8, stream, 0);
         let flags = ConnectFlags(flags);
 
+        flags.validate()?;
         Ok((flags, n))
     }
 
@@ -75,6 +76,10 @@ impl ConnectFlags {
 
     pub fn is_password(&self) -> bool {
         (self.0 & Self::PASSWORD.0) > 0
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -138,8 +143,8 @@ impl Packetize for Connect {
                 password,
             },
         };
-        val.validate()?;
 
+        val.validate()?;
         Ok((val, n))
     }
 

@@ -65,7 +65,8 @@ impl Packetize for Pub {
 
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
-        let (packet_type, _, _, _) = fh.unwrap()?;
+
+        let (packet_type, _, _, _) = fh.unwrap();
 
         let (packet_id, n) = dec_field!(u16, stream, n);
 
@@ -87,6 +88,7 @@ impl Packetize for Pub {
         let (properties, n) = dec_props!(PubProperties, stream, n);
 
         let val = Pub { packet_type, packet_id, code, properties };
+
         val.validate()?;
         Ok((val, n))
     }

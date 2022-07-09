@@ -74,6 +74,8 @@ impl Packetize for UnsubAck {
         }
 
         let val = UnsubAck { packet_id, properties, return_codes };
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -96,6 +98,12 @@ impl Packetize for UnsubAck {
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl UnsubAck {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

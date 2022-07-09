@@ -84,6 +84,8 @@ impl Packetize for SubAck {
         }
 
         let val = SubAck { packet_id, properties, return_codes };
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -106,6 +108,12 @@ impl Packetize for SubAck {
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl SubAck {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

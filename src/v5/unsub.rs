@@ -37,8 +37,8 @@ impl Packetize for UnSubscribe {
         }
 
         let val = UnSubscribe { packet_id, properties, filters };
-        val.validate()?;
 
+        val.validate()?;
         Ok((val, n))
     }
 

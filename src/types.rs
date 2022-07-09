@@ -122,6 +122,8 @@ impl Packetize for TopicName {
 
         let (val, n) = String::decode(stream)?;
         let val: TopicName = val.try_into()?;
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -136,6 +138,12 @@ impl<'a> IterTopicPath<'a> for TopicName {
 
     fn iter_topic_path(&'a self) -> Self::Iter {
         self.split('/')
+    }
+}
+
+impl TopicName {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -174,6 +182,8 @@ impl Packetize for TopicFilter {
 
         let (val, n) = String::decode(stream)?;
         let val: TopicFilter = val.try_into()?;
+
+        val.validate()?;
         Ok((val, n))
     }
 
@@ -188,6 +198,12 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
 
     fn iter_topic_path(&'a self) -> Self::Iter {
         self.split('/')
+    }
+}
+
+impl TopicFilter {
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 

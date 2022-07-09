@@ -1,6 +1,8 @@
 //! Package implement MQTT protocol-framing for both client and server.
 
 // TODO: review all err!() calls and tally them with MQTT spec.
+// TODO: validate()? calls must be wired into all Packetize::{encode, decode}
+//       implementation
 
 #![feature(backtrace)]
 #![feature(error_iter)]

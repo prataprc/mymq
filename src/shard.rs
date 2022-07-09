@@ -376,6 +376,9 @@ impl Threadable for Shard {
             self.in_messages(&msg_rx);
             self.flush_messages();
 
+            // Retry PUBLISH here.
+            self.retry_publish();
+
             // wake up miot every time shard wakes up
             self.as_miot().wake()
         }
@@ -500,23 +503,17 @@ impl Shard {
         };
 
         // receive messages targeting all the sessions.
-        let msgs = match msg_rx.try_recvs() {
-            QueueStatus::Ok(msgs) => msgs,
-            QueueStatus::Block(msgs) => msgs,
-            QueueStatus::Disconnected(_) => {
-                return QueueStatus::Disconnected(Vec::new());
-            }
-        };
+        let mut status = msg_rx.try_recvs();
+        let msgs = status.take_values();
 
         // partition the messages for each session.
         let mut session_msgs: BTreeMap<ClientID, Vec<Message>> = BTreeMap::default();
         for msg in msgs.into_iter() {
             let client_id = msg.as_client_id();
-            match session_msgs.get_mut(client_id) {
-                Some(msgs) => msgs.push(msg),
-                None => {
-                    session_msgs.insert(client_id.clone(), vec![msg]);
-                }
+            if let Some(msgs) = session_msgs.get_mut(client_id) {
+                msgs.push(msg);
+            } else {
+                session_msgs.insert(client_id.clone(), vec![msg]);
             }
         }
 
@@ -528,7 +525,7 @@ impl Shard {
             }
         }
 
-        QueueStatus::Ok(Vec::new())
+        status
     }
 
     // flush the booked messages down stream
@@ -540,6 +537,18 @@ impl Shard {
 
         for (_, session) in sessions.iter_mut() {
             session.flush_messages();
+        }
+    }
+
+    // retry publish messages for eac stream.
+    fn retry_publish(&mut self) {
+        let RunLoop { sessions, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        for (_, session) in sessions.iter_mut() {
+            session.retry_publish();
         }
     }
 }

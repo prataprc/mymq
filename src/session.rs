@@ -428,6 +428,12 @@ impl Session {
         }
     }
 
+    pub fn retry_publish(&mut self) {
+        todo!()
+    }
+}
+
+impl Session {
     fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
         let (seqno, packet_id) = (self.state.cout.seqno, self.state.cout.next_packet_id);
         self.state.cout.seqno = self.state.cout.seqno.saturating_add(1);
