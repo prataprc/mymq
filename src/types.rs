@@ -107,9 +107,9 @@ impl TryFrom<String> for TopicName {
 
     fn try_from(val: String) -> Result<TopicName> {
         if val.len() == 0 {
-            err!(ProtocolError, code: InvalidTopicName, "empty topic-name {:?}", val)
+            err!(ProtocolError, code: TopicNameInvalid, "empty topic-name {:?}", val)
         } else if val.chars().any(|c| c == '#' || c == '+') {
-            err!(ProtocolError, code: InvalidTopicName, "has wildcards {:?}", val)
+            err!(ProtocolError, code: TopicNameInvalid, "has wildcards {:?}", val)
         } else {
             Ok(TopicName(val))
         }
@@ -169,7 +169,7 @@ impl TryFrom<String> for TopicFilter {
 
     fn try_from(val: String) -> Result<TopicFilter> {
         if val.len() == 0 {
-            err!(ProtocolError, code: InvalidTopicName, "empty topic-filter {:?}", val)
+            err!(ProtocolError, code: TopicNameInvalid, "empty topic-filter {:?}", val)
         } else {
             Ok(TopicFilter(val))
         }

@@ -84,7 +84,7 @@ pub enum ConnackReasonCode {
     ServerBusy = 0x89,
     Banned = 0x8a,
     BadAuthenticationMethod = 0x8c,
-    InvalidTopicName = 0x90,
+    TopicNameInvalid = 0x90,
     PacketTooLarge = 0x95,
     QuotaExceeded = 0x97,
     PayloadFormatInvalid = 0x99,
@@ -113,7 +113,7 @@ impl TryFrom<u8> for ConnackReasonCode {
             0x89 => Ok(ConnackReasonCode::ServerBusy),
             0x8a => Ok(ConnackReasonCode::Banned),
             0x8c => Ok(ConnackReasonCode::BadAuthenticationMethod),
-            0x90 => Ok(ConnackReasonCode::InvalidTopicName),
+            0x90 => Ok(ConnackReasonCode::TopicNameInvalid),
             0x95 => Ok(ConnackReasonCode::PacketTooLarge),
             0x97 => Ok(ConnackReasonCode::QuotaExceeded),
             0x99 => Ok(ConnackReasonCode::PayloadFormatInvalid),
@@ -207,7 +207,7 @@ pub struct ConnAckProperties {
     pub retain_available: Option<bool>,
     pub max_packet_size: Option<u32>,
     pub assigned_client_identifier: Option<String>,
-    pub topic_alias_maximum: Option<u16>,
+    pub topic_alias_max: Option<u16>,
     pub reason_string: Option<String>,
     pub wildcard_subscription_available: Option<bool>,
     pub subscription_identifiers_available: Option<bool>,
@@ -260,7 +260,7 @@ impl Packetize for ConnAckProperties {
                 AssignedClientIdentifier(val) => {
                     props.assigned_client_identifier = Some(val);
                 }
-                TopicAliasMaximum(val) => props.topic_alias_maximum = Some(val),
+                TopicAliasMaximum(val) => props.topic_alias_max = Some(val),
                 ReasonString(val) => props.reason_string = Some(val),
                 UserProp(val) => props.user_properties.push(val),
                 WildcardSubscriptionAvailable(val) => {
@@ -308,7 +308,7 @@ impl Packetize for ConnAckProperties {
         }
         enc_prop!(opt: data, MaximumPacketSize, self.max_packet_size);
         enc_prop!(opt: data, AssignedClientIdentifier, &self.assigned_client_identifier);
-        enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_maximum);
+        enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_max);
         enc_prop!(opt: data, ReasonString, &self.reason_string);
         if let Some(val) = self.wildcard_subscription_available {
             let val = util::bool_to_u8(val);
@@ -351,8 +351,8 @@ impl ConnAckProperties {
         self.receive_maximum.unwrap_or(Self::RECEIVE_MAXIMUM)
     }
 
-    pub fn topic_alias_maximum(&self) -> u16 {
-        self.topic_alias_maximum.unwrap_or(Self::TOPIC_ALIAS_MAXIMUM)
+    pub fn topic_alias_max(&self) -> u16 {
+        self.topic_alias_max.unwrap_or(Self::TOPIC_ALIAS_MAXIMUM)
     }
 
     pub fn wildcard_subscription_available(&self) -> bool {

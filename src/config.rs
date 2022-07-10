@@ -121,6 +121,13 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_RETAIN_AVAILABLE]
     /// * **Mutable**: No
     pub mqtt_retain_available: Option<bool>,
+
+    /// MQTT Maximum value for topic_alias allowed. Specifying a value of N would mean
+    /// broker can handle N-1 aliases for topic-name. Setting this value to ZERO is
+    /// same as specifying None, that is, broker won't accept any topic-aliases.
+    /// * **Default**: [Config::DEF_MQTT_TOPIC_ALIAS_MAX]
+    /// * **Mutable**: No
+    pub mqtt_topic_alias_max: Option<u16>,
 }
 
 impl Default for Config {
@@ -146,6 +153,7 @@ impl Default for Config {
             mqtt_session_expiry_interval: None,
             mqtt_maximum_qos: Some(Self::DEF_MQTT_MAX_QOS),
             mqtt_retain_available: Some(Self::DEF_MQTT_RETAIN_AVAILABLE),
+            mqtt_topic_alias_max: Some(Self::DEF_MQTT_TOPIC_ALIAS_MAX),
         }
     }
 }
@@ -175,6 +183,8 @@ impl Config {
     pub const DEF_MQTT_MAX_QOS: u8 = 1;
     /// Refer to [Config::mqtt_retain_available]
     pub const DEF_MQTT_RETAIN_AVAILABLE: bool = true;
+    /// Refer to [Config::mqtt_topic_alias_max]
+    pub const DEF_MQTT_TOPIC_ALIAS_MAX: u16 = 65535;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -255,6 +265,14 @@ impl Config {
 
     pub fn mqtt_retain_available(&self) -> bool {
         self.mqtt_retain_available.unwrap_or(Self::DEF_MQTT_RETAIN_AVAILABLE)
+    }
+
+    pub fn mqtt_topic_alias_max(&self) -> Option<u16> {
+        match &self.mqtt_topic_alias_max {
+            Some(0) => None,
+            Some(val) => Some(*val),
+            None => self.mqtt_topic_alias_max,
+        }
     }
 }
 

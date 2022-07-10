@@ -120,6 +120,17 @@ impl Publish {
 
         Ok(())
     }
+
+    pub fn topic_name(&self) -> TopicName {
+        self.topic_name.clone()
+    }
+
+    pub fn topic_alias(&self) -> Option<u16> {
+        match &self.properties {
+            Some(props) => props.topic_alias.clone(),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -163,7 +174,7 @@ impl Packetize for PublishProperties {
                 }
                 MessageExpiryInterval(val) => props.message_expiry_interval = Some(val),
                 TopicAlias(0) => {
-                    err!(ProtocolError, code: ProtocolError, "{} topic-alias:ZERO", PP)?
+                    err!(ProtocolError, code: ProtocolError, "{} topic-alias=ZERO", PP)?
                 }
                 TopicAlias(val) => props.topic_alias = Some(val),
                 ResponseTopic(val) => props.response_topic = Some(val),

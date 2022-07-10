@@ -1,4 +1,4 @@
-use log::error;
+use log::{debug, error};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::{cmp, net};
@@ -13,6 +13,7 @@ type Messages = Vec<Message>;
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
 // TODO Revisit 2.2.1 Packet Identifier
+// TODO support topic_alias while broker publishing messages to client.
 //
 // *Will Message*
 //
@@ -57,7 +58,6 @@ type Messages = Vec<Message>;
 //
 // *CONNECT Properties*
 //
-// TODO: `topic_alias_maximum`
 // TODO: `request_response_info`
 // TODO: `request_problem_info`
 // TODO: `authentication_method`
@@ -67,7 +67,6 @@ type Messages = Vec<Message>;
 //
 // *CONNACK Properties*
 //
-// TODO: `topic_alias_maximum`
 // TODO: `shared_subscription_available`
 // TODO: `response_information`
 // TODO: `server_reference`
@@ -87,6 +86,8 @@ pub struct Session {
     prefix: String,
     client_receive_maximum: u16,
     client_max_packet_size: u32,
+    #[allow(dead_code)]
+    client_topic_alias_max: Option<u16>,
     session_expiry_interval: Option<u32>,
     config: Config,
 
@@ -107,6 +108,8 @@ pub struct Session {
     will_message: Option<WillMessage>,
     // MQTT Keep alive between client and broker.
     keep_alive: KeepAlive,
+    // MQTT topic-aliases if enabled. ZERO is not allowed.
+    topic_aliases: BTreeMap<u16, TopicName>,
 
     state: SessionState,
 }
@@ -170,6 +173,7 @@ impl Session {
             prefix: prefix,
             client_receive_maximum: pkt.receive_maximum(),
             client_max_packet_size: pkt.max_packet_size(),
+            client_topic_alias_max: pkt.topic_alias_max(),
             session_expiry_interval: sei,
             config: config.clone(),
 
@@ -179,6 +183,7 @@ impl Session {
             timestamp: BTreeMap::default(),
 
             keep_alive: KeepAlive::new(args.addr, &pkt, &config),
+            topic_aliases: BTreeMap::default(),
 
             will_message,
 
@@ -197,6 +202,7 @@ impl Session {
             wildcard_subscription_available: Some(true),
             subscription_identifiers_available: Some(true),
             shared_subscription_available: None,
+            topic_alias_max: self.config.mqtt_topic_alias_max(),
             ..v5::ConnAckProperties::default()
         };
         if pkt.payload.client_id.len() == 0 {
@@ -262,9 +268,9 @@ impl Session {
 
         let msgs = match pkt {
             v5::Packet::PingReq => vec![Message::new_client_ack(v5::Packet::PingReq)],
-            v5::Packet::Subscribe(sub) => self.pkt_subscribe(shard, sub)?,
+            v5::Packet::Subscribe(sub) => self.do_subscribe(shard, sub)?,
             v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::Publish(publish) => self.pkt_publish(shard, publish)?,
+            v5::Packet::Publish(publish) => self.do_publish(shard, publish)?,
             v5::Packet::PubAck(_puback) => todo!(),
             v5::Packet::PubRec(_puback) => todo!(),
             v5::Packet::PubRel(_puback) => todo!(),
@@ -302,7 +308,7 @@ impl Session {
     }
 
     // return suback and retained-messages if any.
-    fn pkt_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
+    fn do_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
         let subscription_id: Option<u32> = match &sub.properties {
             Some(props) => props.subscription_id.clone().map(|x| *x),
             None => None,
@@ -360,11 +366,14 @@ impl Session {
         Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
     }
 
-    fn pkt_publish(&mut self, shard: &Shard, publ: v5::Publish) -> Result<Messages> {
+    fn do_publish(&mut self, shard: &Shard, publ: v5::Publish) -> Result<Messages> {
         // TODO: If the DUP flag is set to 1, it indicates that this _might_ be
         //       re-delivery of an earlier attempt to send the packet. Does this mean
         //       we will have to use a config-param to blindly ignore DUP publish ?
         //       Or, because this is over TCP, we can always ignore DUP publish ?
+        // TODO: However, as the Server is permitted to map the Topic Name to another
+        //       name, it might not be the same as the Topic Name in the original
+        //       PUBLISH packet.
 
         if publ.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap() {
             err!(
@@ -390,6 +399,53 @@ impl Session {
                 shard.as_cluster().set_retain_topic(publ.clone())?;
             }
         }
+
+        let (topic_name, topic_alias) = (publ.topic_name(), publ.topic_alias());
+        let alias_max = self.config.mqtt_topic_alias_max();
+
+        let _topic_name = match topic_alias {
+            Some(_alias) if alias_max.is_none() => err!(
+                ProtocolError,
+                code: TopicAliasInvalid,
+                "{} topic-alias-is-not-supported by broker",
+                self.prefix
+            )?,
+            Some(alias) if alias > alias_max.unwrap() => err!(
+                ProtocolError,
+                code: TopicAliasInvalid,
+                "{} topic-alias-exceeds broker limit {} > {}",
+                self.prefix,
+                alias,
+                alias_max.unwrap()
+            )?,
+            Some(alias) if topic_name.len() > 0 => {
+                match self.topic_aliases.insert(alias, topic_name.clone()) {
+                    Some(old) => debug!(
+                        "{} for topic-alias {} replacing {:?} with {:?}",
+                        self.prefix, alias, old, topic_name
+                    ),
+                    None => (),
+                };
+                topic_name.clone()
+            }
+            Some(alias) => match self.topic_aliases.get(&alias) {
+                Some(topic_name) => topic_name.clone(),
+                None => err!(
+                    ProtocolError,
+                    code: TopicAliasInvalid,
+                    "{} alias {} is missing",
+                    self.prefix,
+                    alias
+                )?,
+            },
+            None if topic_name.len() == 0 => err!(
+                ProtocolError,
+                code: TopicNameInvalid,
+                "{} alias is ZERO and topic_name is empty",
+                self.prefix
+            )?,
+            None => topic_name.clone(),
+        };
 
         todo!()
     }

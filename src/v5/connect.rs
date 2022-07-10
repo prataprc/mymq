@@ -280,6 +280,13 @@ impl Connect {
             None => None,
         }
     }
+
+    pub fn topic_alias_max(&self) -> Option<u16> {
+        match &self.properties {
+            Some(props) => props.topic_alias_max(),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -394,8 +401,11 @@ impl ConnectProperties {
         self.max_packet_size.unwrap_or(Config::DEF_MQTT_MAX_PACKET_SIZE)
     }
 
-    pub fn topic_alias_maximum(&self) -> u16 {
-        self.topic_alias_max.unwrap_or(Self::TOPIC_ALIAS_MAXIMUM)
+    pub fn topic_alias_max(&self) -> Option<u16> {
+        match self.topic_alias_max {
+            Some(0) | None => None,
+            val @ Some(_) => val,
+        }
     }
 
     pub fn request_response_info(&self) -> bool {
