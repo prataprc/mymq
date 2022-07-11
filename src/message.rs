@@ -112,7 +112,7 @@ pub struct ClientInp {
     pub timestamp: BTreeMap<ClientID, (u64, time::Instant)>,
     // Back log of messages that needs to be flushed to other local-shards/sessions.
     //
-    // SUBSCRIBE and UNSUBSCRIBE shall be synchronously handled, that is, the call
+    // SUBSCRIBE, UNSUBSCRIBE, PINGREQ shall be synchronously handled, that is, the call
     // shall block until they are commited to cluster.
     //
     // DISCONNECT and AUTH shall also immediately execute, they may not block since
@@ -157,6 +157,7 @@ pub struct ClientOut {
     pub back_log: VecDeque<Message>,
 }
 
+#[derive(Clone)]
 pub enum Message {
     /// Message that is periodically, say every 30ms, published by a session to other
     /// local sessions.
@@ -192,6 +193,14 @@ impl Message {
                 *seqno = new_seqno;
                 *packet_id = new_packet_id;
             }
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn into_packet(self) -> v5::Packet {
+        match self {
+            Message::ClientAck { packet } => packet,
+            Message::Packet { packet, .. } => packet,
             _ => unreachable!(),
         }
     }

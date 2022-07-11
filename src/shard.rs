@@ -375,16 +375,10 @@ impl Threadable for Shard {
                 _exit => (),
             };
 
+            self.flush_to_shards();
             // This is where we do routing for all packets received from all session
             // owned by this shard.
             self.route_packets();
-            match self.flush_to_shards() {
-                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
-                QueueStatus::Disconnected(_) => {
-                    warn!("{:?} cascading shutdown via flush_to_shards", self.prefix);
-                    break;
-                }
-            }
 
             // Somebody routed messages to a session owned by this shard, we will handle
             // it here and push them down to the socket.
@@ -478,47 +472,29 @@ impl Shard {
 impl Shard {
     // Flush outgoing messages from this shard to other shards. Messages are booked
     // in ClientInp::shard_back_log
-    fn flush_to_shards(&mut self) -> QueueStatus<Message> {
-        let mut inner = mem::replace(&mut self.inner, Inner::Init);
-        let RunLoop { sessions, shard_queues, .. } = match &mut inner {
+    fn flush_to_shards(&mut self) {
+        let RunLoop { sessions, shard_queues, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
-        let mut iter = sessions.iter_mut();
-        let status = 'outer: loop {
-            match iter.next() {
-                Some((_, session)) => {
-                    let cinp = session.as_mut_cinp();
-                    let mut shard_back_log = BTreeMap::default();
-                    let maps = mem::replace(&mut cinp.shard_back_log, Default::default());
-                    for (shard_id, msgs) in maps.into_iter() {
-                        let shard = shard_queues.get_mut(&shard_id).unwrap();
-                        let mut status = shard.send_messages(msgs);
-                        let msgs = status.take_values();
-                        if msgs.len() > 0 {
-                            shard_back_log.insert(shard_id, msgs);
-                        }
-                        match status {
-                            QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
-                            status @ QueueStatus::Disconnected(_) => {
-                                error!(
-                                    "{} receiving shard {} has closed",
-                                    self.prefix, shard_id
-                                );
-                                break 'outer status;
-                            }
-                        }
-                    }
-                    let _empty = mem::replace(&mut cinp.shard_back_log, shard_back_log);
-                }
-                None => break QueueStatus::Ok(Vec::new()),
-            }
-            // continue with other sessions.
-        };
+        for (_, session) in sessions.iter_mut() {
+            let cinp = session.as_mut_cinp();
+            let back_log = mem::replace(&mut cinp.shard_back_log, Default::default());
+            for (shard_id, msgs) in back_log.into_iter() {
+                let shard = shard_queues.get_mut(&shard_id).unwrap();
+                let mut status = shard.send_messages(msgs);
+                cinp.shard_back_log.insert(shard_id, status.take_values());
 
-        let _init = mem::replace(&mut self.inner, inner);
-        status
+                match status {
+                    QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                    QueueStatus::Disconnected(_) => {
+                        // TODO: should this be logged at error-level
+                        warn!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
+                    }
+                }
+            }
+        }
     }
 
     // For each session interface, convert incoming packets to messages and route
@@ -534,15 +510,17 @@ impl Shard {
         for (client_id, session) in sessions.iter_mut() {
             match session.route_packets(self) {
                 Ok(QueueStatus::Disconnected(_)) => {
-                    let err: Result<()> = err!(
-                        Disconnected,
-                        desc: "{} miot has closed the packet-queue",
-                        self.prefix
-                    );
+                    let err: Result<()> = err!(Disconnected, desc: "{}", self.prefix);
                     failed_sessions.push((client_id.clone(), err.unwrap_err()));
                 }
                 Ok(_) => (), // continue with other sessions.
-                Err(err) => failed_sessions.push((client_id.clone(), err)),
+                Err(err) if err.kind() == ErrorKind::Disconnected => {
+                    failed_sessions.push((client_id.clone(), err));
+                }
+                Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                    failed_sessions.push((client_id.clone(), err));
+                }
+                Err(err) => unreachable!("{} unexpected err: {}", self.prefix, err),
             }
         }
 

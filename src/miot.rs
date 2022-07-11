@@ -327,7 +327,8 @@ impl Miot {
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
-                    let err: Result<()> = err!(Disconnected, desc: "");
+                    let err: Result<()> =
+                        err!(Disconnected, desc: "{} socket-rx", self.prefix);
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
                 }
                 Err(err) => {

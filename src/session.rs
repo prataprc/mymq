@@ -1,4 +1,4 @@
-use log::{debug, error};
+use log::{debug, error, warn};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::{cmp, net};
@@ -10,7 +10,7 @@ use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
 type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;
-type QueueMsg = QueueStatus<Message>;
+type QueuePkt = QueueStatus<Message>;
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
@@ -244,6 +244,8 @@ impl Session {
 // handle incoming packets.
 impl Session {
     pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
+        let disconnected = QueueStatus::Disconnected(Vec::new());
+
         let mut down_status = self.session_rx.try_recvs(&self.prefix);
         let pkts = {
             let pkts = down_status.take_values();
@@ -259,28 +261,30 @@ impl Session {
 
         if let QueueStatus::Disconnected(_) = down_status {
             error!("{} downstream disconnect", self.prefix);
-            Ok(QueueStatus::Disconnected(Vec::new()))
+            Ok(disconnected)
         } else if let QueueStatus::Disconnected(_) = up_status {
             error!("{} upstream disconnect, may be slow client", self.prefix);
-            Ok(QueueStatus::Disconnected(Vec::new()))
+            Ok(disconnected)
         } else {
             Ok(QueueStatus::Ok(Vec::new()))
         }
     }
 
-    fn handle_packets(&mut self, shard: &Shard, pkts: Packets) -> Result<QueueMsg> {
-        let mut msgs = Vec::with_capacity(pkts.len());
-        for pkt in pkts.into_iter() {
-            msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
+    fn handle_packets(&mut self, shard: &Shard, pkts: Packets) -> Result<QueuePkt> {
+        if let QueueStatus::Disconnected(_) = self.flush_messages() {
+            Ok(QueueStatus::Disconnected(Vec::new()))
+        } else {
+            let mut msgs = Vec::with_capacity(pkts.len());
+            for pkt in pkts.into_iter() {
+                msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
+            }
+            Ok(self.in_messages(msgs))
         }
-
-        let up_status = self.in_messages(msgs); // locally generated Message::ClientAck
-        self.flush_messages(); // flush any locally generate Message::ClientAck
-
-        Ok(up_status)
     }
 
-    // handle incoming packet
+    // handle incoming packet, return Message::LocalAck, if any.
+    // Disconnected
+    // ProtocolError
     fn handle_packet(&mut self, shard: &Shard, pkt: v5::Packet) -> Result<Messages> {
         // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
         // PUBLISH, PUBLISH-ack lead to message routing.
@@ -476,84 +480,30 @@ impl Session {
 // Handle incoming messages, incoming messages could be from owning shard's message queue
 // or locally generated (like Message::ClientAck)
 impl Session {
-    pub fn flush_messages(&mut self) -> QueueStatus<Message> {
-        if self.state.cout.index.len() > self.client_receive_maximum.into() {
-            return QueueStatus::Block(Vec::new());
-        }
-
-        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
-
-        let msgs: Vec<Message> = self.state.cout.back_log.drain(..).collect();
-        let mut iter = msgs.into_iter();
-        loop {
-            let msg = iter.next();
-
-            if msg.is_none() {
-                break QueueStatus::Ok(Vec::new());
-            }
-
-            match msg.unwrap() {
+    pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        for msg in msgs.into_iter() {
+            let msg = match msg {
                 Message::LocalAck { client_id, seqno, instant } => {
                     match self.cinp.timestamp.insert(client_id, (seqno, instant)) {
                         Some((old_seqno, _)) => assert!(old_seqno < seqno),
                         None => (),
                     }
+                    None
                 }
-                Message::Packet { client_id, shard_id, seqno, packet_id, packet } => {
-                    match miot_tx.try_sends(&self.prefix, vec![packet.clone()]) {
-                        QueueStatus::Ok(_) => {
-                            let (seqno, packet_id) = self.incr_cout_seqno();
-                            let msg = Message::Packet {
-                                client_id,
-                                shard_id,
-                                seqno,
-                                packet_id,
-                                packet,
-                            };
-                            self.state.cout.index.insert(packet_id, msg);
-                        }
-                        QueueStatus::Block(_pkts) => {
-                            let msg = Message::Packet {
-                                client_id,
-                                shard_id,
-                                seqno,
-                                packet_id,
-                                packet,
-                            };
-                            self.state.cout.back_log.push_front(msg);
-                            break QueueStatus::Block(Vec::new());
-                        }
-                        QueueStatus::Disconnected(_) => {
-                            break QueueStatus::Disconnected(Vec::new());
-                        }
-                    }
+                msg @ Message::ClientAck { .. } => Some(msg),
+                Message::Packet { client_id, shard_id, seqno, packet, .. } => {
+                    self.timestamp.insert(client_id.clone(), (shard_id, seqno));
+                    let (seqno, packet_id) = self.incr_cout_seqno();
+                    Some(Message::Packet {
+                        client_id,
+                        shard_id,
+                        seqno,
+                        packet_id,
+                        packet,
+                    })
                 }
-                Message::ClientAck { packet } => {
-                    match miot_tx.try_sends(&self.prefix, vec![packet.clone()]) {
-                        QueueStatus::Ok(_) => (),
-                        QueueStatus::Block(_pkts) => {
-                            let msg = Message::ClientAck { packet };
-                            self.state.cout.back_log.push_front(msg);
-                        }
-                        QueueStatus::Disconnected(_pkts) => {
-                            break QueueStatus::Disconnected(Vec::new());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        // if there is no back-pressure then add this to back-log
-        for msg in msgs.into_iter() {
-            match &msg {
-                Message::LocalAck { .. } | Message::ClientAck { .. } => (),
-                Message::Packet { client_id, shard_id, seqno, .. } => {
-                    self.timestamp.insert(client_id.clone(), (*shard_id, *seqno));
-                }
-            }
-            self.state.cout.back_log.push_back(msg);
+            };
+            msg.map(|msg| self.state.cout.back_log.push_back(msg));
         }
 
         let m = self.state.cout.back_log.len();
@@ -561,11 +511,48 @@ impl Session {
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
-            // TODO: separate back-log pressure from mqtt_pkt_batch_size.
+            // TODO: separate back-log limit from mqtt_pkt_batch_size.
             error!("{} cout.back_log {} pressure exceeds limit {}", self.prefix, m, n);
             QueueStatus::Disconnected(Vec::new())
         } else {
             QueueStatus::Ok(Vec::new())
+        }
+    }
+
+    pub fn flush_messages(&mut self) -> QueueStatus<v5::Packet> {
+        if self.state.cout.index.len() > self.client_receive_maximum.into() {
+            return QueueStatus::Block(Vec::new());
+        }
+
+        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
+
+        let mut msgs: Vec<Message> = self.state.cout.back_log.drain(..).collect();
+        let pkts: Vec<v5::Packet> =
+            msgs.clone().into_iter().map(|m| m.into_packet()).collect();
+
+        let mut status = miot_tx.try_sends(&self.prefix, pkts);
+        let ok_msgs = msgs.split_off(msgs.len() - status.take_values().len());
+
+        for msg in ok_msgs.into_iter() {
+            match &msg {
+                Message::Packet { packet_id, .. } => {
+                    self.state.cout.index.insert(*packet_id, msg);
+                }
+                Message::ClientAck { .. } => (),
+                Message::LocalAck { .. } => (),
+            }
+        }
+        // remaining messages, if any.
+        for msg in msgs.into_iter() {
+            self.state.cout.back_log.push_back(msg);
+        }
+
+        match status {
+            status @ QueueStatus::Ok(_) | status @ QueueStatus::Block(_) => status,
+            status @ QueueStatus::Disconnected(_) => {
+                warn!("{} downstream miot-receiver is closed", self.prefix);
+                status
+            }
         }
     }
 

@@ -56,7 +56,7 @@ impl PktTx {
 }
 
 pub struct PktRx {
-    msg_batch_size: usize,
+    pkt_batch_size: usize,
     rx: mpsc::Receiver<v5::Packet>,
 }
 
@@ -65,7 +65,7 @@ impl PktRx {
         let mut pkts = Vec::new(); // TODO: with_capacity ?
         loop {
             match self.rx.try_recv() {
-                Ok(pkt) if pkts.len() < self.msg_batch_size => pkts.push(pkt),
+                Ok(pkt) if pkts.len() < self.pkt_batch_size => pkts.push(pkt),
                 Ok(pkt) => {
                     pkts.push(pkt);
                     break QueueStatus::Ok(pkts);
@@ -143,7 +143,7 @@ impl Socket {
     // returned QueueStatus shall not carry any packets
     // MalformedPacket, ProtocolError
     pub fn read_packets(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
-        let msg_batch_size = config.mqtt_pkt_batch_size() as usize;
+        let pkt_batch_size = config.mqtt_pkt_batch_size() as usize;
 
         // before reading from socket, send remaining packets to shard.
         loop {
@@ -157,7 +157,7 @@ impl Socket {
             self.rd.packets.extend(status.take_values().into_iter());
 
             match status {
-                QueueStatus::Ok(_) if self.rd.packets.len() < msg_batch_size => (),
+                QueueStatus::Ok(_) if self.rd.packets.len() < pkt_batch_size => (),
                 QueueStatus::Ok(_) => break Ok(self.send_upstream(prefix)),
                 QueueStatus::Block(_) => break Ok(self.send_upstream(prefix)),
                 status @ QueueStatus::Disconnected(_) if self.rd.packets.len() == 0 => {
@@ -208,12 +208,12 @@ impl Socket {
     }
 
     // QueueStatus shall not carry any packets
-    pub fn send_upstream(&mut self, prefix: &str) -> QueuePkt {
+    pub fn send_upstream(&mut self, prefix: &str) -> QueueStatus<v5::Packet> {
         let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
 
         let pkts = self.rd.packets.drain(..).collect();
         let mut status = session_tx.try_sends(prefix, pkts);
-        self.rd.packets = status.take_values().into();
+        self.rd.packets = status.take_values().into(); // left over packets
 
         status
     }
@@ -314,7 +314,7 @@ impl Socket {
 pub fn pkt_channel(miot_id: u32, size: usize, waker: Arc<mio::Waker>) -> (PktTx, PktRx) {
     let (tx, rx) = mpsc::sync_channel(size);
     let pkt_tx = PktTx { miot_id, tx, waker, count: usize::default() };
-    let pkt_rx = PktRx { msg_batch_size: size, rx };
+    let pkt_rx = PktRx { pkt_batch_size: size, rx };
 
     (pkt_tx, pkt_rx)
 }
