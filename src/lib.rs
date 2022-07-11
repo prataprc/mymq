@@ -23,6 +23,7 @@ mod message;
 mod miot;
 mod packet;
 mod rebalance;
+mod rr;
 mod session;
 mod shard;
 mod socket;

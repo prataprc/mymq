@@ -9,6 +9,8 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
 type Messages = Vec<Message>;
+type Packets = Vec<v5::Packet>;
+type QueueMsg = QueueStatus<Message>;
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
@@ -110,6 +112,9 @@ pub struct Session {
     keep_alive: KeepAlive,
     // MQTT topic-aliases if enabled. ZERO is not allowed.
     topic_aliases: BTreeMap<u16, TopicName>,
+    // MQTT response-information sent via CONNACK, clients can use this to construct
+    // ResponseTopic.
+    response_info: Option<String>,
 
     state: SessionState,
 }
@@ -142,6 +147,7 @@ impl Session {
             seqno: 1,
             index: BTreeMap::default(),
             timestamp: BTreeMap::default(),
+            shard_back_log: BTreeMap::default(),
         };
         let cout = message::ClientOut {
             seqno: 1,
@@ -184,6 +190,7 @@ impl Session {
 
             keep_alive: KeepAlive::new(args.addr, &pkt, &config),
             topic_aliases: BTreeMap::default(),
+            response_info: None, // TODO: get this from rr.rs
 
             will_message,
 
@@ -237,28 +244,40 @@ impl Session {
 // handle incoming packets.
 impl Session {
     pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
-        self.keep_alive.check_expired()?;
+        let mut down_status = self.session_rx.try_recvs(&self.prefix);
+        let pkts = {
+            let pkts = down_status.take_values();
+            if pkts.len() == 0 {
+                self.keep_alive.check_expired()?;
+            } else {
+                self.keep_alive.live()
+            }
+            pkts
+        };
 
-        let mut status = self.session_rx.try_recvs(&self.prefix);
-        let pkts = status.take_values();
+        let up_status = self.handle_packets(shard, pkts)?;
 
-        if pkts.len() > 0 {
-            self.keep_alive.live()
+        if let QueueStatus::Disconnected(_) = down_status {
+            error!("{} downstream disconnect", self.prefix);
+            Ok(QueueStatus::Disconnected(Vec::new()))
+        } else if let QueueStatus::Disconnected(_) = up_status {
+            error!("{} upstream disconnect, may be slow client", self.prefix);
+            Ok(QueueStatus::Disconnected(Vec::new()))
+        } else {
+            Ok(QueueStatus::Ok(Vec::new()))
         }
+    }
 
+    fn handle_packets(&mut self, shard: &Shard, pkts: Packets) -> Result<QueueMsg> {
         let mut msgs = Vec::with_capacity(pkts.len());
         for pkt in pkts.into_iter() {
             msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
-        self.in_messages(msgs); // msgs is locally generate Message::ClientAck
+        let up_status = self.in_messages(msgs); // locally generated Message::ClientAck
         self.flush_messages(); // flush any locally generate Message::ClientAck
 
-        if let QueueStatus::Disconnected(_) = status.clone() {
-            error!("{} downstream disconnect", self.prefix);
-        }
-
-        Ok(status)
+        Ok(up_status)
     }
 
     // handle incoming packet
@@ -403,7 +422,7 @@ impl Session {
         let (topic_name, topic_alias) = (publ.topic_name(), publ.topic_alias());
         let alias_max = self.config.mqtt_topic_alias_max();
 
-        let _topic_name = match topic_alias {
+        let topic_name = match topic_alias {
             Some(_alias) if alias_max.is_none() => err!(
                 ProtocolError,
                 code: TopicAliasInvalid,
@@ -447,6 +466,9 @@ impl Session {
             None => topic_name.clone(),
         };
 
+        let _packet_id = publ.packet_id.clone();
+
+        // TODO: handle `message_expiry_interval`
         todo!()
     }
 }
@@ -454,24 +476,12 @@ impl Session {
 // Handle incoming messages, incoming messages could be from owning shard's message queue
 // or locally generated (like Message::ClientAck)
 impl Session {
-    pub fn in_messages(&mut self, msgs: Vec<Message>) {
-        for msg in msgs.into_iter() {
-            match &msg {
-                Message::LocalAck { .. } | Message::ClientAck { .. } => (),
-                Message::Packet { client_id, shard_id, seqno, .. } => {
-                    self.timestamp.insert(client_id.clone(), (*shard_id, *seqno));
-                }
-            }
-            self.state.cout.back_log.push_back(msg);
-        }
-    }
-
     pub fn flush_messages(&mut self) -> QueueStatus<Message> {
-        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
-
         if self.state.cout.index.len() > self.client_receive_maximum.into() {
             return QueueStatus::Block(Vec::new());
         }
+
+        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
 
         let msgs: Vec<Message> = self.state.cout.back_log.drain(..).collect();
         let mut iter = msgs.into_iter();
@@ -534,12 +544,41 @@ impl Session {
         }
     }
 
+    pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        // if there is no back-pressure then add this to back-log
+        for msg in msgs.into_iter() {
+            match &msg {
+                Message::LocalAck { .. } | Message::ClientAck { .. } => (),
+                Message::Packet { client_id, shard_id, seqno, .. } => {
+                    self.timestamp.insert(client_id.clone(), (*shard_id, *seqno));
+                }
+            }
+            self.state.cout.back_log.push_back(msg);
+        }
+
+        let m = self.state.cout.back_log.len();
+        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            // TODO: separate back-log pressure from mqtt_pkt_batch_size.
+            error!("{} cout.back_log {} pressure exceeds limit {}", self.prefix, m, n);
+            QueueStatus::Disconnected(Vec::new())
+        } else {
+            QueueStatus::Ok(Vec::new())
+        }
+    }
+
     pub fn retry_publish(&mut self) {
         todo!()
     }
 }
 
 impl Session {
+    pub fn as_mut_cinp(&mut self) -> &mut message::ClientInp {
+        &mut self.cinp
+    }
+
     fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
         let (seqno, packet_id) = (self.state.cout.seqno, self.state.cout.next_packet_id);
         self.state.cout.seqno = self.state.cout.seqno.saturating_add(1);

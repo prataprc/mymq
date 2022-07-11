@@ -267,6 +267,7 @@ pub enum ErrorKind {
     SessionTakenOver,
     // network error
     Disconnected,
+    SlowClient,
     // thread / ipc error
     IPCFail,
     RxClosed,
@@ -292,6 +293,7 @@ impl fmt::Display for ErrorKind {
             SessionTakenOver => write!(f, "SessionTakenOver"),
             // network error
             Disconnected => write!(f, "Disconnected"),
+            SlowClient => write!(f, "SlowClient"),
             // thread / ipc error
             IPCFail => write!(f, "IPCFail"),
             RxClosed => write!(f, "RxClosed"),

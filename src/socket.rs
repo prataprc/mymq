@@ -143,7 +143,7 @@ impl Socket {
     // returned QueueStatus shall not carry any packets
     // MalformedPacket, ProtocolError
     pub fn read_packets(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
-        let msg_batch_size = config.mqtt_msg_batch_size() as usize;
+        let msg_batch_size = config.mqtt_pkt_batch_size() as usize;
 
         // before reading from socket, send remaining packets to shard.
         loop {

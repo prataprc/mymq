@@ -85,9 +85,9 @@ pub struct ClientInp {
     // incoming message. This seqno shall be attached to every Message::Packet.
     pub seqno: u64,
     // This index is a collection of un-acked collection of incoming packets.
-    // All incoming SUBSCRIBE, UNSUBSCRIBE, PUBLISH (QoS-!,2) shall be indexed here
-    // using the packet_id. It will be deleted only when corresponding ACK is recieved
-    // from other local-session.
+    // All incoming PUBLISH (QoS-!,2) shall be indexed here using the packet_id.
+    // It will be deleted only when corresponding ACK is recieved from other
+    // local-session.
     //
     // Periodically purge this index based on `min(timestamp:seqno)`. To effeciently
     // implement this index-purge cycle, we use the `timestamp` collection. When ever
@@ -110,6 +110,16 @@ pub struct ClientInp {
     // limit shall be considered dead session and cluster shall be consulted for
     // cleanup.
     pub timestamp: BTreeMap<ClientID, (u64, time::Instant)>,
+    // Back log of messages that needs to be flushed to other local-shards/sessions.
+    //
+    // SUBSCRIBE and UNSUBSCRIBE shall be synchronously handled, that is, the call
+    // shall block until they are commited to cluster.
+    //
+    // DISCONNECT and AUTH shall also immediately execute, they may not block since
+    // they are not expected to be part of the consensus loop.
+    //
+    // A routed PUBLISH shall first land here.
+    pub shard_back_log: BTreeMap<u32, Vec<Message>>,
 }
 
 // This is per-session data structure.

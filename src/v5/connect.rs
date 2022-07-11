@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::util::{self, advance};
+use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
 use crate::{Blob, ClientID, Config, MqttProtocol, Packetize, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -335,14 +335,26 @@ impl Packetize for ConnectProperties {
                 }
                 MaximumPacketSize(val) => props.max_packet_size = Some(val),
                 TopicAliasMaximum(val) => props.topic_alias_max = Some(val),
-                RequestResponseInformation(val) => {
-                    props.request_response_info =
-                        Some(util::u8_to_bool(val, "request_response_info")?);
+                RequestResponseInformation(0) => {
+                    props.request_response_info = Some(false);
                 }
-                RequestProblemInformation(val) => {
-                    props.request_problem_info =
-                        Some(util::u8_to_bool(val, "request_problem_info")?);
+                RequestResponseInformation(1) => {
+                    props.request_response_info = Some(true);
                 }
+                RequestResponseInformation(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "request-reposne invalid {:?}",
+                    val
+                )?,
+                RequestProblemInformation(0) => props.request_problem_info = Some(false),
+                RequestProblemInformation(1) => props.request_problem_info = Some(true),
+                RequestProblemInformation(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "request-problem-information invalid {:?}",
+                    val
+                )?,
                 UserProp(val) => props.user_properties.push(val),
                 AuthenticationMethod(val) => props.authentication_method = Some(val),
                 AuthenticationData(val) => props.authentication_data = Some(val),
@@ -365,11 +377,11 @@ impl Packetize for ConnectProperties {
         enc_prop!(opt: data, MaximumPacketSize, self.max_packet_size);
         enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_max);
         if let Some(val) = self.request_response_info {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, RequestResponseInformation, val);
         }
         if let Some(val) = self.request_problem_info {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, RequestProblemInformation, val);
         }
         enc_prop!(opt: data, AuthenticationMethod, &self.authentication_method);

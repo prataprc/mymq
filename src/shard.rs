@@ -154,7 +154,7 @@ impl Shard {
         // to another local-session. Note that the queue is shared by all the sessions
         // in this shard, hence the queue-capacity is correspondingly large.
         let (msg_tx, msg_rx) = {
-            let size = self.config.mqtt_msg_batch_size() * self.config.num_shards();
+            let size = self.config.mqtt_pkt_batch_size() * self.config.num_shards();
             message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
         let mut shard = Shard {
@@ -260,6 +260,7 @@ pub enum Request {
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
     FlushConnection { socket: Socket, err: Error },
+    SendMessages { msgs: Vec<Message> },
     Close,
 }
 
@@ -318,6 +319,13 @@ impl Shard {
         }
     }
 
+    pub fn send_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        match &mut self.inner {
+            Inner::MsgTx(_waker, msg_tx) => msg_tx.try_sends(msgs),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn close_wait(mut self) -> Shard {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
@@ -370,10 +378,23 @@ impl Threadable for Shard {
             // This is where we do routing for all packets received from all session
             // owned by this shard.
             self.route_packets();
+            match self.flush_to_shards() {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                QueueStatus::Disconnected(_) => {
+                    warn!("{:?} cascading shutdown via flush_to_shards", self.prefix);
+                    break;
+                }
+            }
 
             // Somebody routed messages to a session owned by this shard, we will handle
             // it here and push them down to the socket.
-            self.in_messages(&msg_rx);
+            match self.in_messages(&msg_rx) {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                QueueStatus::Disconnected(_) => {
+                    warn!("{:?} cascading shutdown via in_messages", self.prefix);
+                    break;
+                }
+            }
             self.flush_messages();
 
             // Retry PUBLISH here.
@@ -455,6 +476,51 @@ impl Shard {
 }
 
 impl Shard {
+    // Flush outgoing messages from this shard to other shards. Messages are booked
+    // in ClientInp::shard_back_log
+    fn flush_to_shards(&mut self) -> QueueStatus<Message> {
+        let mut inner = mem::replace(&mut self.inner, Inner::Init);
+        let RunLoop { sessions, shard_queues, .. } = match &mut inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        let mut iter = sessions.iter_mut();
+        let status = 'outer: loop {
+            match iter.next() {
+                Some((_, session)) => {
+                    let cinp = session.as_mut_cinp();
+                    let mut shard_back_log = BTreeMap::default();
+                    let maps = mem::replace(&mut cinp.shard_back_log, Default::default());
+                    for (shard_id, msgs) in maps.into_iter() {
+                        let shard = shard_queues.get_mut(&shard_id).unwrap();
+                        let mut status = shard.send_messages(msgs);
+                        let msgs = status.take_values();
+                        if msgs.len() > 0 {
+                            shard_back_log.insert(shard_id, msgs);
+                        }
+                        match status {
+                            QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                            status @ QueueStatus::Disconnected(_) => {
+                                error!(
+                                    "{} receiving shard {} has closed",
+                                    self.prefix, shard_id
+                                );
+                                break 'outer status;
+                            }
+                        }
+                    }
+                    let _empty = mem::replace(&mut cinp.shard_back_log, shard_back_log);
+                }
+                None => break QueueStatus::Ok(Vec::new()),
+            }
+            // continue with other sessions.
+        };
+
+        let _init = mem::replace(&mut self.inner, inner);
+        status
+    }
+
     // For each session interface, convert incoming packets to messages and route
     // them to other sessions/bridges.
     fn route_packets(&mut self) {
@@ -464,7 +530,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let mut failed_sessions = Vec::new(); // TODO: with_capacity ?
+        let mut failed_sessions = Vec::new();
         for (client_id, session) in sessions.iter_mut() {
             match session.route_packets(self) {
                 Ok(QueueStatus::Disconnected(_)) => {
@@ -488,9 +554,9 @@ impl Shard {
                 Inner::Main(run_loop) => run_loop,
                 _ => unreachable!(),
             };
-            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
-            {
-                let req = Request::FlushConnection { socket, err };
+
+            if let Some(sock) = allow_panic!(&self, miot.remove_connection(&client_id)) {
+                let req = Request::FlushConnection { socket: sock, err };
                 self.handle_flush_connection(req);
             }
         }
@@ -517,11 +583,34 @@ impl Shard {
             }
         }
 
-        // book the partitioned messages under each session
+        // book the partitioned messages under each session, and gather disconnected
+        // sessions
+        let mut disconnecteds: Vec<ClientID> = vec![];
         for (client_id, msgs) in session_msgs.into_iter() {
             match sessions.get_mut(&client_id) {
-                Some(session) => session.in_messages(msgs),
+                Some(session) => match session.in_messages(msgs) {
+                    QueueStatus::Disconnected(_) => disconnecteds.push(client_id),
+                    _ => (),
+                },
                 None => warn!("{} msg-rx, session {} is gone", self.prefix, *client_id),
+            }
+        }
+
+        mem::drop(sessions);
+
+        // drop slow connections, if any
+        for client_id in disconnecteds.into_iter() {
+            let RunLoop { miot, .. } = match &mut self.inner {
+                Inner::Main(run_loop) => run_loop,
+                _ => unreachable!(),
+            };
+
+            if let Some(sock) = allow_panic!(&self, miot.remove_connection(&client_id)) {
+                let err: Result<()> =
+                    err!(SlowClient, code: UnspecifiedError, "{} slow", self.prefix);
+                let req =
+                    Request::FlushConnection { socket: sock, err: err.unwrap_err() };
+                self.handle_flush_connection(req);
             }
         }
 
@@ -585,13 +674,13 @@ impl Shard {
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
             let (upstream, session_rx) = {
-                let size = self.config.mqtt_msg_batch_size() as usize;
+                let size = self.config.mqtt_pkt_batch_size() as usize;
                 socket::pkt_channel(self.shard_id, size, self.to_waker())
             };
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
             let (miot_tx, downstream) = {
-                let size = self.config.mqtt_msg_batch_size() as usize;
+                let size = self.config.mqtt_pkt_batch_size() as usize;
                 socket::pkt_channel(self.shard_id, size, self.as_miot().to_waker())
             };
             let args = SessionArgs {

@@ -103,19 +103,18 @@ impl Publish {
             err!(MalformedPacket, code: MalformedPacket, "{} DUP is set for QoS-0", PP)?;
         }
 
-        match (self.payload.as_ref(), self.properties.as_ref().map(|p| p.is_utf8())) {
-            (Some(payload), Some(true)) => {
-                if let Err(err) = std::str::from_utf8(&payload) {
-                    err!(
-                        MalformedPacket,
-                        code: MalformedPacket,
-                        cause: err,
-                        "{} payload invalid utf8 ",
-                        PP
-                    )?;
-                }
+        if let (Some(payload), Some(true)) =
+            (self.payload.as_ref(), self.properties.as_ref().map(|p| p.is_payload_utf8()))
+        {
+            if let Err(err) = std::str::from_utf8(&payload) {
+                err!(
+                    MalformedPacket,
+                    code: PayloadFormatInvalid,
+                    cause: err,
+                    "{} payload invalid utf8 ",
+                    PP
+                )?;
             }
-            (_, _) => (),
         }
 
         Ok(())
@@ -220,7 +219,7 @@ impl Packetize for PublishProperties {
 }
 
 impl PublishProperties {
-    fn is_utf8(&self) -> bool {
+    fn is_payload_utf8(&self) -> bool {
         self.payload_format_indicator.is_utf8()
     }
 }

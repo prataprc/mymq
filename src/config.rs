@@ -78,9 +78,9 @@ pub struct Config {
     /// MQTT packets are drainded from queues and connections in batches, so that
     /// all queues will get evenly processed. This parameter defines the batch size
     /// while draining the message queues.
-    /// * **Default**: [Config::DEF_MQTT_MSG_BATCH_SIZE]
+    /// * **Default**: [Config::DEF_MQTT_PKT_BATCH_SIZE]
     /// * **Mutable**: No
-    pub mqtt_msg_batch_size: Option<u32>,
+    pub mqtt_pkt_batch_size: Option<u32>,
 
     /// MQTT Keep Alive, in secs, that server can suggest to the client. If configured
     /// with non-zero value, clients should use this keep-alive instead of the client
@@ -146,7 +146,7 @@ impl Default for Config {
             mqtt_write_timeout: Some(Self::DEF_MQTT_WRITE_TIMEOUT),
             mqtt_flush_timeout: Some(Self::DEF_MQTT_FLUSH_TIMEOUT),
             mqtt_max_packet_size: Some(Self::DEF_MQTT_MAX_PACKET_SIZE),
-            mqtt_msg_batch_size: Some(Self::DEF_MQTT_MSG_BATCH_SIZE),
+            mqtt_pkt_batch_size: Some(Self::DEF_MQTT_PKT_BATCH_SIZE),
             mqtt_keep_alive: None,
             mqtt_keep_alive_factor: Some(Self::DEF_MQTT_KEEP_ALIVE_FACTOR),
             mqtt_receive_maximum: Some(Self::DEF_MQTT_RECEIVE_MAXIMUM),
@@ -173,8 +173,8 @@ impl Config {
     // TODO: This value should match the limit set by the protocol.
     //       Refer 3.1.2.11.4 Maximum Packet Size
     pub const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
-    /// Refer to [Config::mqtt_msg_batch_size]
-    pub const DEF_MQTT_MSG_BATCH_SIZE: u32 = 1024; // default is 1MB.
+    /// Refer to [Config::mqtt_pkt_batch_size]
+    pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::mqtt_keep_alive_factor]
     pub const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]
@@ -229,11 +229,11 @@ impl Config {
         }
     }
 
-    pub fn mqtt_msg_batch_size(&self) -> u32 {
-        match self.mqtt_msg_batch_size {
-            Some(val) if val > 268435456 => panic!("mqtt_msg_batch_size is {}", val),
+    pub fn mqtt_pkt_batch_size(&self) -> u32 {
+        match self.mqtt_pkt_batch_size {
+            Some(val) if val > 268435456 => panic!("mqtt_pkt_batch_size is {}", val),
             Some(val) => val,
-            None => Self::DEF_MQTT_MSG_BATCH_SIZE,
+            None => Self::DEF_MQTT_PKT_BATCH_SIZE,
         }
     }
 

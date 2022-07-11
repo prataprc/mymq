@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::util::{self, advance};
+use crate::util::advance;
 use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -249,10 +249,14 @@ impl Packetize for ConnAckProperties {
                 }
                 ReceiveMaximum(val) => props.receive_maximum = Some(val),
                 MaximumQoS(val) => props.maximum_qos = Some(val),
-                RetainAvailable(val) => {
-                    props.retain_available =
-                        Some(util::u8_to_bool(val, "retain_available")?);
-                }
+                RetainAvailable(0) => props.retain_available = Some(false),
+                RetainAvailable(1) => props.retain_available = Some(true),
+                RetainAvailable(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "retain-available invalid {:?}",
+                    val
+                )?,
                 MaximumPacketSize(0) => {
                     err!(ProtocolError, code: ProtocolError, "{} max_packet_size:0", PP)?;
                 }
@@ -263,20 +267,42 @@ impl Packetize for ConnAckProperties {
                 TopicAliasMaximum(val) => props.topic_alias_max = Some(val),
                 ReasonString(val) => props.reason_string = Some(val),
                 UserProp(val) => props.user_properties.push(val),
-                WildcardSubscriptionAvailable(val) => {
-                    props.wildcard_subscription_available =
-                        Some(util::u8_to_bool(val, "wildcard_subscription_available")?);
+                WildcardSubscriptionAvailable(0) => {
+                    props.wildcard_subscription_available = Some(false);
                 }
-                SubscriptionIdentifierAvailable(val) => {
-                    props.subscription_identifiers_available = Some(util::u8_to_bool(
-                        val,
-                        "subscription_identifiers_available",
-                    )?);
+                WildcardSubscriptionAvailable(1) => {
+                    props.wildcard_subscription_available = Some(true);
                 }
-                SharedSubscriptionAvailable(val) => {
-                    props.shared_subscription_available =
-                        Some(util::u8_to_bool(val, "shared_subscription_available")?);
+                WildcardSubscriptionAvailable(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "wildcard-subscription-available invalid {:?}",
+                    val
+                )?,
+                SubscriptionIdentifierAvailable(0) => {
+                    props.subscription_identifiers_available = Some(false);
                 }
+                SubscriptionIdentifierAvailable(1) => {
+                    props.subscription_identifiers_available = Some(true);
+                }
+                SubscriptionIdentifierAvailable(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "subscription-identifier-available invalid {:?}",
+                    val
+                )?,
+                SharedSubscriptionAvailable(0) => {
+                    props.shared_subscription_available = Some(false);
+                }
+                SharedSubscriptionAvailable(1) => {
+                    props.shared_subscription_available = Some(true);
+                }
+                SharedSubscriptionAvailable(val) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "shared-subscription-available invalid {:?}",
+                    val
+                )?,
                 ServerKeepAlive(val) => props.server_keep_alive = Some(val),
                 ResponseInformation(val) => props.response_information = Some(val),
                 ServerReference(val) => props.server_reference = Some(val),
@@ -303,7 +329,7 @@ impl Packetize for ConnAckProperties {
             None => (),
         }
         if let Some(val) = self.retain_available {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, RetainAvailable, val);
         }
         enc_prop!(opt: data, MaximumPacketSize, self.max_packet_size);
@@ -311,15 +337,15 @@ impl Packetize for ConnAckProperties {
         enc_prop!(opt: data, TopicAliasMaximum, self.topic_alias_max);
         enc_prop!(opt: data, ReasonString, &self.reason_string);
         if let Some(val) = self.wildcard_subscription_available {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, WildcardSubscriptionAvailable, val);
         }
         if let Some(val) = self.subscription_identifiers_available {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, SubscriptionIdentifierAvailable, val);
         }
         if let Some(val) = self.shared_subscription_available {
-            let val = util::bool_to_u8(val);
+            let val: u8 = if val { 1 } else { 0 };
             enc_prop!(data, SharedSubscriptionAvailable, val);
         }
         enc_prop!(opt: data, ServerKeepAlive, self.server_keep_alive);
