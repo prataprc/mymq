@@ -228,33 +228,30 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
-    pub fn route_packets(
-        &mut self,
-        shard: &mut Shard,
-    ) -> Result<QueueStatus<v5::Packet>> {
+    pub fn route_packets(&mut self, shard: &mut Shard) -> Result<QueuePkt> {
         let disconnected = QueueStatus::Disconnected(Vec::new());
 
         let mut down_status = self.session_rx.try_recvs(&self.prefix);
-        let pkts = {
-            let pkts = down_status.take_values();
-            if pkts.len() == 0 {
+        match down_status.take_values() {
+            pkts if pkts.len() == 0 => {
                 self.keep_alive.check_expired()?;
-            } else {
-                self.keep_alive.live()
+                Ok(QueueStatus::Ok(Vec::new()))
             }
-            pkts
-        };
+            pkts => {
+                self.keep_alive.live();
 
-        let status = self.handle_packets(shard, pkts)?;
+                let status = self.handle_packets(shard, pkts)?;
 
-        if let QueueStatus::Disconnected(_) = down_status {
-            error!("{} downstream-rx disconnect", self.prefix);
-            Ok(disconnected)
-        } else if let QueueStatus::Disconnected(_) = status {
-            error!("{} downstream-tx disconnect, or a slow client", self.prefix);
-            Ok(disconnected)
-        } else {
-            Ok(QueueStatus::Ok(Vec::new()))
+                if let QueueStatus::Disconnected(_) = down_status {
+                    error!("{} downstream-rx disconnect", self.prefix);
+                    Ok(disconnected)
+                } else if let QueueStatus::Disconnected(_) = status {
+                    error!("{} downstream-tx disconnect, or a slow client", self.prefix);
+                    Ok(disconnected)
+                } else {
+                    Ok(QueueStatus::Ok(Vec::new()))
+                }
+            }
         }
     }
 
@@ -415,11 +412,13 @@ impl Session {
             }
         }
 
+        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+
         let this_shard_id = shard.shard_id;
         let cinp = shard.as_mut_cinp();
         for (o_client_id, subscrs) in subscrs.into_iter() {
             let subscrs_a: Vec<&v5::Subscription> = if o_client_id == client_id {
-                subscrs.iter().filter(|s| s.no_local).collect()
+                subscrs.iter().filter(|s| !s.no_local).collect()
             } else {
                 subscrs.iter().collect()
             };
@@ -440,7 +439,7 @@ impl Session {
 
             cinp.shard_back_log.get_mut(&o_shard_id).unwrap().push(msg.clone());
 
-            match cmp::min(self.config.mqtt_maximum_qos().try_into().unwrap(), publ.qos) {
+            match cmp::min(server_qos, publ.qos) {
                 v5::QoS::AtMostOnce => (),
                 v5::QoS::AtLeastOnce => {
                     cinp.unacks.insert(seqno, (client_id.clone(), msg));
@@ -524,29 +523,24 @@ impl Session {
     }
 }
 
-// Handle incoming messages, incoming messages could be from owning shard's message queue
-// or locally generated (like Message::ClientAck)
 impl Session {
+    // Handle incoming messages, incoming messages could be from:
+    // * add_session logic, sending CONNACK, part of handshake.
+    // * shard's MsgRx
+    // * locally generated Message::ClientAck from Session::route_packets.
+    // Note that Message::LocalAck shall not reach this far.
     pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         for msg in msgs.into_iter() {
-            let msg = match msg {
-                msg @ Message::ClientAck { .. } => Some(msg),
-                Message::Packet {
-                    client_id, shard_id, subscriptions, packet, ..
-                } => {
-                    let (seqno, packet_id) = self.incr_cout_seqno();
-                    Some(Message::Packet {
-                        client_id,
-                        shard_id,
-                        seqno,
-                        packet_id,
-                        subscriptions,
-                        packet,
-                    })
+            match msg {
+                msg @ Message::ClientAck { .. } => {
+                    self.state.cout.back_log.push_back(msg);
                 }
+                msg @ Message::Packet { .. } => msg
+                    .publish_out(self)
+                    .into_iter()
+                    .for_each(|msg| self.state.cout.back_log.push_back(msg)),
                 Message::LocalAck { .. } => unreachable!(),
             };
-            msg.map(|msg| self.state.cout.back_log.push_back(msg));
         }
 
         let m = self.state.cout.back_log.len();
@@ -600,7 +594,7 @@ impl Session {
 }
 
 impl Session {
-    fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
+    pub fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
         let (seqno, packet_id) = (self.state.cout.seqno, self.state.cout.next_packet_id);
         self.state.cout.seqno = self.state.cout.seqno.saturating_add(1);
         self.state.cout.next_packet_id =
@@ -609,5 +603,9 @@ impl Session {
                 n => n,
             };
         (seqno, packet_id)
+    }
+
+    pub fn as_config(&self) -> &Config {
+        &self.config
     }
 }

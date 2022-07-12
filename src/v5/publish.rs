@@ -98,18 +98,30 @@ impl Packetize for Publish {
 }
 
 impl Publish {
-    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
-        let ids: Vec<VarU32> = ids.into_iter().map(VarU32).collect();
-        match &mut self.properties {
-            Some(props) => {
-                props.subscribtion_identifier = ids;
-            }
-            None => {
-                self.properties = Some(PublishProperties {
-                    subscribtion_identifier: ids,
-                    ..PublishProperties::default()
-                });
-            }
+    pub fn set_fixed_header(&mut self, retain: bool, qos: QoS, dup: bool) -> &mut Self {
+        self.retain = retain;
+        self.qos = qos;
+        self.duplicate = dup;
+        self
+    }
+
+    pub fn set_packet_id(&mut self, packet_id: u16) -> &mut Self {
+        self.packet_id = Some(packet_id);
+        self
+    }
+
+    pub fn add_subscription_id(&mut self, id: Option<u32>) {
+        match id {
+            Some(id) => match &mut self.properties {
+                Some(props) => props.subscribtion_identifier.push(VarU32(id)),
+                None => {
+                    self.properties = Some(PublishProperties {
+                        subscribtion_identifier: vec![VarU32(id)],
+                        ..PublishProperties::default()
+                    });
+                }
+            },
+            None => (),
         }
     }
 

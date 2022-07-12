@@ -3,7 +3,7 @@ use log::{error, warn};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc};
 
-use crate::{v5, ClientID, PacketID, QueueStatus};
+use crate::{v5, ClientID, PacketID, QueueStatus, Session};
 
 #[derive(Clone)]
 pub struct MsgTx {
@@ -198,6 +198,55 @@ impl Message {
             Message::Packet { packet, .. } => packet,
             _ => unreachable!(),
         }
+    }
+
+    pub fn publish_out(self, session: &mut Session) -> Vec<Message> {
+        use std::cmp;
+
+        // TODO: should we carry forward the `message_expiry_interval` on routed
+        //       publish messages.
+        // TODO: if topic_alias is enabled, use that.
+
+        let (client_id, shard_id, subscriptions, publish) = match self {
+            Message::Packet { client_id, shard_id, subscriptions, packet, .. } => {
+                match packet {
+                    v5::Packet::Publish(publish) => {
+                        (client_id, shard_id, subscriptions, publish)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        let server_qos =
+            v5::QoS::try_from(session.as_config().mqtt_maximum_qos()).unwrap();
+
+        let mut msgs: Vec<Message> = Vec::with_capacity(subscriptions.len());
+        for subscr in subscriptions.into_iter() {
+            let mut publish = publish.clone();
+            let retain = subscr.retain_as_published && publish.retain;
+            let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
+
+            let (seqno, packet_id) = session.incr_cout_seqno();
+
+            publish.set_fixed_header(retain, qos, false).set_packet_id(packet_id);
+            publish.add_subscription_id(subscr.subscription_id);
+
+            // TODO: set seqno as UserProp
+
+            let msg = Message::Packet {
+                client_id: client_id.clone(),
+                shard_id,
+                seqno,
+                packet_id,
+                subscriptions: Vec::new(),
+                packet: v5::Packet::Publish(publish),
+            };
+            msgs.push(msg)
+        }
+
+        msgs
     }
 }
 

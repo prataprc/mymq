@@ -524,11 +524,11 @@ impl Shard {
         let mut failed_sessions = Vec::new();
         for (client_id, session) in sessions.iter_mut() {
             match session.route_packets(self) {
+                Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
                     let err: Result<()> = err!(Disconnected, desc: "{}", self.prefix);
                     failed_sessions.push((client_id.clone(), err.unwrap_err()));
                 }
-                Ok(_) => (), // continue with other sessions.
                 Err(err) if err.kind() == ErrorKind::Disconnected => {
                     failed_sessions.push((client_id.clone(), err));
                 }
