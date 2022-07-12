@@ -98,6 +98,21 @@ impl Packetize for Publish {
 }
 
 impl Publish {
+    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
+        let ids: Vec<VarU32> = ids.into_iter().map(VarU32).collect();
+        match &mut self.properties {
+            Some(props) => {
+                props.subscribtion_identifier = ids;
+            }
+            None => {
+                self.properties = Some(PublishProperties {
+                    subscribtion_identifier: ids,
+                    ..PublishProperties::default()
+                });
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.qos == QoS::AtMostOnce && self.duplicate {
             err!(MalformedPacket, code: MalformedPacket, "{} DUP is set for QoS-0", PP)?;

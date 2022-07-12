@@ -167,8 +167,8 @@ impl Shard {
         let cinp = message::ClientInp {
             seqno: 1,
             unacks: BTreeMap::default(),
-            timestamp: BTreeMap::from_iter((0..num_shards).map(|s| (s, (0, 0)))),
-            shard_back_log: BTreeMap::default(),
+            timestamp: BTreeMap::default(),
+            shard_back_log: BTreeMap::from_iter((0..num_shards).map(|s| (s, Vec::new()))),
         };
         let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
@@ -499,7 +499,7 @@ impl Shard {
             let shard = shard_queues.get_mut(&shard_id).unwrap();
 
             let mut status = shard.send_messages(msgs);
-
+            // re-index the remaining messages, may the other shard is busy.
             cinp.shard_back_log.insert(shard_id, status.take_values());
 
             match status {

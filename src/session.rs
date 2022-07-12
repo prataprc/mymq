@@ -404,30 +404,56 @@ impl Session {
         let seqno = shard.incr_cinp_seqno();
 
         let client_id = self.state.client_id.clone();
-        let msg = Message::Packet {
-            client_id: client_id.clone(),
-            shard_id: shard.shard_id,
-            seqno,
-            packet_id: Default::default(),
-            packet: v5::Packet::Publish(publ.clone()),
-        };
 
-        shard.as_mut_cinp().unacks.insert(seqno, (client_id.clone(), msg.clone()));
+        let mut subscrs: BTreeMap<ClientID, Vec<v5::Subscription>> = BTreeMap::default();
         for subscr in shard.as_topic_filters().match_key(&publ.topic_name).into_iter() {
-            //if subscr.no_local && subscr.client_id == client_id {
-            //    continue
-            //}
-            //match subcr.qos {
-            //    v5::QoS::AtMostOnce => todo!()
-            //    v5::QoS::AtLeastOnce => todo!()
-            //    v5::QoS::ExactlyOnce => todo!()
-            //}
-            //Subscription {
-            //    pub shard_id: u32,
-            //    pub client_id: ClientID,
-            //    pub subscription_id: Option<u32>,
-            //}
-            //self.cinp.timestamp.insert(client_id, (seqno, Instant::now()));
+            match subscrs.get_mut(&subscr.client_id) {
+                Some(values) => values.push(subscr),
+                None => {
+                    subscrs.insert(subscr.client_id.clone(), vec![subscr]);
+                }
+            }
+        }
+
+        let this_shard_id = shard.shard_id;
+        let cinp = shard.as_mut_cinp();
+        for (o_client_id, subscrs) in subscrs.into_iter() {
+            let subscrs_a: Vec<&v5::Subscription> = if o_client_id == client_id {
+                subscrs.iter().filter(|s| s.no_local).collect()
+            } else {
+                subscrs.iter().collect()
+            };
+
+            if subscrs_a.len() == 0 {
+                continue;
+            }
+
+            let o_shard_id = subscrs_a[0].shard_id;
+            let msg = Message::Packet {
+                client_id: client_id.clone(),
+                shard_id: this_shard_id,
+                seqno,
+                packet_id: Default::default(),
+                subscriptions: subscrs_a.into_iter().map(Clone::clone).collect(),
+                packet: v5::Packet::Publish(publ.clone()),
+            };
+
+            cinp.shard_back_log.get_mut(&o_shard_id).unwrap().push(msg.clone());
+
+            match cmp::min(self.config.mqtt_maximum_qos().try_into().unwrap(), publ.qos) {
+                v5::QoS::AtMostOnce => (),
+                v5::QoS::AtLeastOnce => {
+                    cinp.unacks.insert(seqno, (client_id.clone(), msg));
+                    match cinp.timestamp.get_mut(&o_shard_id) {
+                        Some((last_routed_seqno, _)) => *last_routed_seqno = seqno,
+                        None => {
+                            cinp.timestamp.insert(o_shard_id, (seqno, 0));
+                        }
+                    }
+                }
+                v5::QoS::ExactlyOnce => todo!(),
+            }
+
             // TODO: handle retain_as_published.
             // TODO: handle retain_forward_rule
         }
@@ -505,13 +531,16 @@ impl Session {
         for msg in msgs.into_iter() {
             let msg = match msg {
                 msg @ Message::ClientAck { .. } => Some(msg),
-                Message::Packet { client_id, shard_id, packet, .. } => {
+                Message::Packet {
+                    client_id, shard_id, subscriptions, packet, ..
+                } => {
                     let (seqno, packet_id) = self.incr_cout_seqno();
                     Some(Message::Packet {
                         client_id,
                         shard_id,
                         seqno,
                         packet_id,
+                        subscriptions,
                         packet,
                     })
                 }
