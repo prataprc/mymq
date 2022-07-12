@@ -713,8 +713,8 @@ impl Packetize for Property {
             MessageExpiryInterval => dec_prop!(MessageExpiryInterval, u32, stream),
             ContentType => dec_prop!(ContentType, String, stream),
             ResponseTopic => {
-                let (val, n) = String::decode(stream)?;
-                (Property::ResponseTopic(val.try_into()?), n)
+                let (val, n) = TopicName::decode(stream)?;
+                (Property::ResponseTopic(val), n)
             }
             CorrelationData => {
                 let (val, n) = Vec::<u8>::decode(stream)?;

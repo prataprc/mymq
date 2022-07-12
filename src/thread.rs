@@ -257,7 +257,7 @@ where
 
 /// Uses non-blocking `try_recv`. For blocking read, use get_requests.
 pub fn pending_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueReq<Q, R> {
-    let mut reqs = Vec::new(); // TODO: with capacity ?
+    let mut reqs = Vec::with_capacity(max);
     loop {
         match rx.try_recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),
@@ -277,7 +277,7 @@ pub fn pending_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueR
 /// Return (requests, disconnected), uses blocking `recv`. For nond-blocking version
 /// use pending_requests.
 pub fn get_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueReq<Q, R> {
-    let mut reqs = Vec::new(); // TODO: with capacity ?
+    let mut reqs = Vec::with_capacity(max);
     loop {
         match rx.recv() {
             Ok(req) if reqs.len() < max => reqs.push(req),

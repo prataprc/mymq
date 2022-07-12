@@ -102,17 +102,9 @@ impl DerefMut for TopicName {
     }
 }
 
-impl TryFrom<String> for TopicName {
-    type Error = Error;
-
-    fn try_from(val: String) -> Result<TopicName> {
-        if val.len() == 0 {
-            err!(ProtocolError, code: TopicNameInvalid, "empty topic-name {:?}", val)
-        } else if val.chars().any(|c| c == '#' || c == '+') {
-            err!(ProtocolError, code: TopicNameInvalid, "has wildcards {:?}", val)
-        } else {
-            Ok(TopicName(val))
-        }
+impl From<String> for TopicName {
+    fn from(val: String) -> TopicName {
+        TopicName(val)
     }
 }
 
@@ -121,15 +113,15 @@ impl Packetize for TopicName {
         let stream: &[u8] = stream.as_ref();
 
         let (val, n) = String::decode(stream)?;
-        let val: TopicName = val.try_into()?;
+        let val = TopicName::from(val);
 
         val.validate()?;
         Ok((val, n))
     }
 
     fn encode(&self) -> Result<Blob> {
-        let val: TopicName = self.0.clone().try_into()?;
-        val.encode()
+        self.validate()?;
+        self.0.encode()
     }
 }
 
@@ -164,15 +156,9 @@ impl DerefMut for TopicFilter {
     }
 }
 
-impl TryFrom<String> for TopicFilter {
-    type Error = Error;
-
-    fn try_from(val: String) -> Result<TopicFilter> {
-        if val.len() == 0 {
-            err!(ProtocolError, code: TopicNameInvalid, "empty topic-filter {:?}", val)
-        } else {
-            Ok(TopicFilter(val))
-        }
+impl From<String> for TopicFilter {
+    fn from(val: String) -> TopicFilter {
+        TopicFilter(val)
     }
 }
 
@@ -181,15 +167,15 @@ impl Packetize for TopicFilter {
         let stream: &[u8] = stream.as_ref();
 
         let (val, n) = String::decode(stream)?;
-        let val: TopicFilter = val.try_into()?;
+        let val = TopicFilter::from(val);
 
         val.validate()?;
         Ok((val, n))
     }
 
     fn encode(&self) -> Result<Blob> {
-        let val: TopicFilter = self.0.clone().try_into()?;
-        val.encode()
+        self.validate()?;
+        self.0.encode()
     }
 }
 

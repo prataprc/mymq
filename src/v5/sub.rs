@@ -113,7 +113,8 @@ impl Packetize for Subscribe {
             m => err!(MalformedPacket, code: MalformedPacket, "{} in payload {}", PP, m)?,
         };
 
-        let mut filters = Vec::new(); // TODO: with_capacity
+        // Assume each entry will take 32 bytes.
+        let mut filters = Vec::with_capacity((payload.len() / 32) + 1);
         let mut t = 0;
         while t < payload.len() {
             let (filter, m) = dec_field!(SubscribeFilter, payload, t);
@@ -177,8 +178,6 @@ impl Subscribe {
                 )?
             }
             QoS::try_from(filter.opt.0 & SubscriptionOpt::MAXIMUM_QOS)?;
-
-            // TODO: validate topic_filter.
         }
 
         Ok(())

@@ -218,8 +218,7 @@ impl Connect {
         }
         QoS::try_from((flags & ConnectFlags::WILL_QOS_MASK) >> 3)?;
         if (flags & *ConnectFlags::WILL_FLAG) > 0 {
-            // TODO: Wonder why the spec. says that properites and payload MUST be
-            // specified
+            // NOTE: Spec says that properites and payload MUST be specified
             if self.payload.will_topic.is_none() {
                 err!(
                     MalformedPacket,

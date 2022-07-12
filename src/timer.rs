@@ -51,7 +51,7 @@ impl<T> Timer<T> {
         let secs = self.instant.elapsed().as_secs() as u32;
         self.instant += time::Duration::from_secs(secs as u64);
 
-        let mut expired = Vec::new(); // TODO: with_capacity ?
+        let mut expired = Vec::new();
 
         loop {
             match self.head.take_next() {

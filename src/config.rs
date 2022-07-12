@@ -170,8 +170,6 @@ impl Config {
     /// Refer to [Config::mqtt_flush_timeout]
     pub const DEF_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
     /// Refer to [Config::mqtt_max_packet_size]
-    // TODO: This value should match the limit set by the protocol.
-    //       Refer 3.1.2.11.4 Maximum Packet Size
     pub const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
     /// Refer to [Config::mqtt_pkt_batch_size]
     pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.

@@ -28,7 +28,8 @@ impl Packetize for UnSubscribe {
             m => err!(ProtocolError, code: ProtocolError, "{} in payload {}", PP, m)?,
         };
 
-        let mut filters = Vec::new(); // TODO: with_capacity ?
+        // Assuming that each entry in payload will take up 32 bytes.
+        let mut filters = Vec::with_capacity((payload.len() / 32) + 1);
         let mut t = 0;
         while t < payload.len() {
             let (filter, m) = dec_field!(TopicFilter, payload, t);

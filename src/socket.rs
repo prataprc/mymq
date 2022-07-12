@@ -62,7 +62,7 @@ pub struct PktRx {
 
 impl PktRx {
     pub fn try_recvs(&self, prefix: &str) -> QueueStatus<v5::Packet> {
-        let mut pkts = Vec::new(); // TODO: with_capacity ?
+        let mut pkts = Vec::with_capacity(self.pkt_batch_size);
         loop {
             match self.rx.try_recv() {
                 Ok(pkt) if pkts.len() < self.pkt_batch_size => pkts.push(pkt),

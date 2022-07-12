@@ -1,7 +1,6 @@
 use std::{borrow::Borrow, sync::Arc};
 
 use crate::{v5, v5::Subscription, IterTopicPath, Spinlock};
-use crate::{Error, ErrorKind, Result};
 
 /// Trie for managing subscriptions.
 pub struct SubscribedTrie {
@@ -240,7 +239,7 @@ enum Node<V> {
     Child {
         name: String,                // can be zero-length, also the sort key for node.
         children: Vec<Arc<Node<V>>>, // sorted list of nodes
-        values: Vec<V>,              // TODO: should be make this Arc<V>
+        values: Vec<V>,              // TODO: should we make this Arc<V>
     },
 }
 
@@ -528,7 +527,7 @@ impl<V> Node<V> {
 
         let mut acc = vec![];
         for child in children {
-            match match_level(in_level, child.as_name()).unwrap() {
+            match match_level(in_level, child.as_name()) {
                 (_slevel, true) => {
                     if let Node::Child { values, .. } = child.borrow() {
                         acc.extend(values.to_vec().into_iter());
@@ -550,27 +549,22 @@ impl<V> Node<V> {
 
 // (level_match, multi_level_match)
 // input key must have be already validated !!
-fn match_level(in_lvl: &str, trie_level: &str) -> Result<(bool, bool)> {
+fn match_level(in_lvl: &str, trie_level: &str) -> (bool, bool) {
     match (in_lvl, trie_level) {
-        ("#", _) => Ok((true, true)),
-        (_, "#") => Ok((true, true)),
-        ("+", _) => Ok((true, false)),
-        (_, "+") => Ok((true, false)),
-        (in_lvl, trie_level) if compare_level(in_lvl, trie_level)? => Ok((true, false)),
-        (_, _) => Ok((false, false)),
+        ("#", _) => (true, true),
+        (_, "#") => (true, true),
+        ("+", _) => (true, false),
+        (_, "+") => (true, false),
+        (in_lvl, trie_level) if compare_level(in_lvl, trie_level) => (true, false),
+        (_, _) => (false, false),
     }
 }
 
-fn compare_level(in_level: &str, trie_level: &str) -> Result<bool> {
-    // TODO: If inputs are already validated we may not need wildcard checks
-    if in_level.chars().any(|ch| ch == '#' || ch == '+') {
-        err!(InvalidInput, desc: "wildcards cannot mix with chars inp:{}", in_level)
-    } else if in_level.chars().any(|ch| ch == '#' || ch == '+') {
-        err!(InvalidInput, desc: "wildcards cannot mix with chars trie:{}", trie_level)
-    } else if in_level == trie_level {
-        Ok(true)
+fn compare_level(in_level: &str, trie_level: &str) -> bool {
+    if in_level == trie_level {
+        true
     } else {
-        Ok(false)
+        false
     }
 }
 
