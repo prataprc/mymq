@@ -212,7 +212,9 @@ impl Socket {
         let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
 
         let pkts = self.rd.packets.drain(..).collect();
+
         let mut status = session_tx.try_sends(prefix, pkts);
+
         self.rd.packets = status.take_values().into(); // left over packets
 
         status

@@ -331,10 +331,15 @@ impl Miot {
                         err!(Disconnected, desc: "{} socket-rx", self.prefix);
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
                 }
-                Err(err) => {
+                Err(err) if err.kind() == ErrorKind::ProtocolError => {
                     error!("{} error in read_packets : {}", prefix, err);
                     fail_queues.push((client_id.clone(), err));
                 }
+                Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                    error!("{} error in read_packets : {}", prefix, err);
+                    fail_queues.push((client_id.clone(), err));
+                }
+                Err(err) => unreachable!("{} unexpected err {}", self.prefix, err),
             }
         }
 

@@ -1,4 +1,4 @@
-use log::{debug, error, warn};
+use log::{debug, error};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::{cmp, net};
@@ -10,7 +10,7 @@ use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
 type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;
-type QueuePkt = QueueStatus<Message>;
+type QueuePkt = QueueStatus<v5::Packet>;
 
 // TODO A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is
 //      set to 0.
@@ -97,13 +97,6 @@ pub struct Session {
     miot_tx: PktTx,
     // Inbound channel from Miot thread.
     session_rx: PktRx,
-    // inbound queue from client.
-    cinp: message::ClientInp,
-    // A Periodic Message::LocalAck shall be sent to other sessions. Every incoming
-    // PUBLISH from a local-session will be indexed with its cliend_id, and
-    // Message::Packet::seqno. Only the latest seqno shall be indexed here, and once
-    // the ack is sent back, entry shall be removed from this index.
-    timestamp: BTreeMap<ClientID, (u32, u64)>, // (shard_id, seqno)
 
     // MQTT Will-Delay-Publish
     #[allow(dead_code)]
@@ -143,12 +136,6 @@ struct WillMessage {
 
 impl Session {
     pub fn start(args: SessionArgs, config: Config, pkt: &v5::Connect) -> Session {
-        let cinp = message::ClientInp {
-            seqno: 1,
-            index: BTreeMap::default(),
-            timestamp: BTreeMap::default(),
-            shard_back_log: BTreeMap::default(),
-        };
         let cout = message::ClientOut {
             seqno: 1,
             index: BTreeMap::default(),
@@ -185,8 +172,6 @@ impl Session {
 
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
-            cinp,
-            timestamp: BTreeMap::default(),
 
             keep_alive: KeepAlive::new(args.addr, &pkt, &config),
             topic_aliases: BTreeMap::default(),
@@ -243,7 +228,10 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
-    pub fn route_packets(&mut self, shard: &Shard) -> Result<QueueStatus<v5::Packet>> {
+    pub fn route_packets(
+        &mut self,
+        shard: &mut Shard,
+    ) -> Result<QueueStatus<v5::Packet>> {
         let disconnected = QueueStatus::Disconnected(Vec::new());
 
         let mut down_status = self.session_rx.try_recvs(&self.prefix);
@@ -257,43 +245,45 @@ impl Session {
             pkts
         };
 
-        let up_status = self.handle_packets(shard, pkts)?;
+        let status = self.handle_packets(shard, pkts)?;
 
         if let QueueStatus::Disconnected(_) = down_status {
-            error!("{} downstream disconnect", self.prefix);
+            error!("{} downstream-rx disconnect", self.prefix);
             Ok(disconnected)
-        } else if let QueueStatus::Disconnected(_) = up_status {
-            error!("{} upstream disconnect, may be slow client", self.prefix);
+        } else if let QueueStatus::Disconnected(_) = status {
+            error!("{} downstream-tx disconnect, or a slow client", self.prefix);
             Ok(disconnected)
         } else {
             Ok(QueueStatus::Ok(Vec::new()))
         }
     }
 
-    fn handle_packets(&mut self, shard: &Shard, pkts: Packets) -> Result<QueuePkt> {
-        if let QueueStatus::Disconnected(_) = self.flush_messages() {
+    fn handle_packets(&mut self, shard: &mut Shard, pkts: Packets) -> Result<QueuePkt> {
+        let mut msgs = Vec::with_capacity(pkts.len());
+
+        for pkt in pkts.into_iter() {
+            msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
+        }
+
+        if let QueueStatus::Disconnected(_) = self.in_messages(msgs) {
             Ok(QueueStatus::Disconnected(Vec::new()))
         } else {
-            let mut msgs = Vec::with_capacity(pkts.len());
-            for pkt in pkts.into_iter() {
-                msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
-            }
-            Ok(self.in_messages(msgs))
+            Ok(self.flush_messages())
         }
     }
 
     // handle incoming packet, return Message::LocalAck, if any.
     // Disconnected
     // ProtocolError
-    fn handle_packet(&mut self, shard: &Shard, pkt: v5::Packet) -> Result<Messages> {
+    fn handle_packet(&mut self, shard: &mut Shard, pkt: v5::Packet) -> Result<Messages> {
         // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
         // PUBLISH, PUBLISH-ack lead to message routing.
 
         let msgs = match pkt {
             v5::Packet::PingReq => vec![Message::new_client_ack(v5::Packet::PingReq)],
+            v5::Packet::Publish(publish) => self.do_publish(shard, publish)?,
             v5::Packet::Subscribe(sub) => self.do_subscribe(shard, sub)?,
             v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::Publish(publish) => self.do_publish(shard, publish)?,
             v5::Packet::PubAck(_puback) => todo!(),
             v5::Packet::PubRec(_puback) => todo!(),
             v5::Packet::PubRel(_puback) => todo!(),
@@ -330,66 +320,7 @@ impl Session {
         Ok(msgs)
     }
 
-    // return suback and retained-messages if any.
-    fn do_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
-        let subscription_id: Option<u32> = match &sub.properties {
-            Some(props) => props.subscription_id.clone().map(|x| *x),
-            None => None,
-        };
-
-        let mut return_codes = Vec::with_capacity(sub.filters.len());
-        for filter in sub.filters.iter() {
-            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
-            let subscription = v5::Subscription {
-                shard_id: shard.shard_id,
-                client_id: self.state.client_id.clone(),
-                subscription_id: subscription_id,
-                topic_filter: filter.topic_filter.clone(),
-                qos,
-                no_local,
-                retain_as_published,
-                retain_forward_rule: rfr,
-            };
-
-            shard
-                .as_topic_filters()
-                .subscribe(&filter.topic_filter, subscription.clone());
-            self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
-
-            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
-            let rc = match cmp::max(server_qos, qos) {
-                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
-                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
-                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
-            };
-            return_codes.push(rc)
-        }
-
-        let sub_ack = v5::SubAck {
-            packet_id: sub.packet_id,
-            properties: None,
-            return_codes,
-        };
-
-        // When a new Non‑shared Subscription is made, the last retained message, if any,
-        // on each matching topic name is sent to the Client as directed by the
-        // Retain Handling Subscription Option. These messages are sent with the RETAIN
-        // flag set to 1. Which retained messages are sent is controlled by the Retain
-        // Handling Subscription Option. At the time of the Subscription:
-        //
-        // * If Retain Handling is set to 0 the Server MUST send the retained messages
-        //   matching the Topic Filter of the subscription to the Client [MQTT-3.3.1-9].
-        // * If Retain Handling is set to 1 then if the subscription did not already exist,
-        //   the Server MUST send all retained message matching the Topic Filter of the
-        //   subscription to the Client, and if the subscription did exist the Server
-        //   MUST NOT send the retained messages. [MQTT-3.3.1-10].
-        // * If Retain Handling is set to 2, the Server MUST NOT send the retained
-        //   messages [MQTT-3.3.1-11].
-
-        Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
-    }
-
-    fn do_publish(&mut self, shard: &Shard, publ: v5::Publish) -> Result<Messages> {
+    fn do_publish(&mut self, shard: &mut Shard, publ: v5::Publish) -> Result<Messages> {
         // TODO: If the DUP flag is set to 1, it indicates that this _might_ be
         //       re-delivery of an earlier attempt to send the packet. Does this mean
         //       we will have to use a config-param to blindly ignore DUP publish ?
@@ -470,10 +401,100 @@ impl Session {
             None => topic_name.clone(),
         };
 
+        let seqno = shard.incr_cinp_seqno();
+
+        let client_id = self.state.client_id.clone();
+        let msg = Message::Packet {
+            client_id: client_id.clone(),
+            shard_id: shard.shard_id,
+            seqno,
+            packet_id: Default::default(),
+            packet: v5::Packet::Publish(publ.clone()),
+        };
+
+        shard.as_mut_cinp().unacks.insert(seqno, (client_id.clone(), msg.clone()));
+        for subscr in shard.as_topic_filters().match_key(&publ.topic_name).into_iter() {
+            //if subscr.no_local && subscr.client_id == client_id {
+            //    continue
+            //}
+            //match subcr.qos {
+            //    v5::QoS::AtMostOnce => todo!()
+            //    v5::QoS::AtLeastOnce => todo!()
+            //    v5::QoS::ExactlyOnce => todo!()
+            //}
+            //Subscription {
+            //    pub shard_id: u32,
+            //    pub client_id: ClientID,
+            //    pub subscription_id: Option<u32>,
+            //}
+            //self.cinp.timestamp.insert(client_id, (seqno, Instant::now()));
+            // TODO: handle retain_as_published.
+            // TODO: handle retain_forward_rule
+        }
+
         let _packet_id = publ.packet_id.clone();
 
         // TODO: handle `message_expiry_interval`
         todo!()
+    }
+
+    // return suback and retained-messages if any.
+    fn do_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
+        let subscription_id: Option<u32> = match &sub.properties {
+            Some(props) => props.subscription_id.clone().map(|x| *x),
+            None => None,
+        };
+
+        let mut return_codes = Vec::with_capacity(sub.filters.len());
+        for filter in sub.filters.iter() {
+            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
+            let subscription = v5::Subscription {
+                shard_id: shard.shard_id,
+                client_id: self.state.client_id.clone(),
+                subscription_id: subscription_id,
+                topic_filter: filter.topic_filter.clone(),
+                qos,
+                no_local,
+                retain_as_published,
+                retain_forward_rule: rfr,
+            };
+
+            shard
+                .as_topic_filters()
+                .subscribe(&filter.topic_filter, subscription.clone());
+            self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
+
+            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+            let rc = match cmp::max(server_qos, qos) {
+                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
+                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
+                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
+            };
+            return_codes.push(rc)
+        }
+
+        let sub_ack = v5::SubAck {
+            packet_id: sub.packet_id,
+            properties: None,
+            return_codes,
+        };
+
+        // When a new Non‑shared Subscription is made, the last retained message, if any,
+        // on each matching topic name is sent to the Client as directed by the
+        // Retain Handling Subscription Option. These messages are sent with the RETAIN
+        // flag set to 1. Which retained messages are sent is controlled by the Retain
+        // Handling Subscription Option. At the time of the Subscription:
+        //
+        // * If Retain Handling is set to 0 the Server MUST send the retained messages
+        //   matching the Topic Filter of the subscription to the Client [MQTT-3.3.1-9].
+        // * If Retain Handling is set to 1 then if the subscription did not already exist,
+        //   the Server MUST send all retained message matching the Topic Filter of the
+        //   subscription to the Client, and if the subscription did exist the Server
+        //   MUST NOT send the retained messages. [MQTT-3.3.1-10].
+        // * If Retain Handling is set to 2, the Server MUST NOT send the retained
+        //   messages [MQTT-3.3.1-11].
+
+        Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
     }
 }
 
@@ -483,16 +504,8 @@ impl Session {
     pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         for msg in msgs.into_iter() {
             let msg = match msg {
-                Message::LocalAck { client_id, seqno, instant } => {
-                    match self.cinp.timestamp.insert(client_id, (seqno, instant)) {
-                        Some((old_seqno, _)) => assert!(old_seqno < seqno),
-                        None => (),
-                    }
-                    None
-                }
                 msg @ Message::ClientAck { .. } => Some(msg),
-                Message::Packet { client_id, shard_id, seqno, packet, .. } => {
-                    self.timestamp.insert(client_id.clone(), (shard_id, seqno));
+                Message::Packet { client_id, shard_id, packet, .. } => {
                     let (seqno, packet_id) = self.incr_cout_seqno();
                     Some(Message::Packet {
                         client_id,
@@ -502,16 +515,17 @@ impl Session {
                         packet,
                     })
                 }
+                Message::LocalAck { .. } => unreachable!(),
             };
             msg.map(|msg| self.state.cout.back_log.push_back(msg));
         }
 
         let m = self.state.cout.back_log.len();
-        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let n = (self.config.mqtt_pkt_batch_size() as usize) * 2;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
-            // TODO: separate back-log limit from mqtt_pkt_batch_size.
             error!("{} cout.back_log {} pressure exceeds limit {}", self.prefix, m, n);
             QueueStatus::Disconnected(Vec::new())
         } else {
@@ -531,8 +545,9 @@ impl Session {
             msgs.clone().into_iter().map(|m| m.into_packet()).collect();
 
         let mut status = miot_tx.try_sends(&self.prefix, pkts);
-        let ok_msgs = msgs.split_off(msgs.len() - status.take_values().len());
 
+        let ok_msgs = msgs.split_off(msgs.len() - status.take_values().len());
+        // book `ok_msgs` as inflight messages
         for msg in ok_msgs.into_iter() {
             match &msg {
                 Message::Packet { packet_id, .. } => {
@@ -547,13 +562,7 @@ impl Session {
             self.state.cout.back_log.push_back(msg);
         }
 
-        match status {
-            status @ QueueStatus::Ok(_) | status @ QueueStatus::Block(_) => status,
-            status @ QueueStatus::Disconnected(_) => {
-                warn!("{} downstream miot-receiver is closed", self.prefix);
-                status
-            }
-        }
+        status
     }
 
     pub fn retry_publish(&mut self) {
@@ -562,10 +571,6 @@ impl Session {
 }
 
 impl Session {
-    pub fn as_mut_cinp(&mut self) -> &mut message::ClientInp {
-        &mut self.cinp
-    }
-
     fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
         let (seqno, packet_id) = (self.state.cout.seqno, self.state.cout.next_packet_id);
         self.state.cout.seqno = self.state.cout.seqno.saturating_add(1);

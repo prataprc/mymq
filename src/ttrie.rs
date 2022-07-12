@@ -44,7 +44,7 @@ impl SubscribedTrie {
         self.do_unsubscribe(key, value);
     }
 
-    pub fn match_key<'b, K>(&self, key: &'b K) -> Option<Vec<Subscription>>
+    pub fn match_key<'b, K>(&self, key: &'b K) -> Vec<Subscription>
     where
         K: IterTopicPath<'b>,
     {
@@ -57,18 +57,18 @@ impl SubscribedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let res = match Node::match_topic(root.as_ref(), in_levels) {
+        let matches = match Node::match_topic(root.as_ref(), in_levels) {
             Some(vals) => {
                 stats.hits = stats.hits.saturating_add(1);
-                Some(vals)
+                vals
             }
-            None => None,
+            None => Vec::new(),
         };
 
         let inner = Inner { stats, root: Arc::clone(&root) };
         *self.inner.write() = Arc::new(inner);
 
-        res
+        matches
     }
 }
 
