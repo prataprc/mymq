@@ -119,10 +119,11 @@ pub use unsuback::UnsubAck;
 
 #[derive(Clone)]
 pub struct Subscription {
-    pub shard_id: u32,
-    pub client_id: ClientID,
-    pub subscription_id: Option<u32>,
     pub topic_filter: TopicFilter,
+
+    pub client_id: ClientID, // client's id subscribing to this topic_filter
+    pub shard_id: u32,       // shard's id of hosting this client
+    pub subscription_id: Option<u32>,
     // subscription-options
     pub qos: QoS,
     pub no_local: bool,

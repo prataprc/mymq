@@ -3,7 +3,7 @@ use log::{debug, error, info};
 use std::{mem, sync::mpsc, thread, time};
 
 use crate::thread::{Rx, Thread, Threadable};
-use crate::{AppTx, Config, Shard, SLEEP_10MS};
+use crate::{AppTx, Cluster, Config, Shard, SLEEP_10MS};
 use crate::{Error, ErrorKind, Result};
 
 pub struct Ticker {
@@ -28,6 +28,8 @@ pub struct RunLoop {
     born: time::Instant,
     /// Ticker count
     ticker_count: usize,
+    /// Tx-handle to send messages to cluster.
+    cluster: Box<Cluster>,
     /// Shard-Tx handle to all shards hosted in this node.
     shards: Vec<Shard>,
 
@@ -71,6 +73,12 @@ impl Drop for Ticker {
     }
 }
 
+pub struct SpawnArgs {
+    pub cluster: Box<Cluster>,
+    pub shards: Vec<Shard>,
+    pub app_tx: AppTx,
+}
+
 impl Ticker {
     pub fn from_config(config: Config) -> Result<Ticker> {
         let mut val = Ticker {
@@ -84,7 +92,7 @@ impl Ticker {
         Ok(val)
     }
 
-    pub fn spawn(self, shards: Vec<Shard>, app_tx: AppTx) -> Result<Ticker> {
+    pub fn spawn(self, args: SpawnArgs) -> Result<Ticker> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
             err!(InvalidInput, desc: "ticker can be spawned only in init-state ")?;
         }
@@ -96,8 +104,9 @@ impl Ticker {
             inner: Inner::Main(RunLoop {
                 born: time::Instant::now(),
                 ticker_count: 0,
-                shards,
-                app_tx,
+                cluster: args.cluster,
+                shards: args.shards,
+                app_tx: args.app_tx,
             }),
         };
         ticker.prefix = ticker.prefix();
@@ -157,13 +166,14 @@ impl Threadable for Ticker {
                 }
             }
 
-            let RunLoop { ticker_count, shards, .. } = match &mut self.inner {
+            let RunLoop { cluster, ticker_count, shards, .. } = match &mut self.inner {
                 Inner::Main(run_loop) => run_loop,
                 _ => unreachable!(),
             };
 
             *ticker_count += 1;
 
+            cluster.wake();
             shards.iter().for_each(|shard| shard.wake());
         }
 

@@ -6,7 +6,7 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, mpsc, Arc};
 use std::{collections::BTreeMap, net, path, time};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{rebalance, timer, timer::TimeoutValue, util, v5};
+use crate::{rebalance, ticker, timer, util, v5};
 use crate::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie, Timer};
 use crate::{Flusher, Listener, QueueStatus, Shard, Ticker, TopicName};
 
@@ -36,7 +36,7 @@ enum Inner {
     Init,
     // Help by application.
     Handle(Arc<mio::Waker>, Thread<Cluster, Request, Result<Response>>),
-    // Held by Listener, Handshake and Shard.
+    // Held by Listener, Handshake, Ticker and Shard.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
     // Thread
     Main(RunLoop),
@@ -244,8 +244,14 @@ impl Cluster {
                 listener.spawn(clust_tx, app_tx.clone())?
             };
 
-            let ticker = Ticker::from_config(self.config.clone())?
-                .spawn(ticker_shards, app_tx.clone())?;
+            let ticker = {
+                let args = ticker::SpawnArgs {
+                    cluster: Box::new(cluster.to_tx()),
+                    shards: ticker_shards,
+                    app_tx: app_tx.clone(),
+                };
+                Ticker::from_config(self.config.clone())?.spawn(args)?
+            };
 
             match &cluster.inner {
                 Inner::Handle(_waker, thrd) => {
@@ -305,6 +311,13 @@ pub struct AddConnectionArgs {
 
 // calls to interface with cluster-thread.
 impl Cluster {
+    pub fn wake(&self) {
+        match &self.inner {
+            Inner::Tx(waker, _) => allow_panic!(self, waker.wake()),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
@@ -321,7 +334,7 @@ impl Cluster {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::SetRetainTopic { publish };
-                tx.request(req)??;
+                tx.post(req)?;
             }
             _ => unreachable!(),
         }
@@ -333,7 +346,7 @@ impl Cluster {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::ResetRetainTopic { topic_name };
-                tx.request(req)??;
+                tx.post(req)?;
             }
             _ => unreachable!(),
         }
@@ -382,7 +395,7 @@ impl Threadable for Cluster {
                 _exit => (),
             };
 
-            self.retain_expiries(&mut rt);
+            self.retain_expires(&mut rt);
         }
 
         match &self.inner {
@@ -448,13 +461,11 @@ impl Cluster {
                     let resp = self.handle_set(req);
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
-                (req @ SetRetainTopic { .. }, Some(tx)) => {
-                    let resp = self.handle_set_retain_topic(req, rt);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                (req @ SetRetainTopic { .. }, None) => {
+                    self.handle_set_retain_topic(req, rt);
                 }
-                (req @ ResetRetainTopic { .. }, Some(tx)) => {
-                    let resp = self.handle_reset_retain_topic(req, rt);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                (req @ ResetRetainTopic { .. }, None) => {
+                    self.handle_reset_retain_topic(req, rt);
                 }
                 (req @ AddConnection(_), Some(tx)) => {
                     let resp = self.handle_add_connection(req);
@@ -473,11 +484,23 @@ impl Cluster {
         (status, closed)
     }
 
-    fn retain_expiries(&mut self, rt: &mut Rt) {
+    fn retain_expires(&mut self, rt: &mut Rt) {
+        use crate::timer::TimeoutValue;
+
         rt.retain_timer.gc();
 
+        let RunLoop { retained_messages, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        // gather all retained messages and cleanup the RetainedTrie and
+        // `retain_topics` index.
         for item in rt.retain_timer.expired().collect::<Vec<Arc<Retain>>>() {
             assert!(item.is_deleted() == false);
+
+            retained_messages.remove(&item.topic_name);
+
             match rt.retain_topics.remove(&item.topic_name) {
                 Some(_) => (),
                 None => unreachable!(
@@ -509,7 +532,9 @@ impl Cluster {
         Response::Ok
     }
 
-    fn handle_set_retain_topic(&mut self, req: Request, rt: &mut Rt) -> Response {
+    fn handle_set_retain_topic(&mut self, req: Request, rt: &mut Rt) {
+        use crate::timer::TimeoutValue;
+
         let RunLoop { retained_messages, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -531,7 +556,8 @@ impl Cluster {
 
         // set this retain message as the latest one.
         retained_messages.set(&publish.topic_name, publish.clone());
-        // overwrite this in the topic index.
+
+        // book keeping for message expiry.
         match publish
             .properties
             .as_ref()
@@ -541,30 +567,27 @@ impl Cluster {
             Some(secs) => rt.retain_timer.add_timeout(*secs, retain),
             None => (),
         }
-
-        Response::Ok
     }
 
-    fn handle_reset_retain_topic(&mut self, req: Request, rt: &mut Rt) -> Response {
-        let RunLoop { retained_messages, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
+    fn handle_reset_retain_topic(&mut self, req: Request, rt: &mut Rt) {
+        use crate::timer::TimeoutValue;
 
         let topic_name = match req {
             Request::ResetRetainTopic { topic_name } => topic_name,
             _ => unreachable!(),
         };
 
+        let RunLoop { retained_messages, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
         match rt.retain_topics.remove(&topic_name) {
-            Some(old_retain) => old_retain.delete(),
+            Some(old_retain) => old_retain.delete(), // this will affect retain_timer.
             None => (),
         };
 
-        // set this retain message as the latest one.
         retained_messages.remove(&topic_name);
-
-        Response::Ok
     }
 
     // Errors - IPCFail,

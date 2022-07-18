@@ -1,12 +1,12 @@
 use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, mem, net, sync::Arc};
+use std::{cmp, collections::BTreeMap, mem, net, sync::Arc};
 
 use crate::thread::{Rx, Thread, Threadable, Tx};
 use crate::{message, session, socket, v5};
 use crate::{AppTx, ClientID, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
+use crate::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -48,28 +48,37 @@ pub struct RunLoop {
     /// Mio poller for asynchronous handling, all events are from consensus port and
     /// thread-waker.
     poll: mio::Poll,
-    /// Self waker
+    /// Self waker.
     waker: Arc<mio::Waker>,
-    /// Cluster::Tx handle to communicate back to cluster.
-    /// Shall be dropped after close_wait call, when the thread returns, will point
-    /// to Inner::Init
+    /// Cluster::Tx handle to communicate back to cluster. Shall be dropped after
+    /// close_wait call, when the thread returns, will point to Inner::Init.
     cluster: Box<Cluster>,
     /// Flusher::Tx handle to communicate with flusher.
     flusher: Flusher,
-    /// Inner::Handle to corresponding miot-thread.
-    /// Shall be dropped after close_wait call, when the thread returns, will point
-    /// to Inner::Init
+    /// Inner::Handle to corresponding miot-thread. Shall be dropped after close_wait
+    /// call, when the thread returns, will point to Inner::Init.
     miot: Miot,
 
-    /// Collection of sessions and corresponding clients managed by this shard.
-    /// Shall be dropped after close_wait call, when the thread returns, will be empty.
+    /// Collection of sessions and corresponding clients managed by this shard. Shall be
+    /// dropped after close_wait call, when the thread returns, will be empty.
     sessions: BTreeMap<ClientID, Session>,
-    /// inbound queue from clients.
-    cinp: message::ClientInp,
     /// Every incoming PUBLISH from a local-session will be indexed with its incoming
     /// shard_id, and Message::Packet::seqno. A Periodic Message::LocalAck shall be
     /// sent to other shards.
     ack_timestamp: BTreeMap<u32, u64>, // (shard_id, ClientInp::seqno)
+    /// Back log of messages that needs to be flushed to other local-shards/sessions.
+    ///
+    /// SUBSCRIBE, UNSUBSCRIBE, PINGREQ shall be synchronously handled, that is, the call
+    /// shall block until they are commited to cluster.
+    ///
+    /// DISCONNECT and AUTH shall also immediately execute, they may not block since
+    /// they are not expected to be part of the consensus loop.
+    ///
+    /// A routed PUBLISH shall first land here, along with `unacks`.
+    shard_back_log: BTreeMap<u32, Vec<Message>>,
+
+    /// This can act as consensus stub.
+    state: ShardState,
 
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
@@ -85,6 +94,11 @@ pub struct RunLoop {
 pub struct FinState {
     pub miot: Miot,
     pub sessions: BTreeMap<ClientID, session::SessionStats>,
+}
+
+pub struct ShardState {
+    /// inbound queue from clients.
+    cinp: message::ClientInp,
 }
 
 impl Default for Shard {
@@ -168,7 +182,6 @@ impl Shard {
             seqno: 1,
             unacks: BTreeMap::default(),
             timestamp: BTreeMap::default(),
-            shard_back_log: BTreeMap::from_iter((0..num_shards).map(|s| (s, Vec::new()))),
         };
         let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
@@ -184,8 +197,9 @@ impl Shard {
                 miot: Miot::default(),
 
                 sessions: BTreeMap::default(),
-                cinp,
+                state: ShardState { cinp },
                 ack_timestamp: BTreeMap::default(),
+                shard_back_log: BTreeMap::default(),
 
                 shard_queues: BTreeMap::default(),
                 topic_filters: args.topic_filters,
@@ -391,13 +405,13 @@ impl Threadable for Shard {
                 _exit => (),
             };
 
-            // This is where we do routing for all packets received from all session
+            // This is where we do routing for all packets received from all session/conn
             // owned by this shard.
             self.route_packets();
             self.flush_to_shards();
 
-            // Somebody routed messages to a session owned by this shard, we will handle
-            // it here and push them down to the socket.
+            // Other shards might have routed messages to a session owned by this shard,
+            // we will handle it here and push them down to the socket.
             match self.in_messages(&msg_rx) {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
                 QueueStatus::Disconnected(_) => {
@@ -406,8 +420,9 @@ impl Threadable for Shard {
                 }
             }
             self.flush_messages();
+            self.ack_messages();
 
-            // Retry PUBLISH here.
+            self.clear_unacks();
             self.retry_publish();
 
             // wake up miot every time shard wakes up
@@ -486,36 +501,11 @@ impl Shard {
 }
 
 impl Shard {
-    // Flush outgoing messages from this shard to other shards. Messages were booked
-    // in ClientInp::shard_back_log
-    fn flush_to_shards(&mut self) {
-        let RunLoop { cinp, shard_queues, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
-
-        let log = mem::replace(&mut cinp.shard_back_log, Default::default());
-        for (shard_id, msgs) in log.into_iter() {
-            let shard = shard_queues.get_mut(&shard_id).unwrap();
-
-            let mut status = shard.send_messages(msgs);
-            // re-index the remaining messages, may the other shard is busy.
-            cinp.shard_back_log.insert(shard_id, status.take_values());
-
-            match status {
-                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
-                QueueStatus::Disconnected(_) => {
-                    // TODO: should this be logged at error-level
-                    warn!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
-                }
-            }
-        }
-    }
-
-    // For each session interface, convert incoming packets to messages and route
-    // them to other sessions/bridges.
+    // For each session, convert incoming packets to messages and route them to other
+    // sessions/bridges.
     fn route_packets(&mut self) {
         let mut inner = mem::replace(&mut self.inner, Inner::Init);
+
         let RunLoop { sessions, .. } = match &mut inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -548,19 +538,41 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            if let Some(sock) = allow_panic!(&self, miot.remove_connection(&client_id)) {
-                let req = Request::FlushConnection { socket: sock, err };
+            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
+            {
+                let req = Request::FlushConnection { socket, err };
                 self.handle_flush_connection(req);
             }
         }
     }
 
-    fn in_messages(&mut self, msg_rx: &MsgRx) -> QueueStatus<Message> {
-        let RunLoop { sessions, ack_timestamp, cinp, .. } = match &mut self.inner {
+    // Flush outgoing messages from this shard to other shards. Messages were booked
+    // in ClientInp::shard_back_log
+    fn flush_to_shards(&mut self) {
+        let RunLoop { shard_back_log, shard_queues, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
 
+        let back_log = mem::replace(shard_back_log, BTreeMap::default());
+        for (shard_id, msgs) in back_log.into_iter() {
+            let shard = shard_queues.get_mut(&shard_id).unwrap();
+
+            let mut status = shard.send_messages(msgs);
+            // re-index the remaining messages, may be the other shard is busy.
+            shard_back_log.insert(shard_id, status.take_values());
+
+            match status {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                QueueStatus::Disconnected(_) => {
+                    // TODO: should this be logged at error-level
+                    warn!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
+                }
+            }
+        }
+    }
+
+    fn in_messages(&mut self, msg_rx: &MsgRx) -> QueueStatus<Message> {
         // receive messages targeting all the sessions.
         let mut status = msg_rx.try_recvs();
         let msgs = status.take_values();
@@ -569,16 +581,11 @@ impl Shard {
         let mut session_msgs: BTreeMap<ClientID, Vec<Message>> = BTreeMap::default();
         for mut msg in msgs.into_iter() {
             match &mut msg {
-                Message::LocalAck { shard_id, last_received_seqno } => {
-                    match cinp.timestamp.get_mut(shard_id) {
-                        Some((_, seqno)) => {
-                            *seqno = *last_received_seqno;
-                        }
-                        None => unreachable!(),
-                    }
+                Message::LocalAck { shard_id, last_received_ack } => {
+                    self.book_local_ack(*shard_id, *last_received_ack)
                 }
                 Message::Packet { client_id, shard_id, seqno, .. } => {
-                    ack_timestamp.insert(*shard_id, *seqno);
+                    self.as_mut_ack_timestamps().insert(*shard_id, *seqno);
                     match session_msgs.get_mut(client_id) {
                         Some(msgs) => msgs.push(msg),
                         None => {
@@ -594,7 +601,7 @@ impl Shard {
         // sessions
         let mut disconnecteds: Vec<ClientID> = vec![];
         for (client_id, msgs) in session_msgs.into_iter() {
-            match sessions.get_mut(&client_id) {
+            match self.as_mut_sessions().get_mut(&client_id) {
                 Some(session) => match session.in_messages(msgs) {
                     QueueStatus::Disconnected(_) => disconnecteds.push(client_id),
                     _ => (),
@@ -603,8 +610,6 @@ impl Shard {
             }
         }
 
-        mem::drop(sessions);
-
         // drop slow connections, if any
         for client_id in disconnecteds.into_iter() {
             let RunLoop { miot, .. } = match &mut self.inner {
@@ -612,11 +617,11 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            if let Some(sock) = allow_panic!(&self, miot.remove_connection(&client_id)) {
+            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
+            {
                 let err: Result<()> =
                     err!(SlowClient, code: UnspecifiedError, "{} slow", self.prefix);
-                let req =
-                    Request::FlushConnection { socket: sock, err: err.unwrap_err() };
+                let req = Request::FlushConnection { socket, err: err.unwrap_err() };
                 self.handle_flush_connection(req);
             }
         }
@@ -633,6 +638,34 @@ impl Shard {
 
         for (_, session) in sessions.iter_mut() {
             session.flush_messages();
+        }
+    }
+
+    fn ack_messages(&mut self) {
+        let RunLoop { shard_back_log, ack_timestamp, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        let ack_timestamp = mem::replace(ack_timestamp, BTreeMap::default());
+
+        for (shard_id, last_received_ack) in ack_timestamp.into_iter() {
+            let msg = Message::LocalAck { shard_id, last_received_ack };
+            match shard_back_log.get_mut(&shard_id) {
+                Some(msgs) => msgs.push(msg),
+                None => {
+                    shard_back_log.insert(shard_id, vec![msg]);
+                }
+            }
+        }
+    }
+
+    fn clear_unacks(&mut self) {
+        for msg in self.remove_unacks().into_iter() {
+            match msg {
+                Message::Packet { .. } => todo!(), // send back publish ack.
+                _ => unreachable!(),
+            };
         }
     }
 
@@ -770,19 +803,27 @@ impl Shard {
             Request::FlushConnection { socket, err } => (socket, err),
             _ => unreachable!(),
         };
-        let RunLoop { flusher, sessions, topic_filters, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
 
-        match sessions.remove(&socket.client_id) {
+        let session = {
+            let RunLoop { sessions, .. } = match &mut self.inner {
+                Inner::Main(run_loop) => run_loop,
+                _ => unreachable!(),
+            };
+            sessions.remove(&socket.client_id)
+        };
+        match session {
             Some(mut session) => {
-                session.remove_topic_filters(topic_filters);
+                self.remove_session(&session);
+                session.remove_topic_filters(self.as_mut_topic_filters());
                 session.close();
             }
             None => (),
         }
 
+        let RunLoop { flusher, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
         let args = FlushConnectionArgs { socket, err: Some(err) };
         allow_panic!(&self, flusher.flush_connection(args));
 
@@ -817,6 +858,174 @@ impl Shard {
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
 
         Response::Ok
+    }
+}
+
+// sub-functions that work for handling incoming publish
+impl Shard {
+    pub fn match_subscribers(
+        &self,
+        sess: &Session,
+        topic_name: &TopicName,
+    ) -> BTreeMap<ClientID, Vec<v5::Subscription>> {
+        let mut subscrs: BTreeMap<ClientID, Vec<v5::Subscription>> = BTreeMap::default();
+
+        // group subscriptions based on client-id.
+        for subscr in self.as_topic_filters().match_key(topic_name).into_iter() {
+            match subscrs.get_mut(&subscr.client_id) {
+                Some(values) => values.push(subscr),
+                None => {
+                    subscrs.insert(subscr.client_id.clone(), vec![subscr]);
+                }
+            }
+        }
+
+        // remove no-local subscriptions for receiving session's client_id.
+        match subscrs.get_mut(&sess.as_client_id()) {
+            Some(subscrs) => {
+                let offs = subscrs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| if s.no_local { Some(i) } else { None })
+                    .collect::<Vec<usize>>();
+
+                for off in offs.into_iter().rev() {
+                    subscrs.remove(off);
+                }
+            }
+            None => (),
+        }
+
+        subscrs
+    }
+
+    pub fn route_to_client(
+        &mut self,
+        sess: &Session,
+        subscrs: Vec<v5::Subscription>,
+        publ: v5::Publish,
+    ) {
+        let target_shard_id = subscrs[0].shard_id;
+        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+        let publ_qos = publ.qos;
+        let this_shard_id = self.shard_id;
+
+        let seqno = self.incr_cinp_seqno();
+
+        let msg = Message::Packet {
+            client_id: sess.as_client_id().clone(),
+            shard_id: this_shard_id,
+            seqno,
+            packet_id: Default::default(),
+            subscriptions: subscrs,
+            packet: v5::Packet::Publish(publ),
+        };
+
+        match cmp::min(server_qos, publ_qos) {
+            v5::QoS::AtMostOnce => (),
+            v5::QoS::AtLeastOnce => self.insert_unacks(target_shard_id, seqno, &msg),
+            v5::QoS::ExactlyOnce => todo!(),
+        }
+
+        let RunLoop { shard_back_log, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        match shard_back_log.get_mut(&target_shard_id) {
+            Some(msgs) => msgs.push(msg),
+            None => {
+                shard_back_log.insert(target_shard_id, vec![msg]);
+            }
+        }
+    }
+}
+
+// These functions may be part of consensus
+impl Shard {
+    fn incr_cinp_seqno(&mut self) -> u64 {
+        match &mut self.inner {
+            Inner::Main(RunLoop { state, .. }) => {
+                let seqno = state.cinp.seqno;
+                state.cinp.seqno = state.cinp.seqno.saturating_add(1);
+                seqno
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn book_local_ack(&mut self, shard_id: u32, last_received: u64) {
+        let RunLoop { state, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        match state.cinp.timestamp.get_mut(&shard_id) {
+            Some((_, last_received_ack)) => {
+                *last_received_ack = last_received;
+            }
+            None => unreachable!(),
+        }
+    }
+
+    fn insert_unacks(&mut self, shard_id: u32, seqno: u64, msg: &Message) {
+        let RunLoop { state, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        state.cinp.unacks.insert(seqno, msg.clone());
+        match state.cinp.timestamp.get_mut(&shard_id) {
+            Some((last_routed_seqno, _)) => *last_routed_seqno = seqno,
+            None => {
+                state.cinp.timestamp.insert(shard_id, (seqno, 0));
+            }
+        }
+    }
+
+    fn remove_unacks(&mut self) -> Vec<Message> {
+        let RunLoop { state, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        let mut last_received_ack = u64::MAX;
+        for (_, (_, last_received)) in state.cinp.timestamp.iter() {
+            last_received_ack = cmp::min(last_received_ack, *last_received);
+        }
+
+        let mut msgs = Vec::new();
+        match last_received_ack {
+            u64::MAX => (),
+            last_received_ack => {
+                let acked_seqnos = state
+                    .cinp
+                    .unacks
+                    .iter()
+                    .filter_map(|(seqno, _)| {
+                        if seqno < &last_received_ack {
+                            Some(*seqno)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<u64>>();
+                for seqno in acked_seqnos.into_iter() {
+                    msgs.push(state.cinp.unacks.remove(&seqno).unwrap());
+                }
+            }
+        }
+
+        msgs
+    }
+
+    fn remove_session(&mut self, session: &Session) {
+        let RunLoop { state, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            _ => unreachable!(),
+        };
+
+        state.cinp.remove_session(session.as_client_id())
     }
 }
 
@@ -867,9 +1076,23 @@ impl Shard {
         }
     }
 
-    pub fn as_mut_cinp(&mut self) -> &mut message::ClientInp {
+    pub fn as_mut_sessions(&mut self) -> &mut BTreeMap<ClientID, Session> {
         match &mut self.inner {
-            Inner::Main(RunLoop { cinp, .. }) => cinp,
+            Inner::Main(RunLoop { sessions, .. }) => sessions,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_mut_ack_timestamps(&mut self) -> &mut BTreeMap<u32, u64> {
+        match &mut self.inner {
+            Inner::Main(RunLoop { ack_timestamp, .. }) => ack_timestamp,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn as_mut_topic_filters(&mut self) -> &mut SubscribedTrie {
+        match &mut self.inner {
+            Inner::Main(RunLoop { topic_filters, .. }) => topic_filters,
             _ => unreachable!(),
         }
     }
@@ -877,17 +1100,6 @@ impl Shard {
     pub fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
             Inner::Main(RunLoop { waker, .. }) => Arc::clone(waker),
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn incr_cinp_seqno(&mut self) -> u64 {
-        match &mut self.inner {
-            Inner::Main(RunLoop { cinp, .. }) => {
-                let seqno = cinp.seqno;
-                cinp.seqno = cinp.seqno.saturating_add(1);
-                seqno
-            }
             _ => unreachable!(),
         }
     }

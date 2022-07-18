@@ -321,14 +321,13 @@ impl Miot {
         };
         let shard = shard.to_tx();
 
-        let mut fail_queues = Vec::new(); // TODO: with_capacity ?
+        let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
             let prefix = format!("rconn:{}:{}", socket.addr, **client_id);
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
-                    let err: Result<()> =
-                        err!(Disconnected, desc: "{} socket-rx", self.prefix);
+                    let err: Result<()> = err!(Disconnected, desc: "{} socketrx", prefix);
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
@@ -345,11 +344,8 @@ impl Miot {
 
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
-            match self.handle_remove_connection(req) {
-                Response::Removed(socket) => {
-                    allow_panic!(&self, shard.flush_connection(socket, err));
-                }
-                Response::Ok => (),
+            if let Response::Removed(socket) = self.handle_remove_connection(req) {
+                allow_panic!(&self, shard.flush_connection(socket, err));
             }
         }
     }
@@ -380,11 +376,8 @@ impl Miot {
 
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
-            match self.handle_remove_connection(req) {
-                Response::Removed(socket) => {
-                    allow_panic!(&self, shard.flush_connection(socket, err));
-                }
-                _ => unreachable!(),
+            if let Response::Removed(socket) = self.handle_remove_connection(req) {
+                allow_panic!(&self, shard.flush_connection(socket, err));
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp, fmt, result};
 
 use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
@@ -16,6 +16,13 @@ pub struct Publish {
     pub packet_id: Option<u16>,
     pub properties: Option<PublishProperties>,
     pub payload: Option<Vec<u8>>,
+}
+
+impl fmt::Display for Publish {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let packet_id = self.packet_id.map(|x| x.to_string()).unwrap_or("-".to_string());
+        write!(f, "PUBLISH<{},packet_id:{}>", *self.topic_name, packet_id)
+    }
 }
 
 impl PartialOrd for Publish {
@@ -126,8 +133,21 @@ impl Publish {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.qos == QoS::AtMostOnce && self.duplicate {
-            err!(MalformedPacket, code: MalformedPacket, "{} DUP is set for QoS-0", PP)?;
+        match self.qos {
+            QoS::AtMostOnce if self.duplicate => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "{} DUP is set for QoS-0",
+                PP
+            )?,
+            QoS::AtLeastOnce | QoS::ExactlyOnce if self.packet_id.is_none() => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "{} packet_id missing for QoS > 0 {:?}",
+                PP,
+                self.qos
+            )?,
+            _ => (),
         }
 
         if let (Some(payload), Some(true)) =
@@ -147,13 +167,13 @@ impl Publish {
         Ok(())
     }
 
-    pub fn topic_name(&self) -> TopicName {
-        self.topic_name.clone()
+    pub fn as_topic_name(&self) -> &TopicName {
+        &self.topic_name
     }
 
     pub fn topic_alias(&self) -> Option<u16> {
         match &self.properties {
-            Some(props) => props.topic_alias.clone(),
+            Some(props) => props.topic_alias,
             None => None,
         }
     }

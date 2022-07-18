@@ -117,7 +117,7 @@ pub struct Config {
     pub mqtt_maximum_qos: Option<u8>,
 
     /// MQTT retain available and supported by broker. Disabling this would disable
-    /// retain-messaes on the borker side.
+    /// retain-messages on the borker side.
     /// * **Default**: [Config::DEF_MQTT_RETAIN_AVAILABLE]
     /// * **Mutable**: No
     pub mqtt_retain_available: Option<bool>,
@@ -128,6 +128,12 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_TOPIC_ALIAS_MAX]
     /// * **Mutable**: No
     pub mqtt_topic_alias_max: Option<u16>,
+
+    /// MQTT Ignore duplicate. If the DUP flag is set to 1, it indicates that this
+    /// might be re-delivery of an earlier attempt to send the packet.
+    /// * **Default**: [Config::DEF_MQTT_IGNORE_DUPLICATE]
+    /// * **Mutable**: No
+    pub mqtt_ignore_duplicate: Option<bool>,
 }
 
 impl Default for Config {
@@ -154,6 +160,7 @@ impl Default for Config {
             mqtt_maximum_qos: Some(Self::DEF_MQTT_MAX_QOS),
             mqtt_retain_available: Some(Self::DEF_MQTT_RETAIN_AVAILABLE),
             mqtt_topic_alias_max: Some(Self::DEF_MQTT_TOPIC_ALIAS_MAX),
+            mqtt_ignore_duplicate: Some(Self::DEF_MQTT_IGNORE_DUPLICATE),
         }
     }
 }
@@ -183,6 +190,8 @@ impl Config {
     pub const DEF_MQTT_RETAIN_AVAILABLE: bool = true;
     /// Refer to [Config::mqtt_topic_alias_max]
     pub const DEF_MQTT_TOPIC_ALIAS_MAX: u16 = 65535;
+    /// Refer to [Config::mqtt_ignore_duplicate]
+    pub const DEF_MQTT_IGNORE_DUPLICATE: bool = true;
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>
@@ -271,6 +280,10 @@ impl Config {
             Some(val) => Some(*val),
             None => self.mqtt_topic_alias_max,
         }
+    }
+
+    pub fn mqtt_ignore_duplicate(&self) -> bool {
+        self.mqtt_ignore_duplicate.unwrap_or(Self::DEF_MQTT_IGNORE_DUPLICATE)
     }
 }
 

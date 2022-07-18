@@ -90,31 +90,20 @@ pub struct ClientInp {
     // and `ack_timestamp` index.
     //
     // When an entry is being deleted, ACK shall be sent back to the publishing-client
-    pub unacks: BTreeMap<u64, (ClientID, Message)>,
-    // For N shards in this node, there shall be N-1 entries in this index.
+    pub unacks: BTreeMap<u64, Message>,
+    // For N shards in this node, there can be upto be N-1 entries in this index.
     //
     // Key = shard_id (of other shards)
     // value = (last-routed-seqno, last-received-ack),
     //
     // * When ever a new message is routed to the shard, shard_id's value shall be
-    //   updated, its last-routed-seqno shall be updated to the newly routed message's
-    //   seqno.
+    //   updated, its last-routed-seqno shall be updated to newly routed message's seqno.
     // * When ever ClientOut::LocalAck is received from`ack_timestamp` shards's
     //   last-recieved-ack shall be updated to local-ack-seqno.
     // * `last-routed-seq` shall always be <= `last-received-ack`.
     // * Entries in  `unacks`, whose seqno are < `last-received-ack` can be deleted.
     // * If `last-routed-seq` == `last-recieved-ack`, then there are no outstanding ACKs.
     pub timestamp: BTreeMap<u32, (u64, u64)>,
-    // Back log of messages that needs to be flushed to other local-shards/sessions.
-    //
-    // SUBSCRIBE, UNSUBSCRIBE, PINGREQ shall be synchronously handled, that is, the call
-    // shall block until they are commited to cluster.
-    //
-    // DISCONNECT and AUTH shall also immediately execute, they may not block since
-    // they are not expected to be part of the consensus loop.
-    //
-    // A routed PUBLISH shall first land here.
-    pub shard_back_log: BTreeMap<u32, Vec<Message>>,
 }
 
 // This is per-session data structure.
@@ -152,19 +141,34 @@ pub struct ClientOut {
     pub back_log: VecDeque<Message>,
 }
 
+impl ClientInp {
+    pub fn remove_session(&mut self, client_id: &ClientID) {
+        let mut remove_seqnos = Vec::new();
+        for (seqno, msg) in self.unacks.iter() {
+            if msg.as_client_id() == client_id {
+                remove_seqnos.push(*seqno);
+            }
+        }
+
+        for seqno in remove_seqnos.into_iter() {
+            self.unacks.remove(&seqno);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum Message {
     /// Message that is periodically, say every 30ms, published by a session to other
     /// local sessions.
     LocalAck {
-        shard_id: u32,            // shard sending the acknowledgement
-        last_received_seqno: u64, // from publishing-shard.
+        shard_id: u32,          // shard sending the acknowledgement
+        last_received_ack: u64, // from publishing-shard.
     },
     /// Packets that are received from clients and sent to other local sessions.
     /// Packets that are received from other local session and meant for this client.
     /// Only PUBLISH packets.
     Packet {
-        client_id: ClientID, // sending client
+        client_id: ClientID, // sending client-id
         shard_id: u32,       // sending shard
         seqno: u64,          // sending ClientInp::seqno later becomes ClientOut::seqno
         packet_id: PacketID, // from ClientInp or ClientOut
@@ -182,16 +186,6 @@ impl Message {
         Message::ClientAck { packet }
     }
 
-    pub fn set_seqno(&mut self, new_seqno: u64, new_packet_id: PacketID) {
-        match self {
-            Message::Packet { seqno, packet_id, .. } => {
-                *seqno = new_seqno;
-                *packet_id = new_packet_id;
-            }
-            _ => unreachable!(),
-        }
-    }
-
     pub fn into_packet(self) -> v5::Packet {
         match self {
             Message::ClientAck { packet } => packet,
@@ -200,7 +194,14 @@ impl Message {
         }
     }
 
-    pub fn publish_out(self, session: &mut Session) -> Vec<Message> {
+    pub fn as_client_id(&self) -> &ClientID {
+        match self {
+            Message::Packet { subscriptions, .. } => &subscriptions[0].client_id,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn cout_publish(self, sess: &mut Session) -> Vec<Message> {
         use std::cmp;
 
         // TODO: should we carry forward the `message_expiry_interval` on routed
@@ -219,8 +220,7 @@ impl Message {
             _ => unreachable!(),
         };
 
-        let server_qos =
-            v5::QoS::try_from(session.as_config().mqtt_maximum_qos()).unwrap();
+        let server_qos = v5::QoS::try_from(sess.as_config().mqtt_maximum_qos()).unwrap();
 
         let mut msgs: Vec<Message> = Vec::with_capacity(subscriptions.len());
         for subscr in subscriptions.into_iter() {
@@ -228,7 +228,7 @@ impl Message {
             let retain = subscr.retain_as_published && publish.retain;
             let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
 
-            let (seqno, packet_id) = session.incr_cout_seqno();
+            let (seqno, packet_id) = sess.incr_cout_seqno();
 
             publish.set_fixed_header(retain, qos, false).set_packet_id(packet_id);
             publish.add_subscription_id(subscr.subscription_id);

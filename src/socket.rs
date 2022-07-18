@@ -140,7 +140,7 @@ impl Socket {
 }
 
 impl Socket {
-    // returned QueueStatus shall not carry any packets
+    // returned QueueStatus shall not carry any packets, packets are booked in Socket
     // MalformedPacket, ProtocolError
     pub fn read_packets(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
         let pkt_batch_size = config.mqtt_pkt_batch_size() as usize;

@@ -533,13 +533,11 @@ impl<V> Node<V> {
                         acc.extend(values.to_vec().into_iter());
                     }
                 }
-                (true, _mlevel) => (),
-                (false, false) if acc.len() == 0 => return None,
-                (false, false) => return Some(acc),
-            }
-            match Node::match_topic(child, in_levels.clone()) {
-                Some(values) => acc.extend(values.into_iter()),
-                None => (),
+                (true, _mlevel) => match Node::match_topic(child, in_levels.clone()) {
+                    Some(values) => acc.extend(values.into_iter()),
+                    None => (),
+                },
+                (false, false) => (),
             }
         }
 

@@ -56,6 +56,7 @@ impl ConsistentHash {
                 .filter(|(_, (uu, _))| &uuid == uu)
                 .map(|(i, _)| i)
                 .collect();
+
             offs.reverse();
 
             for i in offs.into_iter() {
