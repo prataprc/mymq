@@ -23,7 +23,7 @@ use crate::{Error, ErrorKind, Result};
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
-/// Cluster is the global configuration state for multi-node MQTT cluster.
+/// Type is the entry point to start/restart an MQTT instance.
 pub struct Cluster {
     /// Refer [Config::name]
     pub name: String,
@@ -44,7 +44,7 @@ enum Inner {
     Close(FinState),
 }
 
-pub struct RunLoop {
+struct RunLoop {
     // Consensus state.
     state: ClusterState,
 
@@ -445,10 +445,10 @@ impl Cluster {
     // Return (queue-status, exit)
     // IPCFail,
     fn drain_control_chan(&mut self, rx: &ThreadRx, rt: &mut Rt) -> (QueueReq, bool) {
-        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
+        use crate::thread::pending_requests;
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
@@ -698,9 +698,11 @@ impl Cluster {
     }
 }
 
-/// Represents a Node in the cluster. `address` is the socket-address in which the
-/// Node is listening for MQTT. Application must provide a valid address, other fields
-/// like `weight` and `uuid` shall be assigned a meaningful default.
+/// Represents a Node in the cluster.
+///
+/// `address` is the socket-address in which the Node is listening for MQTT. Application
+/// must provide a valid address, other fields like `weight` and `uuid` shall be assigned
+/// a meaningful default.
 #[derive(Clone)]
 pub struct Node {
     /// Unique id of the node.

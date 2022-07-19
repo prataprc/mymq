@@ -12,6 +12,11 @@ use crate::{Error, ErrorKind, Result};
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
+/// Type handle sending and receiving of raw MQTT packets.
+///
+/// Handles serialization of of MQTT packets, sending and receiving them to
+/// the correct shard-thread that can handle this client/session. Note that there
+/// will be a [Miot] instance for every [Shard] instance.
 pub struct Miot {
     /// Human readable name for this miot thread.
     pub name: String,
@@ -22,7 +27,7 @@ pub struct Miot {
     inner: Inner,
 }
 
-pub enum Inner {
+enum Inner {
     Init,
     // Help by Shard.
     Handle(Arc<mio::Waker>, Thread<Miot, Request, Result<Response>>),
@@ -32,7 +37,7 @@ pub enum Inner {
     Close(FinState),
 }
 
-pub struct RunLoop {
+struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from remote client and
     /// thread-waker.
     poll: mio::Poll,
@@ -84,6 +89,7 @@ impl Drop for Miot {
 
 impl Miot {
     const WAKE_TOKEN: mio::Token = mio::Token(1);
+    const FIRST_TOKEN: mio::Token = mio::Token(2);
 
     /// Create a miot thread from configuration. Miot shall be in `Init` state, to start
     /// the miot thread call [Miot::spawn].
@@ -101,8 +107,6 @@ impl Miot {
     }
 
     pub fn spawn(self, shard: Shard, app_tx: AppTx) -> Result<Miot> {
-        use crate::FIRST_TOKEN;
-
         if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
             err!(InvalidInput, desc: "miot can be spawned only in init-state ")?;
         }
@@ -120,7 +124,7 @@ impl Miot {
                 poll,
                 shard: Box::new(shard),
 
-                next_token: FIRST_TOKEN,
+                next_token: Self::FIRST_TOKEN,
                 conns: BTreeMap::default(),
 
                 app_tx: app_tx.clone(),
@@ -225,11 +229,9 @@ impl Threadable for Miot {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::POLL_EVENTS_SIZE;
-
         info!("{} spawn ...", self.prefix);
 
-        let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
+        let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
@@ -282,10 +284,10 @@ impl Miot {
 
     // Return (queue-status, exit)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
+        use crate::thread::pending_requests;
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, crate::CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 

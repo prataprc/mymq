@@ -4,6 +4,7 @@ use std::{io, thread, time};
 use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+/// Type implement a state machine to asynchronously read from socket using [mio].
 pub enum MQTTRead {
     None,
     Init {
@@ -218,6 +219,7 @@ impl MQTTRead {
     }
 }
 
+/// Type implement a state machine to asynchronously write to socket using [mio].
 pub enum MQTTWrite {
     None,
     Init {

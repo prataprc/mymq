@@ -9,6 +9,7 @@ use crate::{ErrorKind, Result};
 
 pub type QueuePkt = QueueStatus<v5::Packet>;
 
+/// Type implement the tx-handle for a packet-queue.
 #[derive(Clone)]
 pub struct PktTx {
     miot_id: u32, // packet queue for shard/miot is same for both.
@@ -55,6 +56,7 @@ impl PktTx {
     }
 }
 
+/// Type implement the rx-handle for a packet-queue.
 pub struct PktRx {
     pkt_batch_size: usize,
     rx: mpsc::Receiver<v5::Packet>,
@@ -80,6 +82,7 @@ impl PktRx {
     }
 }
 
+/// Type encapsulates the socket connection and associated data-structures.
 pub struct Socket {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,

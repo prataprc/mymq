@@ -12,6 +12,10 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
+/// Type is the workhorse of MQTT, and shall host one or more sessions.
+///
+/// Handle incoming MQTT packets, route them to other shards, send back acknowledgement,
+/// and publish them to other clients.
 pub struct Shard {
     /// Human readable name for shard.
     pub name: String,
@@ -465,10 +469,10 @@ impl Shard {
 impl Shard {
     // Return (queue-status, disconnected)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
+        use crate::thread::pending_requests;
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 

@@ -1,3 +1,5 @@
+//! Module implement MQTT Version-5 packet serialization.
+
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
 
@@ -10,6 +12,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 // TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
 //       ProtocolError.
 
+/// MQTT packetization, decode a single field.
 #[macro_export]
 macro_rules! dec_field {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
@@ -26,6 +29,7 @@ macro_rules! dec_field {
     }};
 }
 
+/// MQTT packetization, decode a single property.
 macro_rules! dec_prop {
     ($varn:ident, $valtype:ty, $stream:expr) => {{
         let (val, n) = <$valtype>::decode($stream)?;
@@ -33,6 +37,7 @@ macro_rules! dec_prop {
     }};
 }
 
+/// MQTT packetization, decode a list of properties.
 #[macro_export]
 macro_rules! dec_props {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
@@ -79,6 +84,7 @@ macro_rules! dec_props {
     }};
 }
 
+/// MQTT packetization, enocde a single property.
 #[macro_export]
 macro_rules! enc_prop {
     (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
@@ -417,6 +423,7 @@ pub struct FixedHeader {
     pub remaining_len: VarU32,
 }
 
+/// MQTT packetization, to create the 1 byte fixed-header.
 #[macro_export]
 macro_rules! fixed_byte {
     ($pkt_type:expr, $retain:ident, $qos:ident, $dup:ident) => {{

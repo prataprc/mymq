@@ -127,6 +127,10 @@ macro_rules! log_error {
     }};
 }
 
+/// If expression returns error then panic.
+///
+/// Before that, log the error, send "panic" message to application's back channel and
+/// then panic. `self` is the context type in which panic happens.
 #[macro_export]
 macro_rules! allow_panic {
     ($self:expr, $($args:expr),+) => {{
@@ -143,14 +147,21 @@ macro_rules! allow_panic {
     }};
 }
 
-/// Error that is part of [Result] type.
+/// Type Error implement all possible error-values that can be returned by the
+/// [Result] type.
 pub struct Error {
-    pub(crate) kind: ErrorKind,
-    pub(crate) description: String,
-    pub(crate) code: Option<ReasonCode>,
-    pub(crate) cause: Option<Box<dyn std::error::Error + Send>>,
+    /// Kind of error, callers/application should interpret this for granular
+    /// error handling.
+    pub kind: ErrorKind,
+    /// Human readable string.
+    pub description: String,
+    /// MQTT Reason code.
+    pub code: Option<ReasonCode>,
+    /// Chain of errors, that is, if another error lead to this error.
+    pub cause: Option<Box<dyn std::error::Error + Send>>,
+    /// Call stack at the point where the error happened.
     #[cfg(feature = "backtrace")]
-    pub(crate) backtrace: Option<backtrace::Backtrace>,
+    pub backtrace: Option<backtrace::Backtrace>,
 }
 
 impl Default for Error {

@@ -2,7 +2,9 @@ use std::{borrow::Borrow, sync::Arc};
 
 use crate::{v5, v5::Subscription, IterTopicPath, Spinlock};
 
-/// Trie for managing subscriptions.
+/// Type implement a MVCC trie for managing topic-subscriptions.
+///
+/// Indexed with TopicFilter and matched using TopicName.
 pub struct SubscribedTrie {
     inner: Arc<Spinlock<Arc<Inner<Subscription>>>>,
 }
@@ -121,7 +123,9 @@ impl SubscribedTrie {
     }
 }
 
-/// Trie for managing retain messages.
+/// Type implement a MVCC trie for managing retain messages.
+///
+/// Indexed with TopicName and matched using TopicFilter.
 pub struct RetainedTrie {
     inner: Arc<Spinlock<Arc<Inner<v5::Publish>>>>,
 }

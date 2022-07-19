@@ -7,6 +7,7 @@ use crate::util::{self, advance};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{IterTopicPath, Packetize};
 
+/// Enumeration of different MQTT Protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub enum MqttProtocol {
@@ -40,6 +41,10 @@ impl From<MqttProtocol> for u8 {
     }
 }
 
+/// Type is associated with [Packetize] trait and optimizes on the returned byte-blob.
+///
+/// Small variant stores the bytes in stack.
+/// Large variant stores the bytes in heap.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Blob {
     Small { data: [u8; 32], size: usize },
@@ -55,6 +60,7 @@ impl AsRef<[u8]> for Blob {
     }
 }
 
+/// Type client-id implements a unique ID defined by MQTT specification.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct ClientID(pub String);
 
@@ -85,6 +91,7 @@ impl ClientID {
     }
 }
 
+/// Type implement topic-name defined by MQTT specification.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TopicName(String);
 
@@ -139,6 +146,7 @@ impl TopicName {
     }
 }
 
+/// Type implement topic-filter defined by MQTT specification.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TopicFilter(String);
 
@@ -193,9 +201,14 @@ impl TopicFilter {
     }
 }
 
+/// Type implement variable-length unsigned 32-bit integer.
+///
 /// Uses continuation bit at position 7 to continue reading next byte to frame 'u32'.
+///
+/// ```txt
 /// i/p stream: 0b0www_wwww 0b1zzz_zzzz 0b1yyy_yyyy 0b1xxx_xxxx, low-byte to high-byte
-/// o/p u32:    0bwww_wwww_zzz_zzzz_yyy_yyyy_xxx_xxxx
+/// o/p u32   : 0bwww_wwww_zzz_zzzz_yyy_yyyy_xxx_xxxx
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub struct VarU32(pub u32);
@@ -263,6 +276,7 @@ impl VarU32 {
     pub const MAX: VarU32 = VarU32(268_435_455);
 }
 
+/// Type alias for MQTT User-Property.
 pub type UserProperty = (String, String);
 
 impl Packetize for UserProperty {

@@ -3,6 +3,7 @@ use std::{net, time};
 use crate::{v5, Config};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
+/// Type implement keep-alive as per MQTT specification.
 pub struct KeepAlive {
     prefix: String,
     interval: Option<u16>,

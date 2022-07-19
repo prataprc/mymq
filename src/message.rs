@@ -5,6 +5,7 @@ use std::sync::{mpsc, Arc};
 
 use crate::{v5, ClientID, PacketID, QueueStatus, Session};
 
+/// Type implement the tx-handle for a messae-queue.
 #[derive(Clone)]
 pub struct MsgTx {
     shard_id: u32,                 // message queue for shard.
@@ -51,6 +52,7 @@ impl MsgTx {
     }
 }
 
+/// Type implement the rx-handle for a message-queue.
 pub struct MsgRx {
     shard_id: u32, // message queue for shard.
     msg_batch_size: usize,
@@ -77,36 +79,36 @@ impl MsgRx {
     }
 }
 
-// This is per-shard data structure.
+/// Type implement a state machine for book-keeping in-coming MQTT packets.
 pub struct ClientInp {
-    // Monotonically increasing `seqno`, starting from 1, that is bumped up for every
-    // incoming message. This seqno shall be attached to every Message::Packet.
+    /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
+    /// incoming message. This seqno shall be attached to every Message::Packet.
     pub seqno: u64,
-    // This index is a set of un-acked incoming PUBLISH (QoS-1,2) packets. They are
-    // indexed here using the ClientInp::seqno. It will be deleted only when
-    // corresponding ACK is recieved from other local-shards.
-    //
-    // Entries in this index are deleted based on the activities in `timestamp` index
-    // and `ack_timestamp` index.
-    //
-    // When an entry is being deleted, ACK shall be sent back to the publishing-client
+    /// This index is a set of un-acked incoming PUBLISH (QoS-1,2) packets. They are
+    /// indexed here using the ClientInp::seqno. It will be deleted only when
+    /// corresponding ACK is recieved from other local-shards.
+    ///
+    /// Entries in this index are deleted based on the activities in `timestamp` index
+    /// and `ack_timestamp` index.
+    ///
+    /// When an entry is being deleted, ACK shall be sent back to the publishing-client
     pub unacks: BTreeMap<u64, Message>,
-    // For N shards in this node, there can be upto be N-1 entries in this index.
-    //
-    // Key = shard_id (of other shards)
-    // value = (last-routed-seqno, last-received-ack),
-    //
-    // * When ever a new message is routed to the shard, shard_id's value shall be
-    //   updated, its last-routed-seqno shall be updated to newly routed message's seqno.
-    // * When ever ClientOut::LocalAck is received from`ack_timestamp` shards's
-    //   last-recieved-ack shall be updated to local-ack-seqno.
-    // * `last-routed-seq` shall always be <= `last-received-ack`.
-    // * Entries in  `unacks`, whose seqno are < `last-received-ack` can be deleted.
-    // * If `last-routed-seq` == `last-recieved-ack`, then there are no outstanding ACKs.
+    /// For N shards in this node, there can be upto be N-1 entries in this index.
+    ///
+    /// Key = shard_id (of other shards)
+    /// value = (last-routed-seqno, last-received-ack),
+    ///
+    /// * When ever a new message is routed to the shard, shard_id's value shall be
+    ///   updated, its last-routed-seqno shall be updated to newly routed message's seqno.
+    /// * When ever ClientOut::LocalAck is received from`ack_timestamp` shards's
+    ///   last-recieved-ack shall be updated to local-ack-seqno.
+    /// * `last-routed-seq` shall always be <= `last-received-ack`.
+    /// * Entries in  `unacks`, whose seqno are < `last-received-ack` can be deleted.
+    /// * If `last-routed-seq` == `last-recieved-ack`, then there are no outstanding ACKs.
     pub timestamp: BTreeMap<u32, (u64, u64)>,
 }
 
-// This is per-session data structure.
+/// Type implement a state machine for book-keeping out-going MQTT packets.
 pub struct ClientOut {
     // Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     // out going message for this session. This will also be sent in PUBLISH UserProp.
@@ -156,17 +158,15 @@ impl ClientInp {
     }
 }
 
+/// Message is a unit of communication between shards hosted on the same node.
 #[derive(Clone)]
 pub enum Message {
-    /// Message that is periodically, say every 30ms, published by a session to other
-    /// local sessions.
+    /// Message that is periodically published by a session to other local shards.
     LocalAck {
         shard_id: u32,          // shard sending the acknowledgement
         last_received_ack: u64, // from publishing-shard.
     },
-    /// Packets that are received from clients and sent to other local sessions.
-    /// Packets that are received from other local session and meant for this client.
-    /// Only PUBLISH packets.
+    /// PUBLISH Packets received from clients and routed to other local sessions.
     Packet {
         client_id: ClientID, // sending client-id
         shard_id: u32,       // sending shard
@@ -182,10 +182,13 @@ pub enum Message {
 }
 
 impl Message {
+    /// Create a new Message::ClientAck value.
     pub fn new_client_ack(packet: v5::Packet) -> Message {
         Message::ClientAck { packet }
     }
 
+    /// Return the packet within this message. Only applicable in ClientAck and Packet
+    /// variants, shall panic if otherwise.
     pub fn into_packet(self) -> v5::Packet {
         match self {
             Message::ClientAck { packet } => packet,
@@ -194,6 +197,8 @@ impl Message {
         }
     }
 
+    /// Return a reference to sender's client-id within this message. Only applicable to
+    /// Packet variant, shall panic otherwise.
     pub fn as_client_id(&self) -> &ClientID {
         match self {
             Message::Packet { subscriptions, .. } => &subscriptions[0].client_id,
@@ -201,12 +206,20 @@ impl Message {
         }
     }
 
+    /// Convert this message into actual packets that can be send to subscribed clients.
+    ///
+    /// a. If there are multiple subscriptions, generate a publish-message for each
+    ///    subscription. TODO: there is scope for optimization.
+    /// b. Use appropriate seqno/packet-id specific to this session.
+    /// c. Adjust the qos based on server_qos and subscription_qos.
+    /// d. Adjust the retain flag based on subscription's retain-as-published flag.
+    /// e. TODO: Send seqno as UserProperty.
+    /// f. TODO: Use topic-alias, if enabled.
     pub fn cout_publish(self, sess: &mut Session) -> Vec<Message> {
         use std::cmp;
 
         // TODO: should we carry forward the `message_expiry_interval` on routed
         //       publish messages.
-        // TODO: if topic_alias is enabled, use that.
 
         let (client_id, shard_id, subscriptions, publish) = match self {
             Message::Packet { client_id, shard_id, subscriptions, packet, .. } => {
@@ -232,8 +245,6 @@ impl Message {
 
             publish.set_fixed_header(retain, qos, false).set_packet_id(packet_id);
             publish.add_subscription_id(subscr.subscription_id);
-
-            // TODO: set seqno as UserProp
 
             let msg = Message::Packet {
                 client_id: client_id.clone(),

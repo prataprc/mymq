@@ -10,6 +10,9 @@ use crate::{Error, ErrorKind, Result};
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
 
+/// Type binds to MQTT port and listens for incoming connection.
+///
+/// This type is threadable and singleton.
 pub struct Listener {
     /// Human readable name for this mio thread.
     pub name: String,
@@ -20,7 +23,7 @@ pub struct Listener {
     inner: Inner,
 }
 
-pub enum Inner {
+enum Inner {
     Init,
     // Held by Cluster
     Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
@@ -30,7 +33,7 @@ pub enum Inner {
     Close(FinState),
 }
 
-pub struct RunLoop {
+struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from server and
     /// thread-waker.
     poll: mio::Poll,
@@ -237,10 +240,10 @@ impl Listener {
 
     // return (queue-status, exit)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::{thread::pending_requests, CONTROL_CHAN_SIZE};
+        use crate::thread::pending_requests;
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, crate::CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 

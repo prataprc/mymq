@@ -7,6 +7,11 @@ use crate::thread::{Rx, Threadable};
 use crate::{v5, Cluster, Config, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode};
 
+/// Type handles incoming connection.
+///
+/// Complete the handshake by sending the appropriate CONNACK packet. This type is
+/// threadable and spawned for every incoming connection, once the handshake is
+/// completed, connection is handed over to the [Cluster].
 pub struct Handshake {
     pub prefix: String,
     pub conn: Option<mio::net::TcpStream>,

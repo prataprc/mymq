@@ -6,6 +6,10 @@ use crate::thread::{Rx, Thread, Threadable};
 use crate::{AppTx, Cluster, Config, Shard, SLEEP_10MS};
 use crate::{Error, ErrorKind, Result};
 
+/// Type implement a periodic ticker and wake up other threads.
+///
+/// Periodically wake up other threads like like [Cluster] and [Shard]. This type is
+/// threadable and singleton.
 pub struct Ticker {
     pub name: String,
     prefix: String,

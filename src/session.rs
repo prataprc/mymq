@@ -81,6 +81,9 @@ pub struct SessionArgs {
     pub session_rx: PktRx,
 }
 
+/// Type implement the session for every connected client.
+///
+/// Sessions are hosted within the shards and shards are hosted within the nodes.
 pub struct Session {
     /// Client's ClientID that created this session.
     client_id: ClientID,

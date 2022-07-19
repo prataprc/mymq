@@ -13,10 +13,18 @@ use crate::{Error, ErrorKind, QueueStatus, Result};
 
 pub type QueueReq<Q, R> = QueueStatus<(Q, Option<mpsc::Sender<R>>)>;
 
+/// Trait can be used to spawn a type's instance as a thread.
+///
+/// Our threading model follows Erlang's OTP philosopy. There is no way for threads to
+/// communicate with rest of the system by sharing memory. Other threads can communicate
+/// using the channels carrying types `Req` for requests and `Resp` for response.
 pub trait Threadable: Sized {
+    /// Request type that the implementing type can handle.
     type Req;
+    /// Response type that the implementing type shall return.
     type Resp;
 
+    /// Entry point for the thread.
     fn main_loop(self, rx: Rx<Self::Req, Self::Resp>) -> Self;
 }
 
@@ -115,12 +123,15 @@ impl<Q, R> Tx<Q, R> {
     }
 }
 
-/// IPC type, that shall be passed to the thread's main loop.
+/// IPC-Type alias for parametrised [mpsc::Receiver]. Shall be passed to the
+/// thread's main loop.
 ///
 /// Refer to [Thread::spawn] for details.
 pub type Rx<Q, R = ()> = mpsc::Receiver<(Q, Option<mpsc::Sender<R>>)>;
 
-/// Thread type, providing gen-server pattern to do multi-threading. Parametrized over
+/// Thread type, providing gen-server pattern to do multi-threading.
+///
+/// Parametrized over
 /// * **Q**: Request type.
 /// * **R**: Optional, response type.
 ///

@@ -8,6 +8,9 @@ use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
+/// Type monitor closing connection, flushes the packets and finally send DISCONNECT.
+///
+/// This type is threadable and singleton.
 pub struct Flusher {
     pub name: String,
     prefix: String,
@@ -16,7 +19,7 @@ pub struct Flusher {
     inner: Inner,
 }
 
-pub enum Inner {
+enum Inner {
     Init,
     // Held by Cluster
     Handle(Thread<Flusher, Request, Result<Response>>),
@@ -28,7 +31,7 @@ pub enum Inner {
     Close(FinState),
 }
 
-pub struct RunLoop {
+struct RunLoop {
     /// Back channel communicate with application.
     #[allow(dead_code)]
     app_tx: AppTx,
@@ -172,14 +175,14 @@ impl Threadable for Flusher {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::{thread::get_requests, CONTROL_CHAN_SIZE};
+        use crate::thread::get_requests;
         use Request::*;
 
         let flush_timeout = self.config.mqtt_flush_timeout();
         info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
 
         'outer: loop {
-            let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
+            let mut status = get_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
             let reqs = status.take_values();
             debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 

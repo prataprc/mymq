@@ -3,7 +3,6 @@ use serde::Deserialize;
 
 use std::{fs, net, path};
 
-use crate::MQTT_PORT;
 use crate::{Error, ErrorKind, Result};
 
 /// Cluster configuration.
@@ -28,7 +27,7 @@ pub struct Config {
 
     /// Network listening port for each node in this cluster. Once the cluster is
     /// spawned it will listen on all the available interfaces using this port.
-    /// * **Default**: "0.0.0.0:1883", Refer to [MQTT_PORT]
+    /// * **Default**: "0.0.0.0:1883", Refer to [Config::DEF_MQTT_PORT]
     /// * **Mutable**: No
     pub port: Option<u16>,
 
@@ -143,9 +142,9 @@ impl Default for Config {
         let num_cores = ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap());
         Config {
             name: "poc".to_string(),
-            max_nodes: Some(Config::DEF_MAX_NODES),
+            max_nodes: Some(Self::DEF_MAX_NODES),
             num_shards: Some(num_cores),
-            port: Some(MQTT_PORT),
+            port: Some(Self::DEF_MQTT_PORT),
             nodes: Vec::default(),
             connect_timeout: Some(Self::DEF_CONNECT_TIMEOUT),
             mqtt_read_timeout: Some(Self::DEF_MQTT_READ_TIMEOUT),
@@ -166,6 +165,8 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Refer to [Config::port]
+    pub const DEF_MQTT_PORT: u16 = 1883;
     /// Refer to [Config::max_nodes]
     pub const DEF_MAX_NODES: u32 = 1;
     /// Refer to [Config::connect_timeout]

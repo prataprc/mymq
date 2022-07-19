@@ -1,14 +1,11 @@
 //! Module implement differential timer.
-//!
-//! * log(n) complexity for adding new timeouts.
-//! * log(1) complexity for other operations.
 
 use std::{mem, time};
 
-/// Trait needs to be implemented by values that are managed by [Timer].
+/// Trait to be implemented by values that are managed by [Timer].
 pub trait TimeoutValue {
-    /// Call this to mark this value as deleted. Once it is marked as deleted, [
-    /// [Timeout::expired] won't return this value when it expires. On the other hand,
+    /// Call this to mark value as deleted. Once it is marked as deleted,
+    /// [Timer::expired] won't return this value when it expires. On the other hand,
     /// it will be quitely deleted by `GC`.
     fn delete(&self);
 
@@ -16,7 +13,10 @@ pub trait TimeoutValue {
     fn is_deleted(&self) -> bool;
 }
 
-// in seconds.
+/// Differential Timer, to add timers for messages, sessions etc and manage expiry.
+///
+/// * log(n) complexity for adding new timeouts.
+/// * log(1) complexity for other operations.
 pub struct Timer<T> {
     instant: time::Instant,
     head: Box<Titem<T>>,
