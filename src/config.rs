@@ -139,7 +139,10 @@ impl Default for Config {
     fn default() -> Config {
         use crate::util::ceil_power_of_2;
 
-        let num_cores = ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap());
+        let num_cores =
+            u32::try_from(ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap()))
+                .unwrap();
+
         Config {
             name: "poc".to_string(),
             max_nodes: Some(Self::DEF_MAX_NODES),
@@ -209,7 +212,10 @@ impl Config {
     pub fn num_shards(&self) -> u32 {
         use crate::util::ceil_power_of_2;
 
-        let num_cores = ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap());
+        let num_cores =
+            u32::try_from(ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap()))
+                .unwrap();
+
         self.num_shards.unwrap_or(num_cores)
     }
 

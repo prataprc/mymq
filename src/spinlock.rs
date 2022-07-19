@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::{fmt, result};
 
 #[cfg(test)]
-use crate::{Error, Result};
+use crate::Result;
 
 // TODO: Experiment with different atomic::Ordering to improve performance.
 // TODO: experiment with thread::yield_now().
@@ -159,9 +159,9 @@ impl<T> Spinlock<T> {
 
     #[cfg(test)]
     pub fn to_stats(&self) -> Result<Stats> {
-        let rl = err_at!(FailConvert, usize::try_from(self.read_locks.load(SeqCst)))?;
-        let wl = err_at!(FailConvert, usize::try_from(self.write_locks.load(SeqCst)))?;
-        let cn = err_at!(FailConvert, usize::try_from(self.conflicts.load(SeqCst)))?;
+        let rl = usize::try_from(self.read_locks.load(SeqCst))?;
+        let wl = usize::try_from(self.write_locks.load(SeqCst))?;
+        let cn = usize::try_from(self.conflicts.load(SeqCst))?;
         Ok(Stats {
             latchlock: self.latchlock.load(SeqCst),
             read_locks: rl,

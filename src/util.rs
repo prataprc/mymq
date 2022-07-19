@@ -1,12 +1,13 @@
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-pub fn is_invalid_utf8_code_point(ch: char) -> bool {
+// TODO: validate whether this is what the specification means.
+pub fn is_valid_utf8_code_point(ch: char) -> bool {
     let c = ch as u32;
     (c >= 0xD800 && c <= 0xDFFF) || c <= 0x1F || (c >= 0x7F && c <= 0x9F)
 }
 
 pub fn advance(stream: &[u8], n: usize) -> Result<&[u8]> {
-    if n < stream.len() {
+    if n <= stream.len() {
         Ok(&stream[n..])
     } else {
         err!(InsufficientBytes, code: MalformedPacket, "insufficient bytes in packet")
@@ -23,10 +24,14 @@ where
     n != 0 && (n & (n - 1)) == 0
 }
 
-pub fn ceil_power_of_2(n: u32) -> u32 {
-    let mut p = 1_u32;
-    while p < n {
-        p = p << 1;
+#[inline]
+pub fn ceil_power_of_2(n: u32) -> u64 {
+    match (0..32).skip_while(|i| (1 << i) < n).next() {
+        Some(i) => 1 << i,
+        None => 1 << 32,
     }
-    p
 }
+
+#[cfg(test)]
+#[path = "util_test.rs"]
+mod util_test;

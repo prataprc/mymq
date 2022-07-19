@@ -141,7 +141,7 @@ impl Fuzzy for String {
     }
 
     fn valid_value(rng: &mut StdRng, _: &mut Context) -> Self {
-        use crate::util::is_invalid_utf8_code_point;
+        use crate::util::is_valid_utf8_code_point;
 
         loop {
             let s: String = {
@@ -149,7 +149,7 @@ impl Fuzzy for String {
                 let mut uns = Unstructured::new(&bytes);
                 uns.arbitrary().unwrap()
             };
-            match s.chars().any(is_invalid_utf8_code_point) {
+            match s.chars().all(is_valid_utf8_code_point) {
                 false => break s,
                 true => (),
             }
@@ -157,7 +157,7 @@ impl Fuzzy for String {
     }
 
     fn invalid_value(rng: &mut StdRng, _: &mut Context) -> Option<(Self, Error)> {
-        use crate::util::is_invalid_utf8_code_point;
+        use crate::util::is_valid_utf8_code_point;
 
         loop {
             let s: String = {
@@ -165,7 +165,7 @@ impl Fuzzy for String {
                 let mut uns = Unstructured::new(&bytes);
                 uns.arbitrary().unwrap()
             };
-            match s.chars().any(is_invalid_utf8_code_point) {
+            match s.chars().all(is_valid_utf8_code_point) {
                 true => {
                     let e: Result<()> = err!(InvalidInput, desc: "");
                     break Some((s, e.unwrap_err()));

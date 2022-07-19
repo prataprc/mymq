@@ -97,7 +97,7 @@ impl Fuzzy for FixedHeader {
     }
 
     fn validate(&self, ctx: &mut fuzzy::Context) -> Result<()> {
-        let (pkt_type, _, qos, _) = self.unwrap()?;
+        let (pkt_type, _, qos, _) = self.unwrap();
         match pkt_type {
             PacketType::Publish if qos > ctx.maximum_qos => {
                 err!(MalformedPacket, code: MalformedPacket, "")

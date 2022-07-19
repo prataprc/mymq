@@ -382,7 +382,7 @@ impl Packetize for String {
         }
 
         match std::str::from_utf8(&stream[2..2 + len]) {
-            Ok(s) if s.chars().any(util::is_invalid_utf8_code_point) => {
+            Ok(s) if s.chars().all(util::is_valid_utf8_code_point) => {
                 err!(
                     MalformedPacket,
                     code: MalformedPacket,
@@ -397,7 +397,7 @@ impl Packetize for String {
     }
 
     fn encode(&self) -> Result<Blob> {
-        if self.chars().any(util::is_invalid_utf8_code_point) {
+        if self.chars().all(util::is_valid_utf8_code_point) {
             return err!(ProtocolError, desc: "String::encode invalid utf8 string");
         }
 
