@@ -7,6 +7,15 @@ use crate::util::{self, advance};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{IterTopicPath, Packetize};
 
+// TODO: Section.4.7
+//       An Application Message is sent to each Client Subscription whose Topic
+//       Filter matches the Topic Name attached to an Application Message. The topic
+//       resource MAY be either predefined in the Server by an administrator or it MAY
+//       be dynamically created by the Server when it receives the first subscription
+//       or an Application Message with that Topic Name. The Server MAY also use a
+//       security component to authorize particular actions on the topic resource for
+//       a given Client.
+
 /// Enumeration of different MQTT Protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
@@ -142,7 +151,16 @@ impl<'a> IterTopicPath<'a> for TopicName {
 
 impl TopicName {
     fn validate(&self) -> Result<()> {
-        todo!()
+        // All Topic Names and Topic Filters MUST be at least one character long.
+        if self.0.len() == 0 {
+            err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicName")?;
+        }
+
+        if self.0.chars.any(|ch| matches!(ch, '#' | '+' | '\u{0}')) {
+            err!(MalformedPacket, code: MalformedPacket, "")?;
+        }
+
+        Ok(())
     }
 }
 
@@ -197,7 +215,27 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
 
 impl TopicFilter {
     fn validate(&self) -> Result<()> {
-        todo!()
+        // All Topic Names and Topic Filters MUST be at least one character long.
+        if self.0.len() == 0 {
+            err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicFilter")?;
+        } else if self.0.chars.any(|ch| matches!(ch, '\u{0}')) {
+            err!(MalformedPacket, code: MalformedPacket, "")?;
+        }
+
+        let levels = self.iter_topic_path();
+
+        let mut iter = levels.clone().filter(|l| l.len() > 1);
+        if iter.any(|l| l.chars().any(|c| matches!(c, '#' | '+'))) {
+            err!(MalformedPacket, code: MalformedPacket, "wildcard mixed with chars")?;
+        }
+
+        let mut iter = levels.clone().skip_while(|l| l != &"#");
+        iter.next();
+        if let Some(_) = iter.next() {
+            err!(MalformedPacket, code: MalformedPacket, "chars after # wildcard")?;
+        }
+
+        Ok(())
     }
 }
 

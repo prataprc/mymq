@@ -875,7 +875,7 @@ impl Shard {
         let mut subscrs: BTreeMap<ClientID, Vec<v5::Subscription>> = BTreeMap::default();
 
         // group subscriptions based on client-id.
-        for subscr in self.as_topic_filters().match_key(topic_name).into_iter() {
+        for subscr in self.as_topic_filters().match_topic_name(topic_name).into_iter() {
             match subscrs.get_mut(&subscr.client_id) {
                 Some(values) => values.push(subscr),
                 None => {

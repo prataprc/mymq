@@ -45,7 +45,7 @@ impl SubscribedTrie {
         self.do_unsubscribe(key, value);
     }
 
-    pub fn match_key<'b, K>(&self, key: &'b K) -> Vec<Subscription>
+    pub fn match_topic_name<'b, K>(&self, key: &'b K) -> Vec<Subscription>
     where
         K: IterTopicPath<'b>,
     {
@@ -58,7 +58,7 @@ impl SubscribedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let matches = match Node::match_topic(root.as_ref(), in_levels) {
+        let matches = match root.match_topic(in_levels, true /*dollar-match*/) {
             Some(vals) => {
                 stats.hits = stats.hits.saturating_add(1);
                 vals
@@ -161,7 +161,7 @@ impl RetainedTrie {
         self.do_remove(key)
     }
 
-    pub fn match_key<'b, K>(&self, key: &'b K) -> Option<v5::Publish>
+    pub fn match_topic_filter<'b, K>(&self, key: &'b K) -> Option<v5::Publish>
     where
         K: IterTopicPath<'b>,
     {
@@ -174,7 +174,7 @@ impl RetainedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let res = match Node::match_topic(root.as_ref(), in_levels) {
+        let res = match root.match_topic(in_levels, false) {
             Some(mut vals) => {
                 assert!(vals.len() == 1);
                 stats.hits = stats.hits.saturating_add(1);
@@ -508,7 +508,7 @@ impl<V> Node<V> {
         }
     }
 
-    fn match_topic<'a, I>(&self, mut in_levels: I) -> Option<Vec<V>>
+    fn match_topic<'a, I>(&self, mut in_levels: I, dollar: bool) -> Option<Vec<V>>
     where
         I: Iterator<Item = &'a str> + Clone,
         V: Clone,
@@ -524,9 +524,18 @@ impl<V> Node<V> {
 
         let in_level = in_level.unwrap();
 
-        let children = match self {
-            Node::Root { children } => children.iter(),
-            Node::Child { children, .. } => children.iter(),
+        let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
+            Node::Root { children } if dollar => Box::new(
+                // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
+                // with a wildcard character (# or +) with Topic Names beginning with
+                // a $ character. The Server SHOULD prevent Clients from using such
+                // Topic Names to exchange messages with other Clients. Server
+                // implementations MAY use Topic Names that start with a leading
+                // $ character for other purposes.
+                children.iter().filter(|child| !matches!(child.as_name(), "#" | "+")),
+            ),
+            Node::Root { children } => Box::new(children.iter()),
+            Node::Child { children, .. } => Box::new(children.iter()),
         };
 
         let mut acc = vec![];
@@ -537,7 +546,7 @@ impl<V> Node<V> {
                         acc.extend(values.to_vec().into_iter());
                     }
                 }
-                (true, _mlevel) => match Node::match_topic(child, in_levels.clone()) {
+                (true, _mlevel) => match child.match_topic(in_levels.clone(), dollar) {
                     Some(values) => acc.extend(values.into_iter()),
                     None => (),
                 },
