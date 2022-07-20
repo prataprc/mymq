@@ -3,7 +3,8 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 // TODO: validate whether this is what the specification means.
 pub fn is_valid_utf8_code_point(ch: char) -> bool {
     let c = ch as u32;
-    (c >= 0xD800 && c <= 0xDFFF) || c <= 0x1F || (c >= 0x7F && c <= 0x9F)
+    let invalid = (c >= 0xD800 && c <= 0xDFFF) || c <= 0x1F || (c >= 0x7F && c <= 0x9F);
+    !invalid
 }
 
 pub fn advance(stream: &[u8], n: usize) -> Result<&[u8]> {

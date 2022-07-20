@@ -11,6 +11,7 @@
 mod error;
 #[macro_use]
 pub mod v5;
+pub mod util;
 
 // mod chash; TODO
 mod cluster;
@@ -33,10 +34,6 @@ mod ticker;
 mod timer;
 mod ttrie;
 mod types;
-mod util;
-
-#[cfg(any(feature = "fuzzy", test))]
-pub mod fuzzy;
 
 // pub use chash::ConsistentHash; TODO
 pub use cluster::{Cluster, Node};
@@ -153,7 +150,3 @@ pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
     let port = port.unwrap_or(Config::DEF_MQTT_PORT);
     net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }
-
-#[cfg(test)]
-#[path = "lib_test.rs"]
-mod lib_test;

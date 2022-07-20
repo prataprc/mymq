@@ -1,5 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
 
 use std::ops::{Deref, DerefMut};
 
@@ -141,6 +143,45 @@ impl Packetize for TopicName {
     }
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for TopicName {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let level_choice: Vec<String> =
+            vec!["", "$", "$SYS"].into_iter().map(|s| s.to_string()).collect();
+        let string_choice: Vec<String> =
+            vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
+
+        let c = uns.arbitrary::<u8>()?;
+        let levels = match c {
+            00..=09 => vec![uns.choose(&string_choice)?.to_string()],
+            _ => {
+                let mut levels = vec![];
+                for _ in 0..((c % 10) + 1) {
+                    let level = match uns.arbitrary::<u8>()? {
+                        000..=200 => uns.choose(&string_choice)?.to_string(),
+                        201..=255 => uns.choose(&level_choice)?.clone(),
+                    };
+                    levels.push(level);
+                }
+                levels
+            }
+        };
+
+        let mut s = String::from_iter(
+            levels.join("/").chars().filter(|ch| !matches!(ch, '#' | '+' | '\u{0}')),
+        );
+
+        s = loop {
+            if s.len() > 0 {
+                break s;
+            }
+            s = uns.choose(&string_choice)?.to_string();
+        };
+
+        Ok(s.into())
+    }
+}
+
 impl<'a> IterTopicPath<'a> for TopicName {
     type Iter = std::str::Split<'a, char>;
 
@@ -156,7 +197,7 @@ impl TopicName {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicName")?;
         }
 
-        if self.0.chars.any(|ch| matches!(ch, '#' | '+' | '\u{0}')) {
+        if self.0.chars().any(|ch| matches!(ch, '#' | '+' | '\u{0}')) {
             err!(MalformedPacket, code: MalformedPacket, "")?;
         }
 
@@ -213,12 +254,55 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
     }
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for TopicFilter {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let level_choice: Vec<String> =
+            vec!["", "$", "$SYS", "#", "+"].into_iter().map(|s| s.to_string()).collect();
+        let string_choice: Vec<String> =
+            vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
+
+        let c = uns.arbitrary::<u8>()?;
+        let levels = match c {
+            00..=09 => vec![uns.choose(&level_choice)?.to_string()],
+            10..=20 => vec![uns.choose(&string_choice)?.to_string()],
+            _ => {
+                let mut levels = vec![];
+                for _ in 0..((c % 10) + 1) {
+                    let level = match uns.arbitrary::<u8>()? {
+                        000..=200 => uns.choose(&string_choice)?.to_string(),
+                        201..=255 => uns.choose(&level_choice)?.clone(),
+                    };
+                    levels.push(level);
+                }
+                match levels.iter().enumerate().skip_while(|(_, s)| s != &"#").next() {
+                    Some((i, _)) => levels[..i + 1].to_vec(),
+                    None => levels,
+                }
+            }
+        };
+
+        let mut s = String::from_iter(
+            levels.join("/").chars().filter(|ch| !matches!(ch, '\u{0}')),
+        );
+
+        s = loop {
+            if s.len() > 0 {
+                break s;
+            }
+            s = uns.choose(&string_choice)?.to_string();
+        };
+
+        Ok(s.into())
+    }
+}
+
 impl TopicFilter {
     fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicFilter")?;
-        } else if self.0.chars.any(|ch| matches!(ch, '\u{0}')) {
+        } else if self.0.chars().any(|ch| matches!(ch, '\u{0}')) {
             err!(MalformedPacket, code: MalformedPacket, "")?;
         }
 
@@ -416,11 +500,11 @@ impl Packetize for String {
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
         if len + 2 > stream.len() {
-            return err!(InsufficientBytes, code: MalformedPacket, "String::decode");
+            err!(InsufficientBytes, code: MalformedPacket, "String::decode")?;
         }
 
         match std::str::from_utf8(&stream[2..2 + len]) {
-            Ok(s) if s.chars().all(util::is_valid_utf8_code_point) => {
+            Ok(s) if !s.chars().all(util::is_valid_utf8_code_point) => {
                 err!(
                     MalformedPacket,
                     code: MalformedPacket,
@@ -435,8 +519,8 @@ impl Packetize for String {
     }
 
     fn encode(&self) -> Result<Blob> {
-        if self.chars().all(util::is_valid_utf8_code_point) {
-            return err!(ProtocolError, desc: "String::encode invalid utf8 string");
+        if !self.chars().all(util::is_valid_utf8_code_point) {
+            err!(ProtocolError, desc: "String::encode invalid utf8 string")?;
         }
 
         match self.len() {
@@ -466,7 +550,7 @@ impl Packetize for Vec<u8> {
         let (len, _) = u16::decode(stream)?;
         let len = usize::from(len);
         if len + 2 > stream.len() {
-            return err!(InsufficientBytes, code: MalformedPacket, "Vector::decode");
+            err!(InsufficientBytes, code: MalformedPacket, "Vector::decode")?;
         }
         Ok((stream[2..2 + len].to_vec(), 2 + len))
     }

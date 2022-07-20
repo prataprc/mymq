@@ -105,6 +105,7 @@ macro_rules! err {
     }};
 }
 
+#[cfg_attr(any(feature = "fuzzy", test), macro_export)]
 macro_rules! log_error {
     ($e:ident) => {{
         use log::error;

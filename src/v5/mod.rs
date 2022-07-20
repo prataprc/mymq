@@ -941,6 +941,7 @@ fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
 #[path = "mod_test.rs"]
 mod mod_test;
 
-#[cfg(any(feature = "fuzzy", test))]
-#[path = "mod_fuzzy.rs"]
-mod mod_fuzzy;
+//TODO
+//#[cfg(any(feature = "fuzzy", test))]
+//#[path = "mod_fuzzy.rs"]
+//mod mod_fuzzy;
