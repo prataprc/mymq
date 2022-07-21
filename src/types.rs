@@ -191,7 +191,7 @@ impl<'a> IterTopicPath<'a> for TopicName {
 }
 
 impl TopicName {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicName")?;
@@ -298,7 +298,7 @@ impl<'a> Arbitrary<'a> for TopicFilter {
 }
 
 impl TopicFilter {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicFilter")?;
@@ -332,8 +332,15 @@ impl TopicFilter {
 /// o/p u32   : 0bwww_wwww_zzz_zzzz_yyy_yyyy_xxx_xxxx
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 pub struct VarU32(pub u32);
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for VarU32 {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val: u32 = uns.arbitrary()?;
+        Ok(VarU32(val % *VarU32::MAX))
+    }
+}
 
 impl Deref for VarU32 {
     type Target = u32;

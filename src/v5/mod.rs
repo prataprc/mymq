@@ -141,9 +141,10 @@ pub struct Subscription {
 
 impl PartialEq for Subscription {
     fn eq(&self, other: &Self) -> bool {
-        self.client_id == other.client_id
+        self.topic_filter == other.topic_filter
+            && self.client_id == other.client_id
             && self.subscription_id == other.subscription_id
-            && self.topic_filter == other.topic_filter
+            // subscription options
             && self.qos == other.qos
             && self.no_local == other.no_local
             && self.retain_as_published == other.retain_as_published
@@ -371,8 +372,8 @@ impl Packet {
 }
 
 /// Quality of service
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum QoS {
     AtMostOnce = 0,
     AtLeastOnce = 1,
@@ -614,7 +615,7 @@ impl FixedHeader {
         Ok(val)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         use PacketType::*;
         use QoS::{AtLeastOnce, AtMostOnce};
 
@@ -647,6 +648,7 @@ impl FixedHeader {
     }
 }
 
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyType {
     PayloadFormatIndicator = 1,
@@ -724,6 +726,7 @@ impl TryFrom<u32> for PropertyType {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum Property {
     PayloadFormatIndicator(u8),
     MessageExpiryInterval(u32),
@@ -752,6 +755,138 @@ pub enum Property {
     WildcardSubscriptionAvailable(u8),
     SubscriptionIdentifierAvailable(u8),
     SharedSubscriptionAvailable(u8),
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Property {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use PropertyType::*;
+
+        let content_types: Vec<String> =
+            vec!["img/png"].into_iter().map(|s| s.to_string()).collect();
+        let auth_methods: Vec<String> =
+            vec!["userpass"].into_iter().map(|s| s.to_string()).collect();
+        let server_references: Vec<String> =
+            vec!["a.b.com:1883"].into_iter().map(|s| s.to_string()).collect();
+        let keys: Vec<String> =
+            vec!["", "key"].into_iter().map(|s| s.to_string()).collect();
+        let vals: Vec<String> =
+            vec!["", "val"].into_iter().map(|s| s.to_string()).collect();
+
+        let prop = match uns.arbitrary::<PropertyType>()? {
+            PayloadFormatIndicator => {
+                let val: u8 = uns.arbitrary()?;
+                Property::PayloadFormatIndicator(val)
+            }
+            MessageExpiryInterval => {
+                let val: u32 = uns.arbitrary()?;
+                Property::MessageExpiryInterval(val)
+            }
+            ContentType => {
+                let val: String = uns.choose(&content_types)?.to_string();
+                Property::ContentType(val)
+            }
+            ResponseTopic => {
+                let val: TopicName = uns.arbitrary()?;
+                Property::ResponseTopic(val)
+            }
+            CorrelationData => {
+                let val: Vec<u8> = uns.arbitrary()?;
+                Property::CorrelationData(val)
+            }
+            SubscriptionIdentifier => {
+                let val: VarU32 = uns.arbitrary()?;
+                Property::SubscriptionIdentifier(val)
+            }
+            SessionExpiryInterval => {
+                let val: u32 = uns.arbitrary()?;
+                Property::SessionExpiryInterval(val)
+            }
+            AssignedClientIdentifier => {
+                let val: String = ClientID::new_uuid_v4().to_string();
+                Property::AssignedClientIdentifier(val)
+            }
+            ServerKeepAlive => {
+                let val: u16 = uns.arbitrary()?;
+                Property::ServerKeepAlive(val)
+            }
+            AuthenticationMethod => {
+                let val: String = uns.choose(&auth_methods)?.to_string();
+                Property::AuthenticationMethod(val)
+            }
+            AuthenticationData => {
+                let val: Vec<u8> = uns.arbitrary()?;
+                Property::AuthenticationData(val)
+            }
+            RequestProblemInformation => {
+                let val: u8 = uns.arbitrary()?;
+                Property::RequestProblemInformation(val)
+            }
+            WillDelayInterval => {
+                let val: u32 = uns.arbitrary()?;
+                Property::WillDelayInterval(val)
+            }
+            RequestResponseInformation => {
+                let val: u8 = uns.arbitrary()?;
+                Property::RequestResponseInformation(val)
+            }
+            ResponseInformation => {
+                let val: String = uns.choose(&auth_methods)?.to_string();
+                Property::ResponseInformation(val)
+            }
+            ServerReference => {
+                let val: String = uns.choose(&server_references)?.to_string();
+                Property::ServerReference(val)
+            }
+            ReasonString => {
+                let val: String = "failed".to_string();
+                Property::ReasonString(val)
+            }
+            ReceiveMaximum => {
+                let val: u16 = uns.arbitrary()?;
+                Property::ReceiveMaximum(val)
+            }
+            TopicAliasMaximum => {
+                let val: u16 = uns.arbitrary()?;
+                Property::TopicAliasMaximum(val)
+            }
+            TopicAlias => {
+                let val: u16 = uns.arbitrary()?;
+                Property::TopicAlias(val)
+            }
+            MaximumQoS => {
+                let val: QoS = uns.arbitrary()?;
+                Property::MaximumQoS(val)
+            }
+            RetainAvailable => {
+                let val: u8 = uns.arbitrary()?;
+                Property::RetainAvailable(val)
+            }
+            UserProp => {
+                let key: String = uns.choose(&keys)?.to_string();
+                let val: String = uns.choose(&vals)?.to_string();
+                Property::UserProp((key, val))
+            }
+            MaximumPacketSize => {
+                let val: u32 = uns.arbitrary()?;
+                Property::MaximumPacketSize(val)
+            }
+            WildcardSubscriptionAvailable => {
+                let val: u8 = uns.arbitrary()?;
+                Property::WildcardSubscriptionAvailable(val)
+            }
+            SubscriptionIdentifierAvailable => {
+                let val: u8 = uns.arbitrary()?;
+                Property::SubscriptionIdentifierAvailable(val)
+            }
+            SharedSubscriptionAvailable => {
+                let val: u8 = uns.arbitrary()?;
+                Property::SharedSubscriptionAvailable(val)
+            }
+        };
+
+        Ok(prop)
+    }
 }
 
 impl Packetize for Property {
@@ -871,7 +1006,7 @@ impl Packetize for Property {
 }
 
 impl Property {
-    fn to_property_type(&self) -> PropertyType {
+    pub fn to_property_type(&self) -> PropertyType {
         use PropertyType::*;
 
         match self {
