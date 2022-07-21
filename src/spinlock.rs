@@ -44,7 +44,6 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::{fmt, result};
 
-#[cfg(test)]
 use crate::Result;
 
 // TODO: Experiment with different atomic::Ordering to improve performance.
@@ -157,7 +156,6 @@ impl<T> Spinlock<T> {
         }
     }
 
-    #[cfg(test)]
     pub fn to_stats(&self) -> Result<Stats> {
         let rl = usize::try_from(self.read_locks.load(SeqCst))?;
         let wl = usize::try_from(self.write_locks.load(SeqCst))?;
