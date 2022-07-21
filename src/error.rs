@@ -132,7 +132,6 @@ macro_rules! log_error {
 ///
 /// Before that, log the error, send "panic" message to application's back channel and
 /// then panic. `self` is the context type in which panic happens.
-#[macro_export]
 macro_rules! allow_panic {
     ($self:expr, $($args:expr),+) => {{
         use log::error;
@@ -227,6 +226,13 @@ impl From<std::io::Error> for Error {
     fn from(val: std::io::Error) -> Self {
         let err: result::Result<(), Error> = err!(IOError, cause: val, "{}", val);
         err.unwrap_err()
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl From<Error> for arbitrary::Error {
+    fn from(_: Error) -> Self {
+        arbitrary::Error::IncorrectFormat
     }
 }
 

@@ -1,9 +1,11 @@
 //! Module implement MQTT Version-5 packet serialization.
 
 #[cfg(any(feature = "fuzzy", test))]
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::cmp;
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
 
 use crate::util::advance;
 use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, UserProperty, VarU32};
@@ -13,7 +15,6 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 //       ProtocolError.
 
 /// MQTT packetization, decode a single field.
-#[macro_export]
 macro_rules! dec_field {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
         if $($pred)* {
@@ -28,6 +29,7 @@ macro_rules! dec_field {
         (val, $n + m)
     }};
 }
+pub(crate) use dec_field;
 
 /// MQTT packetization, decode a single property.
 macro_rules! dec_prop {
@@ -36,9 +38,9 @@ macro_rules! dec_prop {
         (Property::$varn(val), n)
     }};
 }
+pub(crate) use dec_prop;
 
 /// MQTT packetization, decode a list of properties.
-#[macro_export]
 macro_rules! dec_props {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
         if $($pred)* {
@@ -85,7 +87,6 @@ macro_rules! dec_props {
 }
 
 /// MQTT packetization, enocde a single property.
-#[macro_export]
 macro_rules! enc_prop {
     (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
         if let Some(val) = $($val)* {
@@ -98,6 +99,7 @@ macro_rules! enc_prop {
         $data.extend_from_slice($($val)*.encode()?.as_ref());
     }};
 }
+pub(crate) use enc_prop;
 
 mod auth;
 mod connack;
@@ -424,7 +426,6 @@ pub struct FixedHeader {
 }
 
 /// MQTT packetization, to create the 1 byte fixed-header.
-#[macro_export]
 macro_rules! fixed_byte {
     ($pkt_type:expr, $retain:ident, $qos:ident, $dup:ident) => {{
         let retain: u8 = if $retain { 0b0001 } else { 0b0000 };
@@ -434,6 +435,45 @@ macro_rules! fixed_byte {
 
         pkt_type | retain | qos | dup
     }};
+}
+pub(crate) use fixed_byte;
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for FixedHeader {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let pkt_type: PacketType = uns.arbitrary()?;
+        let rem_len: VarU32 = loop {
+            let rem_len = uns.arbitrary::<VarU32>()?;
+            if rem_len < VarU32::MAX {
+                break rem_len;
+            }
+        };
+
+        let fh = match pkt_type {
+            PacketType::Connect => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::ConnAck => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::Publish => {
+                let retain: bool = uns.arbitrary()?;
+                let qos: QoS = uns.arbitrary()?;
+                let dup: bool = uns.arbitrary()?;
+                FixedHeader::new_publish(retain, qos, dup, rem_len)?
+            }
+            PacketType::PubAck => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::PubRec => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::PubRel => FixedHeader::new_pubrel(rem_len)?,
+            PacketType::PubComp => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::Subscribe => FixedHeader::new_subscribe(rem_len)?,
+            PacketType::SubAck => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::UnSubscribe => FixedHeader::new_unsubscribe(rem_len)?,
+            PacketType::UnsubAck => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::PingReq => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::PingResp => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::Disconnect => FixedHeader::new(pkt_type, rem_len)?,
+            PacketType::Auth => FixedHeader::new(pkt_type, rem_len)?,
+        };
+
+        Ok(fh)
+    }
 }
 
 impl Packetize for FixedHeader {
@@ -470,6 +510,8 @@ impl FixedHeader {
     pub const HDR_DUP: u8 = 0b_0000_1000;
     pub const HDR_PKT_TYPE: u8 = 0b_1111_0000;
 
+    /// Construct fixed-header for CONNECT, CONNACK, PUBACK, PUBREC, PUBCOMP, SUBACK,
+    /// UNSUBACK, PINGREQ, PINGRESP, DISCONNECT, AUTH.
     pub fn new(pkt_type: PacketType, remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
             err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
@@ -478,6 +520,7 @@ impl FixedHeader {
         Ok(FixedHeader { byte1, remaining_len })
     }
 
+    /// Construct fixed-header for PUBLISH
     pub fn new_publish(
         retain: bool,
         qos: QoS,
@@ -496,6 +539,7 @@ impl FixedHeader {
         Ok(val)
     }
 
+    /// Construct fixed-header for PUBREL
     pub fn new_pubrel(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
             err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
@@ -510,6 +554,7 @@ impl FixedHeader {
         Ok(val)
     }
 
+    /// Construct fixed-header for SUBSCRIBE
     pub fn new_subscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
             err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?
@@ -523,6 +568,8 @@ impl FixedHeader {
 
         Ok(val)
     }
+
+    /// Construct fixed-header for UNSUBSCRIBE
     pub fn new_unsubscribe(remaining_len: VarU32) -> Result<FixedHeader> {
         if remaining_len > VarU32::MAX {
             err!(ProtocolError, desc: "FixedHeader remain-len {}", *remaining_len)?;
@@ -936,10 +983,6 @@ fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
 
     Ok(data)
 }
-
-#[cfg(test)]
-#[path = "mod_test.rs"]
-mod mod_test;
 
 //TODO
 //#[cfg(any(feature = "fuzzy", test))]
