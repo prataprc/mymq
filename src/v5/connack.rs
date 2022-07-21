@@ -7,6 +7,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::ConnAck";
 
+/// Flags carried in CONNACK packet.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnackFlags(pub u8);
 
@@ -55,6 +56,7 @@ impl ConnackFlags {
         flags.iter().fold(ConnackFlags(0), |acc, flag| ConnackFlags(acc.0 | flag.0))
     }
 
+    /// Return `session_present` flag.
     pub fn unwrap(&self) -> Result<bool> {
         if (self.0 & 0b_1111_1110) > 0 {
             err!(MalformedPacket, code: MalformedPacket, "{} flags {:?}", PP, self.0)?;
@@ -68,6 +70,7 @@ impl ConnackFlags {
     }
 }
 
+/// Error codes allowed in CONNACK packet.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum ConnackReasonCode {
@@ -129,6 +132,7 @@ impl TryFrom<u8> for ConnackReasonCode {
     }
 }
 
+/// CONNACK packet
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnAck {
     pub flags: ConnackFlags,
@@ -199,6 +203,7 @@ impl ConnAck {
     }
 }
 
+/// Collection of MQTT properties allowed in CONNACK packet
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnAckProperties {
     pub session_expiry_interval: Option<u32>,
@@ -365,30 +370,39 @@ impl Packetize for ConnAckProperties {
 }
 
 impl ConnAckProperties {
-    pub const RECEIVE_MAXIMUM: u16 = 65535;
+    pub const RECEIVE_MAXIMUM: u16 = 65_535_u16;
     pub const MAXIMUM_QOS: QoS = QoS::ExactlyOnce;
-    pub const TOPIC_ALIAS_MAXIMUM: u16 = 0;
+    pub const TOPIC_ALIAS_MAXIMUM: u16 = 0_u16;
 
+    /// Use this method to confirm to MQTT specification's default.
+    /// DEFAULT: [Self::MAXIMUM_QOS]
     pub fn maximum_qos(&self) -> QoS {
         self.maximum_qos.unwrap_or(Self::MAXIMUM_QOS)
     }
 
+    /// Use this method to confirm to MQTT specification's default.
+    /// DEFAULT: [Self::RECEIVE_MAXIMUM]
     pub fn receive_maximum(&self) -> u16 {
         self.receive_maximum.unwrap_or(Self::RECEIVE_MAXIMUM)
     }
 
+    /// Use this method to confirm to MQTT specification's default.
+    /// DEFAULT: [Self::TOPIC_ALIAS_MAXIMUM]
     pub fn topic_alias_max(&self) -> u16 {
         self.topic_alias_max.unwrap_or(Self::TOPIC_ALIAS_MAXIMUM)
     }
 
+    /// DEFAULT: true
     pub fn wildcard_subscription_available(&self) -> bool {
         self.wildcard_subscription_available.unwrap_or(true)
     }
 
+    /// DEFAULT: true
     pub fn subscription_identifiers_available(&self) -> bool {
         self.subscription_identifiers_available.unwrap_or(true)
     }
 
+    /// DEFAULT: true
     pub fn shared_subscription_available(&self) -> bool {
         self.shared_subscription_available.unwrap_or(true)
     }

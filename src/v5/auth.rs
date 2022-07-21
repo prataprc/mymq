@@ -4,6 +4,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Auth";
 
+/// Error codes allowed in AUTH packet.
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum AuthReasonCode {
@@ -25,10 +26,11 @@ impl TryFrom<u8> for AuthReasonCode {
     }
 }
 
+/// AUTH packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct Auth {
-    code: Option<AuthReasonCode>,
-    properties: Option<AuthProperties>,
+    pub code: Option<AuthReasonCode>,
+    pub properties: Option<AuthProperties>,
 }
 
 impl Packetize for Auth {
@@ -75,12 +77,17 @@ impl Auth {
     }
 }
 
+/// Collection of MQTT properties allowed in AUTH packet
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct AuthProperties {
-    authentication_method: String,
-    authentication_data: Vec<u8>,
-    reason_string: Option<String>,
-    user_properties: Vec<UserProperty>,
+    /// Property::AuthenticationMethod
+    pub authentication_method: String,
+    /// Property::AuthenticationData
+    pub authentication_data: Vec<u8>,
+    /// Property::ReasonString
+    pub reason_string: Option<String>,
+    /// Property::UserProp
+    pub user_properties: Vec<UserProperty>,
 }
 
 impl Packetize for AuthProperties {

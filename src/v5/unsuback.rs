@@ -5,6 +5,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::UnsubAck";
 
+/// Error codes allowed in UNSUBACK packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UnsubAckReasonCode {
@@ -42,7 +43,7 @@ impl TryFrom<u8> for UnsubAckReasonCode {
     }
 }
 
-/// Acknowledgement to subscribe
+/// UNSUBACK Packet
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnsubAck {
     pub packet_id: u16,
@@ -107,6 +108,7 @@ impl UnsubAck {
     }
 }
 
+/// Collection of MQTT properties allowed in UNSUBACK packet
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UnsubAckProperties {
     pub reason_string: Option<String>,

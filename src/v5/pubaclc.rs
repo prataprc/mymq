@@ -5,6 +5,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::PubACLC";
 
+/// Error codes allowed in PUBACK, PUBREC, PUBREL, PUBCOMP packets
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PubReasonCode {
@@ -48,6 +49,7 @@ impl Default for PubReasonCode {
     }
 }
 
+/// PUBACK, PUBREC, PUBREL, PUBCOMP packets
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pub {
     pub packet_type: PacketType,
@@ -140,9 +142,12 @@ impl Pub {
     }
 }
 
+/// Collection of MQTT properties in PUBACK, PUBREC, PUBREL, PUBCOMP packets
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PubProperties {
+    /// Property::ReasonString
     pub reason_string: Option<String>,
+    /// Property::UserProp
     pub user_properties: Vec<UserProperty>,
 }
 

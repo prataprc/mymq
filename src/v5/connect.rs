@@ -7,6 +7,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Connect";
 
+/// Flags carried by CONNECT packet
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ConnectFlags(pub u8);
 
@@ -56,7 +57,7 @@ impl ConnectFlags {
         flags.iter().fold(ConnectFlags(0), |acc, flag| ConnectFlags(acc.0 | flag.0))
     }
 
-    // return (clean_start, will_flag, will_qos, will_retain)
+    /// Return (clean_start, will_flag, will_qos, will_retain)
     pub fn unwrap(&self) -> (bool, bool, QoS, bool) {
         let clean_start: bool = (self.0 & Self::CLEAN_START.0) > 0;
         let will_flag: bool = (self.0 & Self::WILL_FLAG.0) > 0;
@@ -83,6 +84,7 @@ impl ConnectFlags {
     }
 }
 
+/// CONNECT packet
 #[derive(Debug, Clone, PartialEq)]
 pub struct Connect {
     pub protocol_name: String,
@@ -93,6 +95,7 @@ pub struct Connect {
     pub payload: ConnectPayload,
 }
 
+/// Payload in CONNECT packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct ConnectPayload {
     pub client_id: ClientID,
@@ -288,6 +291,7 @@ impl Connect {
     }
 }
 
+/// Collection of MQTT properties allowed in CONNECT packet
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConnectProperties {
     pub session_expiry_interval: Option<u32>, // 0=disable, 0xFFFFFFFF=indefinite
@@ -428,6 +432,7 @@ impl ConnectProperties {
     }
 }
 
+/// Will Property carried in [ConnectPayload]
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct WillProperties {
     pub will_delay_interval: Option<u32>,

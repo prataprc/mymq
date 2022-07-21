@@ -7,6 +7,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Publish";
 
+/// PUBLISH Packet
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Publish {
     pub retain: bool,
@@ -179,6 +180,7 @@ impl Publish {
     }
 }
 
+/// Collection of MQTT properties allowed in PUBLISH packet
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublishProperties {
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary

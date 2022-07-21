@@ -4,6 +4,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Subscribe";
 
+/// Subscription options carried in SUBSCRIBE Packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct SubscriptionOpt(u8);
 
@@ -39,7 +40,7 @@ impl SubscriptionOpt {
         SubscriptionOpt(rfr | rap | nl | qos)
     }
 
-    // return (retain_forward_rule, retain_as_published, no_local, qos)
+    /// Return (retain_forward_rule, retain_as_published, no_local, qos)
     pub fn unwrap(&self) -> (RetainForwardRule, bool, bool, QoS) {
         let qos: QoS = (self.0 & Self::MAXIMUM_QOS).try_into().unwrap();
         let nl: bool = (self.0 & Self::NO_LOCAL) > 0;
@@ -57,6 +58,7 @@ impl SubscriptionOpt {
     }
 }
 
+/// RetainForwardRule part of Subscription option defined by MQTT spec.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RetainForwardRule {
     OnEverySubscribe = 0,
@@ -89,6 +91,7 @@ impl From<RetainForwardRule> for u8 {
     }
 }
 
+/// SUBSCRIBE Packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct Subscribe {
     pub packet_id: u16,
@@ -184,6 +187,7 @@ impl Subscribe {
     }
 }
 
+/// Collection of MQTT properties allowed in SUBSCRIBE packet
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SubscribeProperties {
     pub subscription_id: Option<VarU32>,
@@ -244,6 +248,7 @@ impl Packetize for SubscribeProperties {
     }
 }
 
+/// SubscribeFilter defined in the SUBSCRIBE packet's payload.
 #[derive(Clone, PartialEq, Debug)]
 pub struct SubscribeFilter {
     pub topic_filter: TopicFilter,

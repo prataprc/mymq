@@ -2,6 +2,7 @@ use crate::v5::{FixedHeader, PacketType};
 use crate::Result;
 use crate::{Blob, Packetize, VarU32};
 
+/// PINGREQ Packet
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PingReq;
 
@@ -25,6 +26,7 @@ impl Packetize for PingReq {
     }
 }
 
+/// PINGRESP Packet
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PingResp;
 

@@ -5,8 +5,9 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Disconnect";
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// Error codes allowed in DISCONNECT packet.
 #[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
     DiconnectWillMessage = 0x04,
@@ -86,10 +87,11 @@ impl TryFrom<u8> for DisconnReasonCode {
     }
 }
 
+/// DISCONNECT Packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct Disconnect {
-    code: Option<DisconnReasonCode>,
-    properties: Option<DisconnProperties>,
+    pub code: Option<DisconnReasonCode>,
+    pub properties: Option<DisconnProperties>,
 }
 
 impl Disconnect {
@@ -153,6 +155,7 @@ impl Disconnect {
     }
 }
 
+/// Collection of MQTT properties allowed in DISCONNECT packet
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct DisconnProperties {
     pub session_expiry_interval: Option<u32>,

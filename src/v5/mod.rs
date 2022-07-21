@@ -113,29 +113,40 @@ mod suback;
 mod unsub;
 mod unsuback;
 
-pub use auth::Auth;
-pub use connack::{ConnAck, ConnAckProperties, ConnackReasonCode};
-pub use connect::{Connect, WillProperties};
-pub use disconnect::{DisconnReasonCode, Disconnect};
+pub use auth::{Auth, AuthProperties, AuthReasonCode};
+pub use connack::{ConnAck, ConnAckProperties, ConnackFlags, ConnackReasonCode};
+pub use connect::WillProperties;
+pub use connect::{Connect, ConnectFlags, ConnectPayload, ConnectProperties};
+pub use disconnect::{DisconnProperties, DisconnReasonCode, Disconnect};
 pub use ping::{PingReq, PingResp};
-pub use pubaclc::Pub;
-pub use publish::Publish;
-pub use sub::{RetainForwardRule, Subscribe};
-pub use suback::{SubAck, SubAckReasonCode};
-pub use unsub::UnSubscribe;
-pub use unsuback::UnsubAck;
+pub use pubaclc::{Pub, PubProperties, PubReasonCode};
+pub use publish::{Publish, PublishProperties};
+pub use sub::RetainForwardRule;
+pub use sub::{Subscribe, SubscribeFilter, SubscribeProperties, SubscriptionOpt};
+pub use suback::{SubAck, SubAckProperties, SubAckReasonCode};
+pub use unsub::{UnSubscribe, UnSubscribeProperties};
+pub use unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReasonCode};
 
+/// Type captures an active subscription by client.
 #[derive(Clone)]
 pub struct Subscription {
+    /// Uniquely identifies this subscription for the subscribing client. Within entire
+    /// cluster, `(client_id, topic_filter)` is uqniue.
     pub topic_filter: TopicFilter,
 
-    pub client_id: ClientID, // client's id subscribing to this topic_filter
-    pub shard_id: u32,       // shard's id of hosting this client
+    /// Subscribing client's unique ID.
+    pub client_id: ClientID,
+    /// Shard ID hosting this client and its session.
+    pub shard_id: u32,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub subscription_id: Option<u32>,
-    // subscription-options
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub qos: QoS,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub no_local: bool,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub retain_as_published: bool,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub retain_forward_rule: RetainForwardRule,
 }
 
@@ -170,8 +181,8 @@ impl Ord for Subscription {
 }
 
 /// MQTT packet type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
     Connect = 1,
     ConnAck = 2,
@@ -239,7 +250,7 @@ impl From<PacketType> for u8 {
     }
 }
 
-/// All that is MQTT
+/// Enumeration of all possible MQTT packets, its header, fields, properties, payload.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
     Connect(Connect),
@@ -648,6 +659,7 @@ impl FixedHeader {
     }
 }
 
+/// Enumerated list of all property types defined in MQTT spec.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyType {
@@ -726,6 +738,7 @@ impl TryFrom<u32> for PropertyType {
     }
 }
 
+/// Enumeration of property and its value that are allowed in a MQTT packet.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Property {
     PayloadFormatIndicator(u8),
@@ -1043,6 +1056,7 @@ impl Property {
     }
 }
 
+/// Possible payload values for PayloadFormatIndicator property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadFormat {
     Binary = 0,
