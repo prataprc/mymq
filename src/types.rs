@@ -424,7 +424,7 @@ pub type UserProperty = (String, String);
 #[cfg(any(feature = "fuzzy", test))]
 pub fn valid_user_props<'a>(
     uns: &mut Unstructured<'a>,
-    n: usize,
+    n: usize, // TODO: increase n to make size > 1/2 byte.
 ) -> result::Result<Vec<UserProperty>, ArbitraryError> {
     let mut props = vec![];
     for _ in 0..n {
