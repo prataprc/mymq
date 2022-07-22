@@ -1,4 +1,10 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
 use std::ops::{Deref, DerefMut};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
 
 use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
@@ -25,6 +31,35 @@ impl DerefMut for ConnectFlags {
     }
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ConnectFlags {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let mut flags = vec![];
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::CLEAN_START);
+        }
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::WILL_FLAG);
+        }
+        flags.push(match uns.arbitrary::<QoS>()? {
+            QoS::AtMostOnce => Self::WILL_QOS0,
+            QoS::AtLeastOnce => Self::WILL_QOS1,
+            QoS::ExactlyOnce => Self::WILL_QOS2,
+        });
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::WILL_RETAIN);
+        }
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::USERNAME);
+        }
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::PASSWORD);
+        }
+
+        Ok(ConnectFlags::new(&flags))
+    }
+}
+
 impl Packetize for ConnectFlags {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
@@ -37,6 +72,7 @@ impl Packetize for ConnectFlags {
     }
 
     fn encode(&self) -> Result<Blob> {
+        self.validate()?;
         self.0.encode()
     }
 }
@@ -80,6 +116,10 @@ impl ConnectFlags {
     }
 
     fn validate(&self) -> Result<()> {
+        if (self.0 & 0b_0000_0001) > 0 {
+            err!(MalformedPacket, code: MalformedPacket, "connect-flag resrvd bit is 1")?;
+        }
+
         Ok(())
     }
 }
@@ -104,6 +144,43 @@ pub struct ConnectPayload {
     pub will_payload: Option<Vec<u8>>,
     pub user_name: Option<String>,
     pub password: Option<String>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Connect {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let user_name = match uns.arbitrary::<u8>()? % 3 {
+            0 => None,
+            1 => Some("".to_string()),
+            2 => Some("usern".to_string()),
+            _ => unreachable!(),
+        };
+        let password = match uns.arbitrary::<u8>()? % 3 {
+            0 => None,
+            1 => Some("".to_string()),
+            2 => Some("passw".to_string()),
+            _ => unreachable!(),
+        };
+        let payload = ConnectPayload {
+            client_id: uns.arbitrary()?,
+            will_properties: uns.arbitrary()?,
+            will_topic: uns.arbitrary()?,
+            will_payload: uns.arbitrary()?,
+            user_name,
+            password,
+        };
+
+        let val = Connect {
+            protocol_name: "MQTT".to_string(),
+            protocol_version: MqttProtocol::V5,
+            flags: uns.arbitrary()?,
+            keep_alive: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+            payload,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for Connect {
@@ -215,10 +292,9 @@ impl Connect {
             )?;
         };
 
+        self.flags.validate()?;
+
         let flags = *self.flags;
-        if (flags & 0b_0000_0001) > 0 {
-            err!(MalformedPacket, code: MalformedPacket, "{} flags {:0x?}", PP, flags)?;
-        }
         QoS::try_from((flags & ConnectFlags::WILL_QOS_MASK) >> 3)?;
         if (flags & *ConnectFlags::WILL_FLAG) > 0 {
             // NOTE: Spec says that properites and payload MUST be specified
@@ -303,6 +379,35 @@ pub struct ConnectProperties {
     pub authentication_method: Option<String>,
     pub authentication_data: Option<Vec<u8>>,
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ConnectProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let am_choice: Vec<String> =
+            vec!["", "digest"].into_iter().map(|s| s.to_string()).collect();
+        let authentication_method = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&am_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = ConnectProperties {
+            session_expiry_interval: uns.arbitrary()?,
+            receive_maximum: uns.arbitrary::<Option<u16>>()?.map(|x| x.saturating_add(1)),
+            max_packet_size: uns.arbitrary::<Option<u32>>()?.map(|x| x.saturating_add(1)),
+            topic_alias_max: uns.arbitrary()?,
+            request_response_info: uns.arbitrary()?,
+            request_problem_info: uns.arbitrary()?,
+            authentication_method,
+            authentication_data: uns.arbitrary()?,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for ConnectProperties {
@@ -442,6 +547,34 @@ pub struct WillProperties {
     pub response_topic: Option<TopicName>,
     pub correlation_data: Option<Vec<u8>>,
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for WillProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let ct_choice: Vec<String> =
+            vec!["", "img/png"].into_iter().map(|s| s.to_string()).collect();
+
+        let content_type = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&ct_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = WillProperties {
+            will_delay_interval: uns.arbitrary()?,
+            payload_format_indicator: uns.arbitrary()?,
+            message_expiry_interval: uns.arbitrary()?,
+            content_type,
+            response_topic: uns.arbitrary()?,
+            correlation_data: uns.arbitrary()?,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for WillProperties {

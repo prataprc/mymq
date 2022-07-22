@@ -773,6 +773,7 @@ pub enum Property {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Property {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
         use PropertyType::*;
 
         let content_types: Vec<String> =
@@ -781,10 +782,6 @@ impl<'a> Arbitrary<'a> for Property {
             vec!["userpass"].into_iter().map(|s| s.to_string()).collect();
         let server_references: Vec<String> =
             vec!["a.b.com:1883"].into_iter().map(|s| s.to_string()).collect();
-        let keys: Vec<String> =
-            vec!["", "key"].into_iter().map(|s| s.to_string()).collect();
-        let vals: Vec<String> =
-            vec!["", "val"].into_iter().map(|s| s.to_string()).collect();
 
         let prop = match uns.arbitrary::<PropertyType>()? {
             PayloadFormatIndicator => {
@@ -816,7 +813,7 @@ impl<'a> Arbitrary<'a> for Property {
                 Property::SessionExpiryInterval(val)
             }
             AssignedClientIdentifier => {
-                let val: String = ClientID::new_uuid_v4().to_string();
+                let val: String = uns.arbitrary::<ClientID>()?.to_string();
                 Property::AssignedClientIdentifier(val)
             }
             ServerKeepAlive => {
@@ -876,9 +873,8 @@ impl<'a> Arbitrary<'a> for Property {
                 Property::RetainAvailable(val)
             }
             UserProp => {
-                let key: String = uns.choose(&keys)?.to_string();
-                let val: String = uns.choose(&vals)?.to_string();
-                Property::UserProp((key, val))
+                let val: UserProperty = types::valid_user_props(uns, 1)?.pop().unwrap();
+                Property::UserProp(val)
             }
             MaximumPacketSize => {
                 let val: u32 = uns.arbitrary()?;
@@ -1057,6 +1053,7 @@ impl Property {
 }
 
 /// Possible payload values for PayloadFormatIndicator property.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadFormat {
     Binary = 0,

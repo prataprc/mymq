@@ -89,6 +89,19 @@ impl DerefMut for ClientID {
     }
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ClientID {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let client_id = match uns.arbitrary::<u8>()? % 2 {
+            0 => ClientID::new_uuid_v4(),
+            1 => ClientID("".to_string()),
+            _ => unreachable!(),
+        };
+
+        Ok(client_id)
+    }
+}
+
 impl ClientID {
     pub fn new_uuid_v4() -> ClientID {
         ClientID(uuid::Uuid::new_v4().to_string())
@@ -123,23 +136,6 @@ impl DerefMut for TopicName {
 impl From<String> for TopicName {
     fn from(val: String) -> TopicName {
         TopicName(val)
-    }
-}
-
-impl Packetize for TopicName {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        let stream: &[u8] = stream.as_ref();
-
-        let (val, n) = String::decode(stream)?;
-        let val = TopicName::from(val);
-
-        val.validate()?;
-        Ok((val, n))
-    }
-
-    fn encode(&self) -> Result<Blob> {
-        self.validate()?;
-        self.0.encode()
     }
 }
 
@@ -179,6 +175,23 @@ impl<'a> Arbitrary<'a> for TopicName {
         };
 
         Ok(s.into())
+    }
+}
+
+impl Packetize for TopicName {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (val, n) = String::decode(stream)?;
+        let val = TopicName::from(val);
+
+        val.validate()?;
+        Ok((val, n))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        self.validate()?;
+        self.0.encode()
     }
 }
 
@@ -407,6 +420,26 @@ impl VarU32 {
 
 /// Type alias for MQTT User-Property.
 pub type UserProperty = (String, String);
+
+#[cfg(any(feature = "fuzzy", test))]
+pub fn valid_user_props<'a>(
+    uns: &mut Unstructured<'a>,
+    n: usize,
+) -> result::Result<Vec<UserProperty>, ArbitraryError> {
+    let mut props = vec![];
+    for _ in 0..n {
+        let keys: Vec<String> =
+            vec!["", "key"].into_iter().map(|s| s.to_string()).collect();
+        let vals: Vec<String> =
+            vec!["", "val"].into_iter().map(|s| s.to_string()).collect();
+
+        let key: String = uns.choose(&keys)?.to_string();
+        let val: String = uns.choose(&vals)?.to_string();
+        props.push((key, val))
+    }
+
+    Ok(props)
+}
 
 impl Packetize for UserProperty {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
