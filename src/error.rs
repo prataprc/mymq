@@ -1,5 +1,7 @@
 use std::{self, fmt, result};
 
+use crate::Result;
+
 /// Short form to compose Error values.
 ///
 /// Here are few possible ways:
@@ -378,6 +380,65 @@ pub enum ReasonCode {
     ExceedMaximumConnectTime = 0xA0,
     SubscriptionIdNotSupported = 0xA1,
     WildcardSubscriptionsNotSupported = 0xA2,
+}
+
+impl Default for ReasonCode {
+    fn default() -> ReasonCode {
+        ReasonCode::Success
+    }
+}
+
+impl TryFrom<u8> for ReasonCode {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<ReasonCode> {
+        match val {
+            0x00 => Ok(ReasonCode::Success),
+            0x1 => Ok(ReasonCode::QoS1),
+            0x02 => Ok(ReasonCode::QoS2),
+            0x04 => Ok(ReasonCode::DiconnectWillMessage),
+            0x10 => Ok(ReasonCode::NoMatchingSubscribers),
+            0x11 => Ok(ReasonCode::NoSubscriptionExisted),
+            0x18 => Ok(ReasonCode::ContinueAuthentication),
+            0x19 => Ok(ReasonCode::ReAuthenticate),
+            0x80 => Ok(ReasonCode::UnspecifiedError),
+            0x81 => Ok(ReasonCode::MalformedPacket),
+            0x82 => Ok(ReasonCode::ProtocolError),
+            0x83 => Ok(ReasonCode::ImplementationError),
+            0x84 => Ok(ReasonCode::UnsupportedProtocolVersion),
+            0x85 => Ok(ReasonCode::InvalidClientID),
+            0x86 => Ok(ReasonCode::BadLogin),
+            0x87 => Ok(ReasonCode::NotAuthorized),
+            0x88 => Ok(ReasonCode::ServerNotAvailable),
+            0x89 => Ok(ReasonCode::ServerBusy),
+            0x8A => Ok(ReasonCode::Banned),
+            0x8B => Ok(ReasonCode::ServerShutdown),
+            0x8C => Ok(ReasonCode::BadAuthenticationMethod),
+            0x8D => Ok(ReasonCode::KeepAliveTimeout),
+            0x8E => Ok(ReasonCode::SessionTakenOver),
+            0x8F => Ok(ReasonCode::InvalidTopicFilter),
+            0x90 => Ok(ReasonCode::TopicNameInvalid),
+            0x91 => Ok(ReasonCode::PacketIdInuse),
+            0x92 => Ok(ReasonCode::PacketIdNotFound),
+            0x93 => Ok(ReasonCode::ExceededReceiveMaximum),
+            0x94 => Ok(ReasonCode::TopicAliasInvalid),
+            0x95 => Ok(ReasonCode::PacketTooLarge),
+            0x96 => Ok(ReasonCode::ExceedMessageRate),
+            0x97 => Ok(ReasonCode::QuotaExceeded),
+            0x98 => Ok(ReasonCode::AdminAction),
+            0x99 => Ok(ReasonCode::PayloadFormatInvalid),
+            0x9A => Ok(ReasonCode::RetainNotSupported),
+            0x9B => Ok(ReasonCode::QoSNotSupported),
+            0x9C => Ok(ReasonCode::UseAnotherServer),
+            0x9D => Ok(ReasonCode::ServerMoved),
+            0x9E => Ok(ReasonCode::UnsupportedSharedSubscription),
+            0x9F => Ok(ReasonCode::ExceedConnectionRate),
+            0xA0 => Ok(ReasonCode::ExceedMaximumConnectTime),
+            0xA1 => Ok(ReasonCode::SubscriptionIdNotSupported),
+            0xA2 => Ok(ReasonCode::WildcardSubscriptionsNotSupported),
+            val => err!(MalformedPacket, code: MalformedPacket, "reason-code {}", val),
+        }
+    }
 }
 
 impl fmt::Display for ReasonCode {
