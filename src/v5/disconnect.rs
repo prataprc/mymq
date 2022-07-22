@@ -226,16 +226,6 @@ impl<'a> Arbitrary<'a> for DisconnProperties {
     }
 }
 
-impl DisconnProperties {
-    #[cfg(any(feature = "fuzzy", test))]
-    pub fn is_empty(&mut self) -> bool {
-        self.session_expiry_interval.is_none()
-            && self.reason_string.is_none()
-            && self.user_properties.len() == 0
-            && self.server_reference.is_none()
-    }
-}
-
 impl Packetize for DisconnProperties {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         use crate::v5::Property::*;
@@ -288,5 +278,15 @@ impl Packetize for DisconnProperties {
         let data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl DisconnProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.session_expiry_interval.is_none()
+            && self.reason_string.is_none()
+            && self.user_properties.len() == 0
+            && self.server_reference.is_none()
     }
 }

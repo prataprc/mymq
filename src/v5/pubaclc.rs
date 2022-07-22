@@ -1,14 +1,19 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::util::advance;
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-const PP: &'static str = "Packet::PubACLC";
-
-/// Error codes allowed in PUBACK, PUBREC, PUBREL, PUBCOMP packets
+/// Error codes allowed in PUBACK packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
-pub enum PubReasonCode {
+pub enum PubAckReasonCode {
     Success = 0x00,
     NoMatchingSubscribers = 0x10,
     UnspecifiedError = 0x80,
@@ -21,32 +26,39 @@ pub enum PubReasonCode {
     PayloadFormatInvalid = 0x99,
 }
 
-impl TryFrom<u8> for PubReasonCode {
-    type Error = Error;
-
-    fn try_from(val: u8) -> Result<PubReasonCode> {
-        match val {
-            0x00 => Ok(PubReasonCode::Success),
-            0x10 => Ok(PubReasonCode::NoMatchingSubscribers),
-            0x80 => Ok(PubReasonCode::UnspecifiedError),
-            0x83 => Ok(PubReasonCode::ImplementationError),
-            0x87 => Ok(PubReasonCode::NotAuthorized),
-            0x90 => Ok(PubReasonCode::TopicNameInvalid),
-            0x91 => Ok(PubReasonCode::PacketIdInuse),
-            0x92 => Ok(PubReasonCode::PacketIdNotFound),
-            0x97 => Ok(PubReasonCode::QuotaExceeded),
-            0x99 => Ok(PubReasonCode::PayloadFormatInvalid),
-            val => {
-                err!(MalformedPacket, code: MalformedPacket, "{} reason-code {}", PP, val)
-            }
-        }
-    }
+/// Error codes allowed in PUBREC packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum PubRecReasonCode {
+    Success = 0x00,
+    NoMatchingSubscribers = 0x10,
+    UnspecifiedError = 0x80,
+    ImplementationError = 0x83,
+    NotAuthorized = 0x87,
+    TopicNameInvalid = 0x90,
+    PacketIdInuse = 0x91,
+    PacketIdNotFound = 0x92,
+    QuotaExceeded = 0x97,
+    PayloadFormatInvalid = 0x99,
 }
 
-impl Default for PubReasonCode {
-    fn default() -> PubReasonCode {
-        PubReasonCode::Success
-    }
+/// Error codes allowed in PUBREL packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum PubRelReasonCode {
+    Success = 0x00,
+    PacketIdNotFound = 0x92,
+}
+
+/// Error codes allowed in PUBCOMP packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum PubCompReasonCode {
+    Success = 0x00,
+    PacketIdNotFound = 0x92,
 }
 
 /// PUBACK, PUBREC, PUBREL, PUBCOMP packets
@@ -54,45 +66,82 @@ impl Default for PubReasonCode {
 pub struct Pub {
     pub packet_type: PacketType,
     pub packet_id: u16,
-    pub code: PubReasonCode,
+    pub code: ReasonCode,
     pub properties: Option<PubProperties>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Pub {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let pkt_types = [
+            PacketType::PubAck,
+            PacketType::PubRec,
+            PacketType::PubRel,
+            PacketType::PubComp,
+        ];
+        let packet_type = uns.choose(&pkt_types)?.clone();
+        let code = {
+            let code = match packet_type {
+                PacketType::PubAck => uns.arbitrary::<PubAckReasonCode>()? as u8,
+                PacketType::PubRec => uns.arbitrary::<PubRecReasonCode>()? as u8,
+                PacketType::PubRel => uns.arbitrary::<PubRelReasonCode>()? as u8,
+                PacketType::PubComp => uns.arbitrary::<PubCompReasonCode>()? as u8,
+                _ => unreachable!(),
+            };
+            ReasonCode::try_from(code).unwrap()
+        };
+        let val = Pub {
+            packet_type,
+            packet_id: uns.arbitrary()?,
+            code,
+            properties: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for Pub {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
 
-        let code: PubReasonCode = PubReasonCode::Success;
-        let properties: Option<PubProperties> = None;
+        // println!("Pub::decode {:?}", stream);
 
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
         let (packet_type, _, _, _) = fh.unwrap();
-
         let (packet_id, n) = dec_field!(u16, stream, n);
 
-        if *fh.remaining_len == 2 {
-            let packet = Pub { packet_type, packet_id, code, properties };
-            return Ok((packet, n));
-        }
-
-        let (code, n) = {
-            let (val, n) = dec_field!(u8, stream, n);
-            (PubReasonCode::try_from(val)?, n)
+        let (packet, n) = match *fh.remaining_len {
+            2 => {
+                let code: ReasonCode = ReasonCode::Success;
+                let properties: Option<PubProperties> = None;
+                let packet = Pub { packet_type, packet_id, code, properties };
+                (packet, n)
+            }
+            3 => {
+                let (code, n) = {
+                    let (val, n) = dec_field!(u8, stream, n);
+                    (ReasonCode::try_from(val)?, n)
+                };
+                let properties: Option<PubProperties> = None;
+                let packet = Pub { packet_type, packet_id, code, properties };
+                (packet, n)
+            }
+            _ => {
+                let (code, n) = {
+                    let (val, n) = dec_field!(u8, stream, n);
+                    (ReasonCode::try_from(val)?, n)
+                };
+                let (properties, n) = dec_props!(PubProperties, stream, n);
+                let packet = Pub { packet_type, packet_id, code, properties };
+                (packet, n)
+            }
         };
 
-        if *fh.remaining_len < 4 {
-            let packet = Pub { packet_type, packet_id, code, properties };
-            return Ok((packet, n));
-        }
-
-        let (properties, n) = dec_props!(PubProperties, stream, n);
-
-        let val = Pub { packet_type, packet_id, code, properties };
-
-        val.validate()?;
-        Ok((val, n))
+        packet.validate()?;
+        Ok((packet, n))
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -110,6 +159,7 @@ impl Packetize for Pub {
 
         let remlen = VarU32(data.len().try_into()?);
         let fh = match self.packet_type {
+            PacketType::PubAck => FixedHeader::new(PacketType::PubAck, remlen)?,
             PacketType::PubRel => FixedHeader::new_pubrel(remlen)?,
             PacketType::PubRec => FixedHeader::new(PacketType::PubRec, remlen)?,
             PacketType::PubComp => FixedHeader::new(PacketType::PubComp, remlen)?,
@@ -117,22 +167,43 @@ impl Packetize for Pub {
         };
         data = insert_fixed_header(fh, data)?;
 
+        // println!("Pub::encode {:?}", data);
+
         Ok(Blob::Large { data })
     }
 }
 
 impl Pub {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
-        let invalid_code = match (self.packet_type, self.code) {
-            (PacketType::PubAck, PubReasonCode::PacketIdNotFound) => true,
-            (PacketType::PubRec, PubReasonCode::PacketIdNotFound) => true,
-            (PacketType::PubRel, PubReasonCode::Success) => false,
-            (PacketType::PubRel, PubReasonCode::PacketIdNotFound) => false,
-            (PacketType::PubRel, _) => true,
-            (PacketType::PubComp, PubReasonCode::Success) => false,
-            (PacketType::PubComp, PubReasonCode::PacketIdNotFound) => false,
-            (PacketType::PubComp, _) => true,
-            (_, _) => false,
+        let invalid_code = match self.packet_type {
+            PacketType::PubAck | PacketType::PubRec => match self.code {
+                ReasonCode::Success => false,
+                ReasonCode::NoMatchingSubscribers => false,
+                ReasonCode::UnspecifiedError => false,
+                ReasonCode::ImplementationError => false,
+                ReasonCode::NotAuthorized => false,
+                ReasonCode::TopicNameInvalid => false,
+                ReasonCode::PacketIdInuse => false,
+                ReasonCode::PacketIdNotFound => false,
+                ReasonCode::QuotaExceeded => false,
+                ReasonCode::PayloadFormatInvalid => false,
+                _ => true,
+            },
+            PacketType::PubRel | PacketType::PubComp => match self.code {
+                ReasonCode::Success => false,
+                ReasonCode::PacketIdNotFound => false,
+                _ => true,
+            },
+            _ => unreachable!(),
         };
         if invalid_code {
             err!(MalformedPacket, code: MalformedPacket, "invalid code {:?}", self.code)?
@@ -149,6 +220,29 @@ pub struct PubProperties {
     pub reason_string: Option<String>,
     /// Property::UserProp
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for PubProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let rs_choice: Vec<String> =
+            vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
+        let reason_string = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&rs_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = PubProperties {
+            reason_string,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for PubProperties {
@@ -200,5 +294,12 @@ impl Packetize for PubProperties {
         let data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl PubProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.reason_string.is_none() && self.user_properties.len() == 0
     }
 }

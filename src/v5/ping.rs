@@ -1,8 +1,12 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::Arbitrary;
+
 use crate::v5::{FixedHeader, PacketType};
 use crate::Result;
 use crate::{Blob, Packetize, VarU32};
 
 /// PINGREQ Packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PingReq;
 
@@ -27,6 +31,7 @@ impl Packetize for PingReq {
 }
 
 /// PINGRESP Packet
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PingResp;
 

@@ -122,7 +122,7 @@ pub use connect::WillProperties;
 pub use connect::{Connect, ConnectFlags, ConnectPayload, ConnectProperties};
 pub use disconnect::{DisconnProperties, DisconnReasonCode, Disconnect};
 pub use ping::{PingReq, PingResp};
-pub use pubaclc::{Pub, PubProperties, PubReasonCode};
+pub use pubaclc::{Pub, PubProperties};
 pub use publish::{Publish, PublishProperties};
 pub use sub::RetainForwardRule;
 pub use sub::{Subscribe, SubscribeFilter, SubscribeProperties, SubscriptionOpt};
