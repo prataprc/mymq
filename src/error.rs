@@ -29,6 +29,7 @@ macro_rules! err {
             description: format!($($args),+),
             code: Some(ReasonCode::$code),
             cause: Some(Box::new($cause)),
+            loc: format!("{}:{}", file!(), line!()),
             ..Error::default()
         };
 
@@ -43,6 +44,7 @@ macro_rules! err {
                     kind: ErrorKind::$v,
                     description: format!($($args),+),
                     cause: Some(Box::new(err)),
+                    loc: format!("{}:{}", file!(), line!()),
                     ..Error::default()
                 };
                 log_error!(e);
@@ -58,6 +60,7 @@ macro_rules! err {
                     kind: ErrorKind::$v,
                     description: err.to_string(),
                     cause: Some(Box::new(err)),
+                    loc: format!("{}:{}", file!(), line!()),
                     ..Error::default()
                 };
                 log_error!(e);
@@ -72,6 +75,7 @@ macro_rules! err {
             kind,
             description,
             code: Some(ReasonCode::$code),
+            loc: format!("{}:{}", file!(), line!()),
             ..Error::default()
         };
 
@@ -85,6 +89,7 @@ macro_rules! err {
             kind,
             description,
             cause: Some(Box::new($cause)),
+            loc: format!("{}:{}", file!(), line!()),
             ..Error::default()
         };
 
@@ -97,6 +102,7 @@ macro_rules! err {
         let e = Error {
             kind,
             description,
+            loc: format!("{}:{}", file!(), line!()),
             ..Error::default()
         };
 
@@ -159,6 +165,8 @@ pub struct Error {
     pub code: Option<ReasonCode>,
     /// Chain of errors, that is, if another error lead to this error.
     pub cause: Option<Box<dyn std::error::Error + Send>>,
+    /// Location at which the error happens
+    pub loc: String,
     /// Call stack at the point where the error happened.
     #[cfg(feature = "backtrace")]
     pub backtrace: Option<backtrace::Backtrace>,
@@ -171,6 +179,7 @@ impl Default for Error {
             description: String::default(),
             code: None,
             cause: None,
+            loc: String::default(),
             #[cfg(feature = "backtrace")]
             backtrace: std::backtrace::Backtrace::force_capture(),
         }
@@ -185,8 +194,7 @@ impl fmt::Display for Error {
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        let code = self.code.map(|c| c.to_string()).unwrap_or("-".to_string());
-        write!(f, "<{},{},{}>", self.kind, code, self.description)
+        write!(f, "<{},{},{}>", self.kind, self.description, self.loc)
     }
 }
 
