@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{util::advance, Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -5,6 +11,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Auth";
 
 /// Error codes allowed in AUTH packet.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(u8)]
 pub enum AuthReasonCode {
@@ -29,8 +36,20 @@ impl TryFrom<u8> for AuthReasonCode {
 /// AUTH packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct Auth {
-    pub code: Option<AuthReasonCode>,
+    pub code: AuthReasonCode,
     pub properties: Option<AuthProperties>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Auth {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = Auth {
+            code: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for Auth {
@@ -40,10 +59,14 @@ impl Packetize for Auth {
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
-        let (code, n) = dec_field!(u8, stream, n);
-        let code = Some(AuthReasonCode::try_from(code)?);
-
-        let (properties, n) = dec_props!(AuthProperties, stream, n);
+        let (code, properties, n) = if *fh.remaining_len == 0 {
+            (AuthReasonCode::Success, None, n)
+        } else {
+            let (code, n) = dec_field!(u8, stream, n);
+            let code = AuthReasonCode::try_from(code)?;
+            let (properties, n) = dec_props!(AuthProperties, stream, n);
+            (code, properties, n)
+        };
 
         let val = Auth { code, properties };
 
@@ -56,8 +79,7 @@ impl Packetize for Auth {
 
         let mut data = Vec::with_capacity(64);
 
-        let code = self.code.unwrap_or(AuthReasonCode::Success);
-        data.extend_from_slice((code as u8).encode()?.as_ref());
+        data.extend_from_slice((self.code as u8).encode()?.as_ref());
         if let Some(properties) = &self.properties {
             data.extend_from_slice(properties.encode()?.as_ref());
         } else {
@@ -88,6 +110,33 @@ pub struct AuthProperties {
     pub reason_string: Option<String>,
     /// Property::UserProp
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for AuthProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let am_choice: Vec<String> =
+            vec!["", "digest"].into_iter().map(|s| s.to_string()).collect();
+        let rs_choice: Vec<String> =
+            vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
+        let reason_string = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&rs_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = AuthProperties {
+            authentication_method: uns.choose(&am_choice)?.to_string(),
+            authentication_data: uns.arbitrary()?,
+            reason_string,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for AuthProperties {

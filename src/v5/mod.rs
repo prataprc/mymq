@@ -90,13 +90,16 @@ macro_rules! dec_props {
 macro_rules! enc_prop {
     (opt: $data:ident, $varn:ident, $($val:tt)*) => {{
         if let Some(val) = $($val)* {
-            $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
+            let pt = PropertyType::$varn as u32;
+            $data.extend_from_slice(VarU32(pt).encode()?.as_ref());
             $data.extend_from_slice(val.encode()?.as_ref())
         }
     }};
     ($data:ident, $varn:ident, $($val:tt)*) => {{
+        // println!("enc_prop {:?} {:?}", PropertyType::$varn, $data);
         $data.extend_from_slice(VarU32(PropertyType::$varn as u32).encode()?.as_ref());
         $data.extend_from_slice($($val)*.encode()?.as_ref());
+        // println!("enc_prop out {:?}", $data);
     }};
 }
 pub(crate) use enc_prop;
@@ -904,7 +907,7 @@ impl Packetize for Property {
 
         let mut stream: &[u8] = stream.as_ref();
 
-        let (prop_type, mut n) = dec_field!(VarU32, stream, 0);
+        let (prop_type, n) = dec_field!(VarU32, stream, 0);
         stream = advance(stream, n)?;
 
         let (property, m) = match PropertyType::try_from(*prop_type)? {
@@ -959,9 +962,9 @@ impl Packetize for Property {
                 dec_prop!(SharedSubscriptionAvailable, u8, stream)
             }
         };
-        n += m;
 
-        Ok((property, n))
+        // println!("Property::decode {} {}", n, m);
+        Ok((property, n + m))
     }
 
     fn encode(&self) -> Result<Blob> {
@@ -1105,27 +1108,31 @@ impl PayloadFormat {
 }
 
 fn insert_fixed_header(fh: FixedHeader, mut data: Vec<u8>) -> Result<Vec<u8>> {
+    let a = data.len();
+
     let fh_blob = fh.encode()?;
     let fh_bytes = fh_blob.as_ref();
     let n = fh_bytes.len();
 
     data.extend_from_slice(fh_bytes);
-    data.copy_within(.., n);
+    data.copy_within(..a, n);
     (&mut data[..n]).copy_from_slice(fh_bytes);
 
     Ok(data)
 }
 
 fn insert_property_len(n: usize, mut data: Vec<u8>) -> Result<Vec<u8>> {
+    let a = data.len();
+
     let n = u32::try_from(n)?;
 
     let blob = VarU32(n).encode()?;
     let bytes = blob.as_ref();
-    let n = bytes.len();
+    let m = bytes.len();
 
     data.extend_from_slice(bytes);
-    data.copy_within(.., n);
-    (&mut data[..n]).copy_from_slice(bytes);
+    data.copy_within(..a, m);
+    (&mut data[..m]).copy_from_slice(bytes);
 
     Ok(data)
 }
