@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::util::advance;
 use crate::v5::{FixedHeader, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
@@ -6,6 +12,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Disconnect";
 
 /// Error codes allowed in DISCONNECT packet.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum DisconnReasonCode {
@@ -90,13 +97,34 @@ impl TryFrom<u8> for DisconnReasonCode {
 /// DISCONNECT Packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct Disconnect {
-    pub code: Option<DisconnReasonCode>,
+    pub code: DisconnReasonCode,
     pub properties: Option<DisconnProperties>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Disconnect {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = Disconnect {
+            code: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Disconnect {
     pub fn new(code: DisconnReasonCode, props: Option<DisconnProperties>) -> Disconnect {
-        Disconnect { code: Some(code), properties: props }
+        Disconnect { code, properties: props }
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
     }
 }
 
@@ -104,22 +132,24 @@ impl Packetize for Disconnect {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
 
+        // println!("Disconnect decode {:?}", stream);
+
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
         let (val, n) = match *fh.remaining_len {
             0 => {
-                let code = Some(DisconnReasonCode::NormalDisconnect);
+                let code = DisconnReasonCode::NormalDisconnect;
                 (Disconnect { code, properties: None }, n)
             }
             m if m < 2 => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = Some(DisconnReasonCode::try_from(code)?);
+                let code = DisconnReasonCode::try_from(code)?;
                 (Disconnect { code, properties: None }, n)
             }
             _ => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = Some(DisconnReasonCode::try_from(code)?);
+                let code = DisconnReasonCode::try_from(code)?;
                 let (properties, n) = dec_props!(DisconnProperties, stream, n);
                 (Disconnect { code, properties }, n)
             }
@@ -134,8 +164,7 @@ impl Packetize for Disconnect {
 
         let mut data = Vec::with_capacity(64);
 
-        let code = self.code.unwrap_or(DisconnReasonCode::NormalDisconnect);
-        data.extend_from_slice((code as u8).encode()?.as_ref());
+        data.extend_from_slice((self.code as u8).encode()?.as_ref());
         if let Some(properties) = &self.properties {
             data.extend_from_slice(properties.encode()?.as_ref());
         } else {
@@ -144,6 +173,8 @@ impl Packetize for Disconnect {
 
         let fh = FixedHeader::new(Disconnect, VarU32(data.len().try_into()?))?;
         data = insert_fixed_header(fh, data)?;
+
+        // println!("Disconnect encoded {:?}", data);
 
         Ok(Blob::Large { data })
     }
@@ -162,6 +193,47 @@ pub struct DisconnProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,
     pub server_reference: Option<String>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for DisconnProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let rs_choice: Vec<String> =
+            vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
+        let reason_string = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&rs_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let server_reference = match uns.arbitrary::<u8>()? % 3 {
+            0 => Some("".to_string()),
+            1 => Some("a.b.com:1883".to_string()),
+            2 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = DisconnProperties {
+            session_expiry_interval: uns.arbitrary()?,
+            reason_string,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+            server_reference,
+        };
+
+        Ok(val)
+    }
+}
+
+impl DisconnProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.session_expiry_interval.is_none()
+            && self.reason_string.is_none()
+            && self.user_properties.len() == 0
+            && self.server_reference.is_none()
+    }
 }
 
 impl Packetize for DisconnProperties {
