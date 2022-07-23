@@ -52,6 +52,8 @@ pub use socket::{PktRx, PktTx, Socket};
 pub use spinlock::Spinlock;
 pub use thread::{Rx, Thread, Threadable, Tx};
 pub use ticker::Ticker;
+#[cfg(any(feature = "fuzzy", test))]
+pub use timer::TimerEntry;
 pub use timer::{TimeoutValue, Timer};
 pub use ttrie::{RetainedTrie, SubscribedTrie};
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};

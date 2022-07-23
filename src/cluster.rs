@@ -487,8 +487,6 @@ impl Cluster {
     fn retain_expires(&mut self, rt: &mut Rt) {
         use crate::timer::TimeoutValue;
 
-        rt.retain_timer.gc();
-
         let RunLoop { retained_messages, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
@@ -496,7 +494,7 @@ impl Cluster {
 
         // gather all retained messages and cleanup the RetainedTrie and
         // `retain_topics` index.
-        for item in rt.retain_timer.expired().collect::<Vec<Arc<Retain>>>() {
+        for item in rt.retain_timer.expired(None).collect::<Vec<Arc<Retain>>>() {
             assert!(item.is_deleted() == false);
 
             retained_messages.remove(&item.topic_name);
@@ -564,7 +562,7 @@ impl Cluster {
             .map(|p| p.message_expiry_interval.as_ref())
             .flatten()
         {
-            Some(secs) => rt.retain_timer.add_timeout(*secs, retain),
+            Some(secs) => rt.retain_timer.add_timeout(*secs as u64, retain),
             None => (),
         }
     }

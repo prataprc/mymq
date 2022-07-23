@@ -17,6 +17,10 @@ pub trait TimeoutValue {
 ///
 /// * log(n) complexity for adding new timeouts.
 /// * log(1) complexity for other operations.
+///
+/// Application shall call [Timer::gc] and [Timer::expired] periodically. If application
+/// have no logic to call [TimeoutValue::delete] on the timer-entry, then there is no
+/// need to call [Timer::gc].
 pub struct Timer<T> {
     instant: time::Instant,
     head: Box<Titem<T>>,
@@ -27,7 +31,7 @@ enum Titem<T> {
         next: Box<Titem<T>>,
     },
     Timeout {
-        delta: u32,
+        delta: u64,
         value: T,
         next: Box<Titem<T>>,
     },
@@ -44,45 +48,10 @@ impl<T> Default for Timer<T> {
 }
 
 impl<T> Timer<T> {
-    pub fn expired(&mut self) -> impl Iterator<Item = T>
-    where
-        T: Clone + TimeoutValue,
-    {
-        let secs = self.instant.elapsed().as_secs() as u32;
-        self.instant += time::Duration::from_secs(secs as u64);
-
-        let mut expired = Vec::new();
-
-        loop {
-            match self.head.take_next() {
-                Titem::Sentinel => {
-                    self.head.set_next(Titem::Sentinel);
-                    break;
-                }
-                Titem::Timeout { delta, value, next } if delta > secs => {
-                    let delta = delta - secs;
-                    let next = Titem::Timeout { delta, value, next };
-                    self.head.set_next(next);
-                    break;
-                }
-                Titem::Timeout { value, next, .. } if value.is_deleted() => {
-                    // quitely remove and ignore this item.
-                    self.head.set_next(*next);
-                }
-                Titem::Timeout { value, next, .. } => {
-                    // exipired, remove and return this item.
-                    expired.push(value);
-                    self.head.set_next(*next);
-                }
-                Titem::Head { .. } => unreachable!(),
-            }
-        }
-
-        expired.into_iter()
-    }
-
-    pub fn add_timeout(&mut self, secs: u32, value: T) {
-        let mut ndelta = secs.saturating_sub(self.instant.elapsed().as_secs() as u32);
+    /// Add a new timer entry, timer entry shall expire after `secs` seconds.
+    pub fn add_timeout(&mut self, secs: u64, value: T) {
+        let micros = (secs as u64) * 1_000_000;
+        let mut ndelta = micros.saturating_sub(self.instant.elapsed().as_micros() as u64);
 
         let mut prev = self.head.as_mut();
         loop {
@@ -109,7 +78,49 @@ impl<T> Timer<T> {
         }
     }
 
-    pub fn gc(&mut self)
+    /// Return an iterator of all expired timer entries. Returned entries shall be
+    /// removed from this timer-list. Pass None for `elapsed`.
+    pub fn expired(&mut self, elapsed: Option<u64>) -> impl Iterator<Item = T>
+    where
+        T: Clone + TimeoutValue,
+    {
+        let micros = elapsed.unwrap_or(self.instant.elapsed().as_micros() as u64);
+        self.instant += time::Duration::from_micros(micros);
+
+        let mut expired = Vec::new();
+
+        loop {
+            match self.head.take_next() {
+                Titem::Sentinel => {
+                    self.head.set_next(Titem::Sentinel);
+                    break;
+                }
+                Titem::Timeout { delta, value, next } if delta > micros => {
+                    let delta = delta - micros;
+                    let next = Titem::Timeout { delta, value, next };
+                    self.head.set_next(next);
+                    break;
+                }
+                Titem::Timeout { value, next, .. } if value.is_deleted() => {
+                    // quitely remove and ignore this item.
+                    self.head.set_next(*next);
+                }
+                Titem::Timeout { value, next, .. } => {
+                    // exipired, remove and return this item.
+                    expired.push(value);
+                    self.head.set_next(*next);
+                }
+                Titem::Head { .. } => unreachable!(),
+            }
+        }
+
+        self.gc();
+
+        expired.into_iter()
+    }
+
+    /// Garbage collect all timer-entries marked as deleted by application.
+    fn gc(&mut self)
     where
         T: TimeoutValue,
     {
@@ -138,7 +149,7 @@ impl<T> Timer<T> {
 }
 
 impl<T> Titem<T> {
-    fn differential(&mut self, ndelta: u32) {
+    fn differential(&mut self, ndelta: u64) {
         match self {
             Titem::Timeout { delta, .. } => *delta = *delta - ndelta,
             _ => unreachable!(),
@@ -153,7 +164,7 @@ impl<T> Titem<T> {
         }
     }
 
-    fn to_delta(&self) -> u32 {
+    fn to_delta(&self) -> u64 {
         match self {
             Titem::Timeout { delta, .. } => *delta,
             _ => unreachable!(),
@@ -174,5 +185,28 @@ impl<T> Titem<T> {
             Titem::Timeout { next, .. } => mem::replace(next, Box::new(new_next)),
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+#[cfg(any(feature = "fuzzy", test))]
+use std::sync::Arc;
+
+#[cfg(any(feature = "fuzzy", test))]
+pub struct TimerEntry {
+    pub value: u32,
+    pub secs: u64,
+    pub deleted: AtomicBool,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl TimeoutValue for Arc<TimerEntry> {
+    fn delete(&self) {
+        self.deleted.store(true, SeqCst)
+    }
+
+    fn is_deleted(&self) -> bool {
+        self.deleted.load(SeqCst)
     }
 }
