@@ -11,6 +11,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Error codes allowed in PUBACK packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PubAckReasonCode {
@@ -28,6 +29,7 @@ pub enum PubAckReasonCode {
 
 /// Error codes allowed in PUBREC packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PubRecReasonCode {
@@ -45,6 +47,7 @@ pub enum PubRecReasonCode {
 
 /// Error codes allowed in PUBREL packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PubRelReasonCode {
@@ -54,6 +57,7 @@ pub enum PubRelReasonCode {
 
 /// Error codes allowed in PUBCOMP packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PubCompReasonCode {

@@ -250,6 +250,7 @@ pub struct PublishProperties {
     pub user_properties: Vec<UserProperty>,
 }
 
+#[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for PublishProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         use crate::types;
