@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::util::advance;
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
@@ -6,6 +12,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::UnsubAck";
 
 /// Error codes allowed in UNSUBACK packet.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UnsubAckReasonCode {
@@ -49,6 +56,24 @@ pub struct UnsubAck {
     pub packet_id: u16,
     pub properties: Option<UnsubAckProperties>,
     pub return_codes: Vec<UnsubAckReasonCode>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for UnsubAck {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let mut return_codes: Vec<UnsubAckReasonCode> = vec![];
+        for _i in 0..((uns.arbitrary::<u8>()? % 32) + 1) {
+            return_codes.push(uns.arbitrary()?)
+        }
+
+        let val = UnsubAck {
+            packet_id: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+            return_codes,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for UnsubAck {
@@ -103,6 +128,15 @@ impl Packetize for UnsubAck {
 }
 
 impl UnsubAck {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -113,6 +147,29 @@ impl UnsubAck {
 pub struct UnsubAckProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for UnsubAckProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let rs_choice: Vec<String> =
+            vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
+        let reason_string = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&rs_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = UnsubAckProperties {
+            reason_string,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for UnsubAckProperties {
@@ -161,5 +218,12 @@ impl Packetize for UnsubAckProperties {
         let data = insert_property_len(data.len(), data)?;
 
         Ok(Blob::Large { data })
+    }
+}
+
+impl UnsubAckProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.reason_string.is_none() && self.user_properties.len() == 0
     }
 }

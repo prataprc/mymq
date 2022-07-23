@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::v5::{FixedHeader, Property, PropertyType};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -10,6 +16,24 @@ pub struct UnSubscribe {
     pub packet_id: u16,
     pub properties: Option<UnSubscribeProperties>,
     pub filters: Vec<TopicFilter>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for UnSubscribe {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let mut filters: Vec<TopicFilter> = vec![];
+        for _i in 0..((uns.arbitrary::<u8>()? % 32) + 1) {
+            filters.push(uns.arbitrary()?)
+        }
+
+        let val = UnSubscribe {
+            packet_id: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+            filters,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for UnSubscribe {
@@ -68,6 +92,15 @@ impl Packetize for UnSubscribe {
 }
 
 impl UnSubscribe {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.filters.len() == 0 {
             err!(ProtocolError, code: ProtocolError, "{} topic filter missing", PP)?
@@ -81,6 +114,27 @@ impl UnSubscribe {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UnSubscribeProperties {
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for UnSubscribeProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = UnSubscribeProperties {
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
+}
+
+impl UnSubscribeProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.user_properties.len() == 0
+    }
 }
 
 impl Packetize for UnSubscribeProperties {

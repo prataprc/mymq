@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -7,6 +13,18 @@ const PP: &'static str = "Packet::Subscribe";
 /// Subscription options carried in SUBSCRIBE Packet
 #[derive(Clone, PartialEq, Debug)]
 pub struct SubscriptionOpt(u8);
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for SubscriptionOpt {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let rfr: RetainForwardRule = uns.arbitrary()?;
+        let rap: bool = uns.arbitrary()?;
+        let nl: bool = uns.arbitrary()?;
+        let qos: QoS = uns.arbitrary()?;
+
+        Ok(SubscriptionOpt::new(rfr, rap, nl, qos))
+    }
+}
 
 impl Packetize for SubscriptionOpt {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
@@ -20,6 +38,7 @@ impl Packetize for SubscriptionOpt {
     }
 
     fn encode(&self) -> Result<Blob> {
+        self.validate()?;
         self.0.encode()
     }
 }
@@ -59,6 +78,7 @@ impl SubscriptionOpt {
 }
 
 /// RetainForwardRule part of Subscription option defined by MQTT spec.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum RetainForwardRule {
     OnEverySubscribe = 0,
@@ -97,6 +117,24 @@ pub struct Subscribe {
     pub packet_id: u16,
     pub properties: Option<SubscribeProperties>,
     pub filters: Vec<SubscribeFilter>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Subscribe {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let mut filters: Vec<SubscribeFilter> = vec![];
+        for _i in 0..((uns.arbitrary::<u8>()? % 32) + 1) {
+            filters.push(uns.arbitrary()?)
+        }
+
+        let val = Subscribe {
+            packet_id: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+            filters,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for Subscribe {
@@ -157,6 +195,15 @@ impl Packetize for Subscribe {
 }
 
 impl Subscribe {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.filters.len() == 0 {
             err!(ProtocolError, code: ProtocolError, "{} missing topic filter", PP)?
@@ -192,6 +239,21 @@ impl Subscribe {
 pub struct SubscribeProperties {
     pub subscription_id: Option<VarU32>,
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for SubscribeProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = SubscribeProperties {
+            subscription_id: uns.arbitrary()?,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for SubscribeProperties {
@@ -248,11 +310,30 @@ impl Packetize for SubscribeProperties {
     }
 }
 
+impl SubscribeProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&mut self) -> bool {
+        self.subscription_id.is_none() && self.user_properties.len() == 0
+    }
+}
+
 /// SubscribeFilter defined in the SUBSCRIBE packet's payload.
 #[derive(Clone, PartialEq, Debug)]
 pub struct SubscribeFilter {
     pub topic_filter: TopicFilter,
     pub opt: SubscriptionOpt,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for SubscribeFilter {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = SubscribeFilter {
+            topic_filter: uns.arbitrary()?,
+            opt: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for SubscribeFilter {
