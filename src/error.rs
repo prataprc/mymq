@@ -1,3 +1,6 @@
+#[cfg(feature = "backtrace")]
+use std::backtrace::Backtrace;
+
 use std::{self, fmt, result};
 
 use crate::Result;
@@ -118,9 +121,6 @@ macro_rules! log_error {
     ($e:ident) => {{
         use log::error;
 
-        #[cfg(feature = "backtrace")]
-        use std::backtrace::BacktraceStatus::*;
-
         error!("{}: {}", $e.kind, $e.description);
         match &$e.cause {
             Some(cause) => error!("cause:{}", cause.to_string()),
@@ -128,10 +128,15 @@ macro_rules! log_error {
         }
 
         #[cfg(feature = "backtrace")]
+        use std::backtrace::BacktraceStatus;
+        #[cfg(feature = "backtrace")]
         match $e.backtrace.status() {
-            Unsupported => error!("[BACKTRACE Unsupported]"),
-            Disabled => error!("[BACKTRACE Disabled]"),
-            Captured => $e.backtrace.frames().for_each(|f| error!("{:?}", f)),
+            BacktraceStatus::Unsupported => error!("[BACKTRACE Unsupported]"),
+            BacktraceStatus::Disabled => error!("[BACKTRACE Disabled]"),
+            BacktraceStatus::Captured => {
+                $e.backtrace.frames().iter().for_each(|f| error!("{:?}", f))
+            }
+            _ => todo!(),
         }
     }};
 }
@@ -171,7 +176,7 @@ pub struct Error {
     pub loc: String,
     /// Call stack at the point where the error happened.
     #[cfg(feature = "backtrace")]
-    pub backtrace: Option<backtrace::Backtrace>,
+    pub backtrace: Backtrace,
 }
 
 impl Default for Error {
@@ -183,7 +188,7 @@ impl Default for Error {
             cause: None,
             loc: String::default(),
             #[cfg(feature = "backtrace")]
-            backtrace: std::backtrace::Backtrace::force_capture(),
+            backtrace: Backtrace::force_capture(),
         }
     }
 }
@@ -221,7 +226,7 @@ impl std::error::Error for Error {
 
     #[cfg(feature = "backtrace")]
     fn backtrace(&self) -> Option<&Backtrace> {
-        self.backtrace.as_ref()
+        Some(&self.backtrace)
     }
 }
 

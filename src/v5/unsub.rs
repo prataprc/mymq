@@ -132,7 +132,7 @@ impl<'a> Arbitrary<'a> for UnSubscribeProperties {
 
 impl UnSubscribeProperties {
     #[cfg(any(feature = "fuzzy", test))]
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.user_properties.len() == 0
     }
 }

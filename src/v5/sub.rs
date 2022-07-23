@@ -312,7 +312,7 @@ impl Packetize for SubscribeProperties {
 
 impl SubscribeProperties {
     #[cfg(any(feature = "fuzzy", test))]
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.subscription_id.is_none() && self.user_properties.len() == 0
     }
 }

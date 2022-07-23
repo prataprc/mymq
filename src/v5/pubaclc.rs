@@ -261,7 +261,7 @@ impl Packetize for PubProperties {
 
             let pt = property.to_property_type();
             if pt != PropertyType::UserProp && dups[pt as usize] {
-                err!(ProtocolError, code: ProtocolError, "duplicate property {:?}", pt)?
+                err!(ProtocolError, code: ProtocolError, "repeat prop {:?}", pt)?
             }
             dups[pt as usize] = true;
 
@@ -299,7 +299,7 @@ impl Packetize for PubProperties {
 
 impl PubProperties {
     #[cfg(any(feature = "fuzzy", test))]
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.reason_string.is_none() && self.user_properties.len() == 0
     }
 }

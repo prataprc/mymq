@@ -1,10 +1,10 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-use std::ops::{Deref, DerefMut};
-
 #[cfg(any(feature = "fuzzy", test))]
 use std::result;
+
+use std::ops::{Deref, DerefMut};
 
 use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
@@ -149,23 +149,48 @@ pub struct ConnectPayload {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Connect {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let user_name = match uns.arbitrary::<u8>()? % 3 {
-            0 => None,
-            1 => Some("".to_string()),
-            2 => Some("usern".to_string()),
-            _ => unreachable!(),
+        let flags: ConnectFlags = uns.arbitrary()?;
+
+        let user_name = if flags.is_username() {
+            match uns.arbitrary::<u8>()? % 2 {
+                0 => Some("".to_string()),
+                1 => Some("usern".to_string()),
+                _ => unreachable!(),
+            }
+        } else {
+            None
         };
-        let password = match uns.arbitrary::<u8>()? % 3 {
-            0 => None,
-            1 => Some("".to_string()),
-            2 => Some("passw".to_string()),
-            _ => unreachable!(),
+        let password = if flags.is_password() {
+            match uns.arbitrary::<u8>()? % 2 {
+                0 => Some("".to_string()),
+                1 => Some("passw".to_string()),
+                _ => unreachable!(),
+            }
+        } else {
+            None
+        };
+
+        let (will_properties, will_topic, will_payload) = match flags.is_will_flag() {
+            true => {
+                let will_props = loop {
+                    let wp = uns.arbitrary::<WillProperties>()?;
+                    if !wp.is_empty() {
+                        break wp;
+                    }
+                };
+                let will_payld: Vec<u8> = match will_props.payload_format_indicator {
+                    PayloadFormat::Binary => uns.arbitrary::<Vec<u8>>()?,
+                    PayloadFormat::Utf8 => "will-payload-as-utf8".to_string().into(),
+                };
+                (Some(will_props), Some(uns.arbitrary::<TopicName>()?), Some(will_payld))
+            }
+            false => (None, None, None),
         };
         let payload = ConnectPayload {
             client_id: uns.arbitrary()?,
-            will_properties: uns.arbitrary()?,
-            will_topic: uns.arbitrary()?,
-            will_payload: uns.arbitrary()?,
+            will_properties,
+            will_topic,
+            will_payload,
             user_name,
             password,
         };
@@ -173,7 +198,7 @@ impl<'a> Arbitrary<'a> for Connect {
         let val = Connect {
             protocol_name: "MQTT".to_string(),
             protocol_version: MqttProtocol::V5,
-            flags: uns.arbitrary()?,
+            flags,
             keep_alive: uns.arbitrary()?,
             properties: uns.arbitrary()?,
             payload,
@@ -186,6 +211,8 @@ impl<'a> Arbitrary<'a> for Connect {
 impl Packetize for Connect {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
+
+        // println!("Connect::decode {:?}", stream);
 
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
@@ -248,8 +275,6 @@ impl Packetize for Connect {
         data.extend_from_slice((*self.payload.client_id).encode()?.as_ref());
         if let Some(will_properties) = &self.payload.will_properties {
             data.extend_from_slice(will_properties.encode()?.as_ref());
-        } else {
-            data.extend_from_slice(VarU32(0).encode()?.as_ref());
         }
         if let Some(will_topic) = &self.payload.will_topic {
             data.extend_from_slice(will_topic.encode()?.as_ref());
@@ -267,11 +292,22 @@ impl Packetize for Connect {
         let fh = FixedHeader::new(PacketType::Connect, VarU32(data.len().try_into()?))?;
         data = insert_fixed_header(fh, data)?;
 
+        // println!("Connect::encode {:?}", data);
+
         Ok(Blob::Large { data })
     }
 }
 
 impl Connect {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.protocol_name != "MQTT" {
             err!(
@@ -493,7 +529,7 @@ impl Packetize for ConnectProperties {
             enc_prop!(data, RequestProblemInformation, val);
         }
         enc_prop!(opt: data, AuthenticationMethod, &self.authentication_method);
-        enc_prop!(opt: data, AuthenticationData, &self.authentication_method);
+        enc_prop!(opt: data, AuthenticationData, &self.authentication_data);
 
         for uprop in self.user_properties.iter() {
             enc_prop!(data, UserProp, uprop)
@@ -535,6 +571,19 @@ impl ConnectProperties {
     pub fn request_problem_info(&self) -> bool {
         self.request_response_info.unwrap_or(true)
     }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&self) -> bool {
+        self.session_expiry_interval.is_none()
+            && self.receive_maximum.is_none()
+            && self.max_packet_size.is_none()
+            && self.topic_alias_max.is_none()
+            && self.request_response_info.is_none()
+            && self.request_problem_info.is_none()
+            && self.authentication_method.is_none()
+            && self.authentication_data.is_none()
+            && self.user_properties.len() == 0
+    }
 }
 
 /// Will Property carried in [ConnectPayload]
@@ -556,12 +605,12 @@ impl<'a> Arbitrary<'a> for WillProperties {
 
         let ct_choice: Vec<String> =
             vec!["", "img/png"].into_iter().map(|s| s.to_string()).collect();
-
         let content_type = match uns.arbitrary::<u8>()? % 2 {
             0 => Some(uns.choose(&ct_choice)?.to_string()),
             1 => None,
             _ => unreachable!(),
         };
+
         let n_user_props = uns.arbitrary::<usize>()? % 4;
         let val = WillProperties {
             will_delay_interval: uns.arbitrary()?,
@@ -662,5 +711,16 @@ impl WillProperties {
 
     pub fn is_utf8(&self) -> bool {
         self.payload_format_indicator == PayloadFormat::Utf8
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&self) -> bool {
+        self.will_delay_interval.is_none()
+            && self.payload_format_indicator == PayloadFormat::Binary
+            && self.message_expiry_interval.is_none()
+            && self.content_type.is_none()
+            && self.response_topic.is_none()
+            && self.correlation_data.is_none()
+            && self.user_properties.len() == 0
     }
 }

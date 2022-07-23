@@ -1,3 +1,6 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
 use std::{cmp, fmt, result};
 
 use crate::util::advance;
@@ -38,9 +41,47 @@ impl Ord for Publish {
     }
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Publish {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let properties: Option<PublishProperties> = uns.arbitrary()?;
+
+        let payload: Option<Vec<u8>> = match uns.arbitrary::<bool>()? {
+            true => match &properties {
+                Some(props) => match props.payload_format_indicator {
+                    PayloadFormat::Binary => Some(uns.arbitrary::<Vec<u8>>()?),
+                    PayloadFormat::Utf8 => Some("payload-as-utf8".to_string().into()),
+                },
+                None => uns.arbitrary()?,
+            },
+            false => None,
+        };
+        let qos = uns.arbitrary()?;
+        let (packet_id, duplicate) = match qos {
+            QoS::AtMostOnce => (None, false),
+            QoS::AtLeastOnce => (Some(uns.arbitrary()?), uns.arbitrary()?),
+            QoS::ExactlyOnce => (Some(uns.arbitrary()?), uns.arbitrary()?),
+        };
+
+        let val = Publish {
+            retain: uns.arbitrary()?,
+            qos,
+            duplicate,
+            topic_name: uns.arbitrary()?,
+            packet_id,
+            properties,
+            payload,
+        };
+
+        Ok(val)
+    }
+}
+
 impl Packetize for Publish {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
+
+        // println!("{:?}", stream);
 
         let (fh, fh_len) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
@@ -100,6 +141,8 @@ impl Packetize for Publish {
             VarU32(data.len().try_into()?),
         )?;
         data = insert_fixed_header(fh, data)?;
+
+        // println!("{:?}", data);
 
         Ok(Blob::Large { data })
     }
@@ -168,6 +211,20 @@ impl Publish {
         Ok(())
     }
 
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
+        if let Some(payload) = &self.payload {
+            if payload.len() == 0 {
+                self.payload = None
+            }
+        }
+    }
+
     pub fn as_topic_name(&self) -> &TopicName {
         &self.topic_name
     }
@@ -193,6 +250,34 @@ pub struct PublishProperties {
     pub user_properties: Vec<UserProperty>,
 }
 
+impl<'a> Arbitrary<'a> for PublishProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let ct_choice: Vec<String> =
+            vec!["", "img/png"].into_iter().map(|s| s.to_string()).collect();
+        let content_type = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&ct_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = PublishProperties {
+            payload_format_indicator: uns.arbitrary()?,
+            message_expiry_interval: uns.arbitrary()?,
+            topic_alias: uns.arbitrary()?,
+            response_topic: uns.arbitrary()?,
+            correlation_data: uns.arbitrary()?,
+            subscribtion_identifier: uns.arbitrary()?,
+            content_type,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
+}
+
 impl Packetize for PublishProperties {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         use crate::v5::Property::*;
@@ -211,7 +296,7 @@ impl Packetize for PublishProperties {
 
             let dup_ok = [PropertyType::UserProp, PropertyType::SubscriptionIdentifier];
             let pt = property.to_property_type();
-            if dup_ok.contains(&pt) && dups[pt as usize] {
+            if !dup_ok.contains(&pt) && dups[pt as usize] {
                 err!(ProtocolError, code: ProtocolError, "{} repeat prop {:?}", PP, pt)?
             }
             dups[pt as usize] = true;
@@ -270,5 +355,17 @@ impl Packetize for PublishProperties {
 impl PublishProperties {
     fn is_payload_utf8(&self) -> bool {
         self.payload_format_indicator.is_utf8()
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&self) -> bool {
+        self.payload_format_indicator == PayloadFormat::Binary
+            && self.message_expiry_interval.is_none()
+            && self.topic_alias.is_none()
+            && self.response_topic.is_none()
+            && self.correlation_data.is_none()
+            && self.subscribtion_identifier.len() == 0
+            && self.content_type.is_none()
+            && self.user_properties.len() == 0
     }
 }

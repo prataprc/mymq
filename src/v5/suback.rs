@@ -233,7 +233,7 @@ impl Packetize for SubAckProperties {
 
 impl SubAckProperties {
     #[cfg(any(feature = "fuzzy", test))]
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.reason_string.is_none() && self.user_properties.len() == 0
     }
 }

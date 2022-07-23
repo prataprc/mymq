@@ -4,6 +4,7 @@
 // TODO: validate()? calls must be wired into all Packetize::{encode, decode}
 //       implementation
 
+#![feature(backtrace_frames)]
 #![feature(backtrace)]
 #![feature(error_iter)]
 

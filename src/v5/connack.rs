@@ -1,3 +1,9 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
 use std::ops::{Deref, DerefMut};
 
 use crate::util::advance;
@@ -28,6 +34,18 @@ impl DerefMut for ConnackFlags {
 impl Default for ConnackFlags {
     fn default() -> ConnackFlags {
         ConnackFlags(0)
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ConnackFlags {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let mut flags = vec![];
+        if uns.arbitrary::<bool>()? {
+            flags.push(Self::SESSION_PRESENT)
+        }
+
+        Ok(ConnackFlags::new(&flags))
     }
 }
 
@@ -71,6 +89,7 @@ impl ConnackFlags {
 }
 
 /// Error codes allowed in CONNACK packet.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum ConnackReasonCode {
@@ -140,6 +159,19 @@ pub struct ConnAck {
     pub properties: Option<ConnAckProperties>,
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ConnAck {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = ConnAck {
+            flags: uns.arbitrary()?,
+            code: uns.arbitrary()?,
+            properties: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
+}
+
 impl ConnAck {
     pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
         ConnAck {
@@ -156,6 +188,15 @@ impl ConnAck {
     pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {
         let flags = ConnackFlags::default();
         ConnAck { flags, code, properties: None }
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
     }
 }
 
@@ -223,6 +264,65 @@ pub struct ConnAckProperties {
     pub authentication_method: Option<String>,
     pub authentication_data: Option<Vec<u8>>,
     pub user_properties: Vec<UserProperty>,
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for ConnAckProperties {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::types;
+
+        let str_choice: Vec<String> =
+            vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
+
+        let assigned_client_identifier = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&str_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let reason_string = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&str_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let response_information = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&str_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let server_reference = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&str_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+        let authentication_method = match uns.arbitrary::<u8>()? % 2 {
+            0 => Some(uns.choose(&str_choice)?.to_string()),
+            1 => None,
+            _ => unreachable!(),
+        };
+
+        let n_user_props = uns.arbitrary::<usize>()? % 4;
+        let val = ConnAckProperties {
+            session_expiry_interval: uns.arbitrary()?,
+            receive_maximum: uns.arbitrary()?,
+            maximum_qos: uns.arbitrary()?,
+            retain_available: uns.arbitrary()?,
+            max_packet_size: uns.arbitrary()?,
+            assigned_client_identifier,
+            topic_alias_max: uns.arbitrary()?,
+            reason_string,
+            wildcard_subscription_available: uns.arbitrary()?,
+            subscription_identifiers_available: uns.arbitrary()?,
+            shared_subscription_available: uns.arbitrary()?,
+            server_keep_alive: uns.arbitrary()?,
+            response_information,
+            server_reference,
+            authentication_method,
+            authentication_data: uns.arbitrary()?,
+            user_properties: types::valid_user_props(uns, n_user_props)?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for ConnAckProperties {
@@ -405,5 +505,28 @@ impl ConnAckProperties {
     /// DEFAULT: true
     pub fn shared_subscription_available(&self) -> bool {
         self.shared_subscription_available.unwrap_or(true)
+    }
+}
+
+impl ConnAckProperties {
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn is_empty(&self) -> bool {
+        self.session_expiry_interval.is_none()
+            && self.receive_maximum.is_none()
+            && self.maximum_qos.is_none()
+            && self.retain_available.is_none()
+            && self.max_packet_size.is_none()
+            && self.assigned_client_identifier.is_none()
+            && self.topic_alias_max.is_none()
+            && self.reason_string.is_none()
+            && self.wildcard_subscription_available.is_none()
+            && self.subscription_identifiers_available.is_none()
+            && self.shared_subscription_available.is_none()
+            && self.server_keep_alive.is_none()
+            && self.response_information.is_none()
+            && self.server_reference.is_none()
+            && self.authentication_method.is_none()
+            && self.authentication_data.is_none()
+            && self.user_properties.len() == 0
     }
 }
