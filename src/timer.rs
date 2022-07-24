@@ -1,6 +1,6 @@
 //! Module implement differential timer.
 
-use std::{mem, time};
+use std::{fmt, mem, result, time};
 
 /// Trait to be implemented by values that are managed by [Timer].
 pub trait TimeoutValue {
@@ -102,7 +102,10 @@ impl<T> Timer<T> {
                     break;
                 }
                 Titem::Timeout { value, next, .. } if value.is_deleted() => {
-                    // quitely remove and ignore this item.
+                    // if test, then return this as well
+                    #[cfg(feature = "fuzzy")]
+                    expired.push(value);
+                    // or quitely remove and ignore this item.
                     self.head.set_next(*next);
                 }
                 Titem::Timeout { value, next, .. } => {
@@ -114,36 +117,75 @@ impl<T> Timer<T> {
             }
         }
 
-        self.gc();
-
         expired.into_iter()
     }
 
     /// Garbage collect all timer-entries marked as deleted by application.
-    fn gc(&mut self)
+    pub fn gc(&mut self) -> impl Iterator<Item = T>
     where
         T: TimeoutValue,
     {
         let mut prev = self.head.as_mut();
+        let mut gced = vec![];
         loop {
             match prev.take_next() {
                 next @ Titem::Sentinel => {
                     prev.set_next(next);
-                    break;
+                    break gced.into_iter();
                 }
                 Titem::Timeout { value, mut next, .. } if value.is_deleted() => {
+                    gced.push(value);
                     let next = mem::replace(&mut next, Box::new(Titem::Sentinel));
                     prev.set_next(*next);
                 }
                 n @ Titem::Timeout { .. } => {
                     prev.set_next(n);
                     prev = match prev {
+                        Titem::Head { next } => next.as_mut(),
                         Titem::Timeout { next, .. } => next.as_mut(),
                         _ => unreachable!(),
                     };
                 }
                 Titem::Head { .. } => unreachable!(),
             }
+        }
+    }
+
+    pub fn close(mut self) -> impl Iterator<Item = T>
+    where
+        T: Clone + TimeoutValue,
+    {
+        let mut node = mem::replace(&mut self.head, Box::new(Titem::Sentinel));
+        let mut values = vec![];
+        loop {
+            node = match *node {
+                Titem::Head { next } => next,
+                Titem::Timeout { value, next, .. } => {
+                    values.push(value);
+                    next
+                }
+                Titem::Sentinel => {
+                    break values.into_iter();
+                }
+            };
+        }
+    }
+
+    pub fn pprint(&self)
+    where
+        T: fmt::Display,
+    {
+        let mut node = self.head.as_ref();
+        loop {
+            node = match node {
+                Titem::Head { next } => next.as_ref(),
+                Titem::Timeout { value, next, delta } => {
+                    let micros = time::Duration::from_micros(*delta);
+                    println!("timevalue {:?} {}", micros, value);
+                    next.as_ref()
+                }
+                Titem::Sentinel => break,
+            };
         }
     }
 }
@@ -198,6 +240,14 @@ pub struct TimerEntry {
     pub value: u32,
     pub secs: u64,
     pub deleted: AtomicBool,
+}
+
+impl fmt::Display for TimerEntry {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let deleted = self.deleted.load(SeqCst);
+        let secs = time::Duration::from_secs(self.secs);
+        write!(f, "TimerEntry<{},{:?},{}>", self.value, secs, deleted)
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
