@@ -5,9 +5,9 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement keep-alive as per MQTT specification.
 pub struct KeepAlive {
-    prefix: String,
-    interval: Option<u16>,
-    alive_at: time::Instant,
+    pub prefix: String,
+    pub interval: Option<u16>,
+    pub alive_at: time::Instant,
 }
 
 impl KeepAlive {
@@ -26,25 +26,25 @@ impl KeepAlive {
         self.interval
     }
 
-    pub fn check_expired(&self) -> Result<()> {
+    pub fn check_expired(&self) -> Result<time::Duration> {
         match self.interval {
             Some(interval) => {
-                let now = time::Duration::from_secs(interval as u64);
-                let inst = self.alive_at + now;
-                if inst < time::Instant::now() {
-                    Ok(())
-                } else {
+                let interval = time::Duration::from_secs(interval as u64);
+                let diff = (self.alive_at + interval) - time::Instant::now();
+                if diff.is_zero() {
                     err!(
                         ProtocolError,
                         code: KeepAliveTimeout,
-                        "{} keep alive expired alive_at:{:?} now:{:?}",
+                        "{} keep alive expired alive_at:{:?} diff:{:?}",
                         self.prefix,
                         self.alive_at,
-                        now
+                        diff
                     )
+                } else {
+                    Ok(diff)
                 }
             }
-            None => Ok(()),
+            None => Ok(time::Duration::from_secs(u64::MAX)),
         }
     }
 
