@@ -11,7 +11,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Subscribe";
 
 /// Subscription options carried in SUBSCRIBE Packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct SubscriptionOpt(u8);
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -79,7 +79,7 @@ impl SubscriptionOpt {
 
 /// RetainForwardRule part of Subscription option defined by MQTT spec.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RetainForwardRule {
     OnEverySubscribe = 0,
     OnNewSubscribe = 1,
@@ -112,7 +112,7 @@ impl From<RetainForwardRule> for u8 {
 }
 
 /// SUBSCRIBE Packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Subscribe {
     pub packet_id: u16,
     pub properties: Option<SubscribeProperties>,
@@ -235,7 +235,7 @@ impl Subscribe {
 }
 
 /// Collection of MQTT properties allowed in SUBSCRIBE packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct SubscribeProperties {
     pub subscription_id: Option<VarU32>,
     pub user_properties: Vec<UserProperty>,
@@ -318,7 +318,7 @@ impl SubscribeProperties {
 }
 
 /// SubscribeFilter defined in the SUBSCRIBE packet's payload.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct SubscribeFilter {
     pub topic_filter: TopicFilter,
     pub opt: SubscriptionOpt,

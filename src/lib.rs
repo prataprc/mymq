@@ -44,7 +44,7 @@ pub use flush::Flusher;
 pub use handshake::Handshake;
 pub use keep_alive::KeepAlive;
 pub use listener::Listener;
-pub use message::{Message, MsgRx, MsgTx};
+pub use message::{msg_channel, ClientInp, ClientOut, Message, MsgRx, MsgTx};
 pub use miot::Miot;
 pub use packet::{MQTTRead, MQTTWrite};
 pub use session::Session;

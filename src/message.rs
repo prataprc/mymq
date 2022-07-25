@@ -1,15 +1,22 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use log::{error, warn};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc};
 
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
+
+#[allow(unused_imports)]
+use crate::Shard;
 use crate::{v5, ClientID, PacketID, QueueStatus, Session};
 
-/// Type implement the tx-handle for a messae-queue.
+/// Type implement the tx-handle for a message-queue.
 #[derive(Clone)]
 pub struct MsgTx {
-    shard_id: u32,                 // message queue for shard.
-    tx: mpsc::SyncSender<Message>, // shard's incoming message queue.
+    shard_id: u32,                 // message queue for shard
+    tx: mpsc::SyncSender<Message>, // shard's incoming message queue
     waker: Arc<mio::Waker>,        // receiving shard's waker
     count: usize,
 }
@@ -49,6 +56,10 @@ impl MsgTx {
                 None => break QueueStatus::Ok(Vec::new()),
             }
         }
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
     }
 }
 
@@ -159,7 +170,7 @@ impl ClientInp {
 }
 
 /// Message is a unit of communication between shards hosted on the same node.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Message {
     /// Message that is periodically published by a session to other local shards.
     LocalAck {
@@ -179,6 +190,43 @@ pub enum Message {
     ///
     /// CONNACK, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP, AUTH packets.
     ClientAck { packet: v5::Packet },
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Message {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = match uns.arbitrary::<u8>()? % 3 {
+            0 => Message::LocalAck {
+                shard_id: uns.arbitrary()?,
+                last_received_ack: uns.arbitrary()?,
+            },
+            1 => Message::Packet {
+                client_id: uns.arbitrary()?,
+                shard_id: uns.arbitrary()?,
+                seqno: uns.arbitrary()?,
+                packet_id: uns.arbitrary()?,
+                subscriptions: uns.arbitrary()?,
+                packet: v5::Packet::Publish(uns.arbitrary()?),
+            },
+            2 => Message::ClientAck {
+                packet: match uns.arbitrary::<u8>()? % 9 {
+                    0 => v5::Packet::ConnAck(uns.arbitrary()?),
+                    1 => v5::Packet::PubAck(uns.arbitrary()?),
+                    2 => v5::Packet::PubRec(uns.arbitrary()?),
+                    3 => v5::Packet::PubRel(uns.arbitrary()?),
+                    4 => v5::Packet::PubComp(uns.arbitrary()?),
+                    5 => v5::Packet::SubAck(uns.arbitrary()?),
+                    6 => v5::Packet::UnsubAck(uns.arbitrary()?),
+                    7 => v5::Packet::PingResp,
+                    8 => v5::Packet::Auth(uns.arbitrary()?),
+                    _ => unreachable!(),
+                },
+            },
+            _ => unreachable!(),
+        };
+
+        Ok(val)
+    }
 }
 
 impl Message {
@@ -261,6 +309,10 @@ impl Message {
     }
 }
 
+/// Create a message-queue for shard `shard_id` that can hold upto `size` messages.
+///
+/// `waker` is attached to the [Shard] thread receiving this messages from the queue.
+/// When MsgTx is dropped, thread will be woken up using `waker`.
 pub fn msg_channel(shard_id: u32, size: usize, waker: Arc<mio::Waker>) -> (MsgTx, MsgRx) {
     let (tx, rx) = mpsc::sync_channel(size);
     let msg_tx = MsgTx { shard_id, tx, waker, count: usize::default() };

@@ -12,7 +12,7 @@ const PP: &'static str = "Packet::Auth";
 
 /// Error codes allowed in AUTH packet.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum AuthReasonCode {
     Success = 0x00,
@@ -34,7 +34,7 @@ impl TryFrom<u8> for AuthReasonCode {
 }
 
 /// AUTH packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Auth {
     pub code: AuthReasonCode,
     pub properties: Option<AuthProperties>,
@@ -104,7 +104,7 @@ impl Auth {
 }
 
 /// Collection of MQTT properties allowed in AUTH packet
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct AuthProperties {
     /// Property::AuthenticationMethod
     pub authentication_method: String,

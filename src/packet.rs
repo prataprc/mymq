@@ -5,6 +5,7 @@ use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement a state machine to asynchronously read from socket using [mio].
+#[derive(Debug)]
 pub enum MQTTRead {
     None,
     Init {
@@ -24,6 +25,7 @@ pub enum MQTTRead {
     },
     Fin {
         data: Vec<u8>,
+        rem: Vec<u8>,
         fh: v5::FixedHeader,
         max_size: usize,
     },
@@ -47,37 +49,45 @@ impl MQTTRead {
     // Disconnected, and implies a bad connection.
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
-    pub fn read<R: io::Read>(self, mut stream: R) -> Result<(Self, bool)> {
+    pub fn read<R: io::Read>(mut self, mut stream: R) -> Result<(Self, bool)> {
         use MQTTRead::{Fin, Header, Init, Remain};
+
+        self = match self.pre_read()? {
+            (val, true) => return Ok((val, false)),
+            (val, false) => val,
+        };
 
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut data, max_size } => match stream.read(&mut scratch) {
                 Ok(0) => err!(Disconnected, desc: "MQTTRead::Init"),
-                Ok(1) => {
-                    data.push(scratch[0]);
-                    let byte1 = scratch[0];
-                    Ok((MQTTRead::Header { byte1, data, max_size }, false))
-                }
                 Ok(n) => {
+                    // println!("MQTTRead::Init datal:{} n:{}", data.len(), n);
                     data.extend_from_slice(&scratch[..n]);
-                    let byte1 = scratch[0];
-                    match scratch[1..n].iter().skip_while(|b| **b >= 0x80).next() {
+                    let byte1 = data[0];
+                    match data[1..].iter().skip_while(|b| **b >= 0x80).next() {
                         Some(_) => {
-                            let (remaining_len, m) = VarU32::decode(&scratch[1..n])?;
+                            let (remaining_len, m) = VarU32::decode(&data[1..])?;
 
                             let pkt_len = 1 + m + (*remaining_len as usize);
                             check_packet_limit(pkt_len, max_size)?;
 
                             let fh = v5::FixedHeader { byte1, remaining_len };
-                            let start = data.len();
-                            data.reserve(pkt_len);
-                            data.resize(pkt_len, 0);
-                            let res = match data.len() {
-                                n if start == n => MQTTRead::Fin { data, fh, max_size },
-                                n if start > n => unreachable!(),
-                                _ => MQTTRead::Remain { data, start, fh, max_size },
+                            // println!("MQTTRead::Init pkt_len:{}", pkt_len);
+                            let res = match pkt_len {
+                                pkt_len if pkt_len <= data.len() => {
+                                    let rem = data[pkt_len..].to_vec();
+                                    data.truncate(pkt_len);
+                                    MQTTRead::Fin { data, rem, fh, max_size }
+                                }
+                                pkt_len => {
+                                    let start = data.len();
+                                    data.reserve(pkt_len);
+                                    data.resize(pkt_len, 0);
+                                    MQTTRead::Remain { data, start, fh, max_size }
+                                }
                             };
+
                             Ok((res, false))
                         }
                         None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
@@ -94,8 +104,9 @@ impl MQTTRead {
             Header { byte1, mut data, max_size } => match stream.read(&mut scratch) {
                 Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header"),
                 Ok(n) => {
+                    // println!("MQTTRead::Header data:{}", data.len());
                     data.extend_from_slice(&scratch[..n]);
-                    match scratch[..n].iter().skip_while(|b| **b >= 0x80).next() {
+                    match data[1..].iter().skip_while(|b| **b >= 0x80).next() {
                         Some(_) => {
                             let (remaining_len, m) = VarU32::decode(&data[1..])?;
 
@@ -103,14 +114,20 @@ impl MQTTRead {
                             check_packet_limit(pkt_len, max_size)?;
 
                             let fh = v5::FixedHeader { byte1, remaining_len };
-                            let start = data.len();
-                            data.reserve(pkt_len);
-                            data.resize(pkt_len, 0);
-                            let res = match data.len() {
-                                n if start == n => MQTTRead::Fin { data, fh, max_size },
-                                n if start > n => unreachable!(),
-                                _ => MQTTRead::Remain { data, start, fh, max_size },
+                            let res = match pkt_len {
+                                pkt_len if pkt_len <= data.len() => {
+                                    let rem = data[pkt_len..].to_vec();
+                                    data.truncate(pkt_len);
+                                    MQTTRead::Fin { data, rem, fh, max_size }
+                                }
+                                pkt_len => {
+                                    let start = data.len();
+                                    data.reserve(pkt_len);
+                                    data.resize(pkt_len, 0);
+                                    MQTTRead::Remain { data, start, fh, max_size }
+                                }
                             };
+
                             Ok((res, false))
                         }
                         None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
@@ -125,11 +142,12 @@ impl MQTTRead {
                 Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Header"),
             },
             Remain { mut data, start, fh, max_size } => {
-                // println!("MQTTRead::Remain::read {} {}", data.len(), start);
+                // println!("MQTTRead::Remain::read data:{} start:{}", data.len(), start);
                 match stream.read(&mut data[start..]) {
                     Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain"),
                     Ok(n) if (start + n) == data.len() => {
-                        Ok((MQTTRead::Fin { data, fh, max_size }, false))
+                        let rem = Vec::new();
+                        Ok((MQTTRead::Fin { data, rem, fh, max_size }, false))
                     }
                     Ok(n) if (start + n) < data.len() => {
                         let start = start + n;
@@ -145,8 +163,8 @@ impl MQTTRead {
                     Ok(_) => unreachable!(),
                 }
             }
-            Fin { data, fh, max_size } => {
-                Ok((MQTTRead::Fin { data, fh, max_size }, false))
+            Fin { data, rem, fh, max_size } => {
+                Ok((MQTTRead::Fin { data, rem, fh, max_size }, false))
             }
             MQTTRead::None => unreachable!(),
         }
@@ -230,11 +248,39 @@ impl MQTTRead {
 
     pub fn reset(self) -> Self {
         match self {
-            MQTTRead::Fin { mut data, max_size, .. } => {
+            MQTTRead::Fin { mut data, rem, max_size, .. } => {
                 data.truncate(0);
+                data.extend(rem.into_iter());
                 MQTTRead::Init { data, max_size }
             }
             _ => unreachable!(),
+        }
+    }
+
+    fn pre_read(self) -> Result<(Self, bool)> {
+        match self {
+            MQTTRead::Init { mut data, max_size } if data.len() > 1 => {
+                let byte1 = data[0];
+                let (remaining_len, m) = match VarU32::decode(&data[1..]) {
+                    Ok((remaining_len, m)) => (remaining_len, m),
+                    Err(_) => return Ok((MQTTRead::Init { data, max_size }, false)),
+                };
+
+                let pkt_len = 1 + m + (*remaining_len as usize);
+                check_packet_limit(pkt_len, max_size)?;
+
+                let fh = v5::FixedHeader { byte1, remaining_len };
+                match pkt_len {
+                    pkt_len if pkt_len <= data.len() => {
+                        // println!("preread ok pkt_len:{} data:{}", pkt_len, data.len());
+                        let rem = data[pkt_len..].to_vec();
+                        data.truncate(pkt_len);
+                        Ok((MQTTRead::Fin { data, rem, fh, max_size }, true))
+                    }
+                    _ => Ok((MQTTRead::Init { data, max_size }, false)),
+                }
+            }
+            val => Ok((val, false)),
         }
     }
 }

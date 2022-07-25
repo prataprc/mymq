@@ -13,7 +13,7 @@ const PP: &'static str = "Packet::SubAck";
 
 /// Error codes allowed in SUBACK packet.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SubAckReasonCode {
     QoS0 = 0x0,
@@ -61,7 +61,7 @@ impl TryFrom<u8> for SubAckReasonCode {
 }
 
 /// SUBACK Packet
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubAck {
     pub packet_id: u16,
     pub properties: Option<SubAckProperties>,
@@ -153,7 +153,7 @@ impl SubAck {
 }
 
 /// Collection of MQTT properties allowed in SUBACK packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct SubAckProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,

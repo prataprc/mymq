@@ -13,7 +13,7 @@ const PP: &'static str = "Packet::UnsubAck";
 
 /// Error codes allowed in UNSUBACK packet.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum UnsubAckReasonCode {
     QoS0 = 0x0,
@@ -51,7 +51,7 @@ impl TryFrom<u8> for UnsubAckReasonCode {
 }
 
 /// UNSUBACK Packet
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct UnsubAck {
     pub packet_id: u16,
     pub properties: Option<UnsubAckProperties>,
@@ -143,7 +143,7 @@ impl UnsubAck {
 }
 
 /// Collection of MQTT properties allowed in UNSUBACK packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct UnsubAckProperties {
     pub reason_string: Option<String>,
     pub user_properties: Vec<UserProperty>,

@@ -5,7 +5,7 @@ use std::{self, fmt, result};
 
 use crate::Result;
 
-/// Short form to compose Error values.
+/// Macro to compose Error values.
 ///
 /// Here are few possible ways:
 ///
@@ -116,6 +116,7 @@ macro_rules! err {
     }};
 }
 
+/// Macro to log error. Suggest using the [err] macro.
 #[cfg_attr(any(feature = "fuzzy", test), macro_export)]
 macro_rules! log_error {
     ($e:ident) => {{

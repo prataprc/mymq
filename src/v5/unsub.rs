@@ -11,7 +11,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::UnSubscribe";
 
 /// UNSUBSCRIBE Packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct UnSubscribe {
     pub packet_id: u16,
     pub properties: Option<UnSubscribeProperties>,
@@ -111,7 +111,7 @@ impl UnSubscribe {
 }
 
 /// Collection of MQTT properties allowed in UNSUBSCRIBE packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct UnSubscribeProperties {
     pub user_properties: Vec<UserProperty>,
 }

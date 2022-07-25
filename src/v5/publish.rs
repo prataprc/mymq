@@ -267,7 +267,7 @@ impl<'a> Arbitrary<'a> for PublishProperties {
         let val = PublishProperties {
             payload_format_indicator: uns.arbitrary()?,
             message_expiry_interval: uns.arbitrary()?,
-            topic_alias: uns.arbitrary()?,
+            topic_alias: uns.arbitrary::<Option<u16>>()?.map(|x| x.saturating_add(1)),
             response_topic: uns.arbitrary()?,
             correlation_data: uns.arbitrary()?,
             subscribtion_identifier: uns.arbitrary()?,

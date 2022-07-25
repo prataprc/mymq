@@ -14,7 +14,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::ConnAck";
 
 /// Flags carried in CONNACK packet.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub struct ConnackFlags(pub u8);
 
 impl Deref for ConnackFlags {
@@ -90,7 +90,7 @@ impl ConnackFlags {
 
 /// Error codes allowed in CONNACK packet.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ConnackReasonCode {
     Success = 0x00,
@@ -152,7 +152,7 @@ impl TryFrom<u8> for ConnackReasonCode {
 }
 
 /// CONNACK packet
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConnAck {
     pub flags: ConnackFlags,
     pub code: ConnackReasonCode,
@@ -245,7 +245,7 @@ impl ConnAck {
 }
 
 /// Collection of MQTT properties allowed in CONNACK packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ConnAckProperties {
     pub session_expiry_interval: Option<u32>,
     pub receive_maximum: Option<u16>,

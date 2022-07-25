@@ -14,7 +14,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Connect";
 
 /// Flags carried by CONNECT packet
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub struct ConnectFlags(pub u8);
 
 impl Deref for ConnectFlags {
@@ -125,7 +125,7 @@ impl ConnectFlags {
 }
 
 /// CONNECT packet
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Connect {
     pub protocol_name: String,
     pub protocol_version: MqttProtocol,
@@ -136,7 +136,7 @@ pub struct Connect {
 }
 
 /// Payload in CONNECT packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ConnectPayload {
     pub client_id: ClientID,
     pub will_properties: Option<WillProperties>,
@@ -404,7 +404,7 @@ impl Connect {
 }
 
 /// Collection of MQTT properties allowed in CONNECT packet
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ConnectProperties {
     pub session_expiry_interval: Option<u32>, // 0=disable, 0xFFFFFFFF=indefinite
     pub receive_maximum: Option<u16>,         // default=65535, can't be ZERO
@@ -587,7 +587,7 @@ impl ConnectProperties {
 }
 
 /// Will Property carried in [ConnectPayload]
-#[derive(Clone, Default, PartialEq, Debug)]
+#[derive(Clone, Default, Eq, PartialEq, Debug)]
 pub struct WillProperties {
     pub will_delay_interval: Option<u32>,
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary

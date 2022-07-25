@@ -131,7 +131,7 @@ pub use unsub::{UnSubscribe, UnSubscribeProperties};
 pub use unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReasonCode};
 
 /// Type captures an active subscription by client.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Subscription {
     /// Uniquely identifies this subscription for the subscribing client. Within entire
     /// cluster, `(client_id, topic_filter)` is uqniue.
@@ -180,6 +180,24 @@ impl PartialOrd for Subscription {
 impl Ord for Subscription {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.partial_cmp(other).unwrap()
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Subscription {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = Subscription {
+            topic_filter: uns.arbitrary()?,
+            client_id: uns.arbitrary()?,
+            shard_id: uns.arbitrary()?,
+            subscription_id: uns.arbitrary()?,
+            qos: uns.arbitrary()?,
+            no_local: uns.arbitrary()?,
+            retain_as_published: uns.arbitrary()?,
+            retain_forward_rule: uns.arbitrary()?,
+        };
+
+        Ok(val)
     }
 }
 
@@ -254,7 +272,7 @@ impl From<PacketType> for u8 {
 }
 
 /// Enumeration of all possible MQTT packets, its header, fields, properties, payload.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Packet {
     Connect(Connect),
     ConnAck(ConnAck),
@@ -419,6 +437,7 @@ impl Packet {
         }
     }
 
+    #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         match self {
             Packet::Connect(val) => val.normalize(),

@@ -14,7 +14,7 @@ const PP: &'static str = "Packet::Disconnect";
 /// Error codes allowed in DISCONNECT packet.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
     DiconnectWillMessage = 0x04,
@@ -95,7 +95,7 @@ impl TryFrom<u8> for DisconnReasonCode {
 }
 
 /// DISCONNECT Packet
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Disconnect {
     pub code: DisconnReasonCode,
     pub properties: Option<DisconnProperties>,
@@ -187,7 +187,7 @@ impl Disconnect {
 }
 
 /// Collection of MQTT properties allowed in DISCONNECT packet
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct DisconnProperties {
     pub session_expiry_interval: Option<u32>,
     pub reason_string: Option<String>,

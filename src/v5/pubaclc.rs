@@ -12,7 +12,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 /// Error codes allowed in PUBACK packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PubAckReasonCode {
     Success = 0x00,
@@ -30,7 +30,7 @@ pub enum PubAckReasonCode {
 /// Error codes allowed in PUBREC packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PubRecReasonCode {
     Success = 0x00,
@@ -48,7 +48,7 @@ pub enum PubRecReasonCode {
 /// Error codes allowed in PUBREL packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PubRelReasonCode {
     Success = 0x00,
@@ -58,7 +58,7 @@ pub enum PubRelReasonCode {
 /// Error codes allowed in PUBCOMP packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum PubCompReasonCode {
     Success = 0x00,
@@ -66,7 +66,7 @@ pub enum PubCompReasonCode {
 }
 
 /// PUBACK, PUBREC, PUBREL, PUBCOMP packets
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Pub {
     pub packet_type: PacketType,
     pub packet_id: u16,
@@ -218,7 +218,7 @@ impl Pub {
 }
 
 /// Collection of MQTT properties in PUBACK, PUBREC, PUBREL, PUBCOMP packets
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct PubProperties {
     /// Property::ReasonString
     pub reason_string: Option<String>,
