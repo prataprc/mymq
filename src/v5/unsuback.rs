@@ -120,7 +120,7 @@ impl Packetize for UnsubAck {
             data.push(code as u8)
         }
 
-        let fh = FixedHeader::new(PacketType::SubAck, VarU32(data.len().try_into()?))?;
+        let fh = FixedHeader::new(PacketType::UnsubAck, VarU32(data.len().try_into()?))?;
         data = insert_fixed_header(fh, data)?;
 
         Ok(Blob::Large { data })

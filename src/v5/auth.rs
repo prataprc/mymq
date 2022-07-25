@@ -94,6 +94,10 @@ impl Packetize for Auth {
 }
 
 impl Auth {
+    pub fn normalize(&mut self) {
+        ()
+    }
+
     fn validate(&self) -> Result<()> {
         Ok(())
     }

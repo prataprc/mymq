@@ -303,7 +303,7 @@ impl<'a> Arbitrary<'a> for ConnAckProperties {
         let n_user_props = uns.arbitrary::<usize>()? % 4;
         let val = ConnAckProperties {
             session_expiry_interval: uns.arbitrary()?,
-            receive_maximum: uns.arbitrary()?,
+            receive_maximum: uns.arbitrary::<Option<u16>>()?.map(|x| x.saturating_add(1)),
             maximum_qos: uns.arbitrary()?,
             retain_available: uns.arbitrary()?,
             max_packet_size: uns.arbitrary()?,

@@ -23,7 +23,7 @@ impl Packetize for PingReq {
     fn encode(&self) -> Result<Blob> {
         let mut data = [0_u8; 32];
 
-        let fh = FixedHeader::new(PacketType::PingResp, VarU32(0))?;
+        let fh = FixedHeader::new(PacketType::PingReq, VarU32(0))?;
         data[..2].copy_from_slice(fh.encode()?.as_ref());
 
         Ok(Blob::Small { data, size: 2 })
@@ -48,7 +48,7 @@ impl Packetize for PingResp {
     fn encode(&self) -> Result<Blob> {
         let mut data = [0_u8; 32];
 
-        let fh = FixedHeader::new(PacketType::PingReq, VarU32(0))?;
+        let fh = FixedHeader::new(PacketType::PingResp, VarU32(0))?;
         data[..2].copy_from_slice(fh.encode()?.as_ref());
 
         Ok(Blob::Small { data, size: 2 })

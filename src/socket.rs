@@ -247,6 +247,8 @@ impl Socket {
 
     // QueueStatus shall not carry any packets
     pub fn flush_packets(&mut self, prefix: &str, config: &Config) -> QueuePkt {
+        use std::io::Write;
+
         let mut pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
         let mut iter = {
             let packets = self.wt.packets.drain(..).collect::<Vec<v5::Packet>>();
@@ -267,7 +269,10 @@ impl Socket {
                         continue;
                     }
                 };
-                pw = pw.reset(blob.as_ref());
+                pw = match self.conn.flush() {
+                    Ok(()) => pw.reset(blob.as_ref()),
+                    Err(_) => break QueueStatus::Disconnected(Vec::new()),
+                };
             } else {
                 break QueueStatus::Ok(Vec::new());
             }

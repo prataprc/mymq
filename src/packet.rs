@@ -62,21 +62,29 @@ impl MQTTRead {
                 Ok(n) => {
                     data.extend_from_slice(&scratch[..n]);
                     let byte1 = scratch[0];
-                    match scratch[1..].iter().skip_while(|b| **b > 0x80).next() {
+                    match scratch[1..n].iter().skip_while(|b| **b >= 0x80).next() {
                         Some(_) => {
-                            let (remaining_len, m) = VarU32::decode(&scratch[1..])?;
+                            let (remaining_len, m) = VarU32::decode(&scratch[1..n])?;
 
                             let pkt_len = 1 + m + (*remaining_len as usize);
-                            read_packet_limit(pkt_len, max_size)?;
+                            check_packet_limit(pkt_len, max_size)?;
 
                             let fh = v5::FixedHeader { byte1, remaining_len };
+                            let start = data.len();
                             data.reserve(pkt_len);
                             data.resize(pkt_len, 0);
-                            let start = n;
-                            Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
+                            let res = match data.len() {
+                                n if start == n => MQTTRead::Fin { data, fh, max_size },
+                                n if start > n => unreachable!(),
+                                _ => MQTTRead::Remain { data, start, fh, max_size },
+                            };
+                            Ok((res, false))
                         }
                         None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
                     }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                    Ok((MQTTRead::Init { data, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTRead::Init { data, max_size }, true))
@@ -87,21 +95,29 @@ impl MQTTRead {
                 Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header"),
                 Ok(n) => {
                     data.extend_from_slice(&scratch[..n]);
-                    let start = data.len();
-                    match scratch.into_iter().skip_while(|b| *b > 0x80).next() {
+                    match scratch[..n].iter().skip_while(|b| **b >= 0x80).next() {
                         Some(_) => {
                             let (remaining_len, m) = VarU32::decode(&data[1..])?;
 
                             let pkt_len = 1 + m + (*remaining_len as usize);
-                            read_packet_limit(pkt_len, max_size)?;
+                            check_packet_limit(pkt_len, max_size)?;
 
                             let fh = v5::FixedHeader { byte1, remaining_len };
+                            let start = data.len();
                             data.reserve(pkt_len);
                             data.resize(pkt_len, 0);
-                            Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
+                            let res = match data.len() {
+                                n if start == n => MQTTRead::Fin { data, fh, max_size },
+                                n if start > n => unreachable!(),
+                                _ => MQTTRead::Remain { data, start, fh, max_size },
+                            };
+                            Ok((res, false))
                         }
                         None => Ok((MQTTRead::Header { byte1, data, max_size }, false)),
                     }
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                    Ok((MQTTRead::Header { byte1, data, max_size }, false))
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTRead::Header { byte1, data, max_size }, true))
@@ -109,6 +125,7 @@ impl MQTTRead {
                 Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Header"),
             },
             Remain { mut data, start, fh, max_size } => {
+                // println!("MQTTRead::Remain::read {} {}", data.len(), start);
                 match stream.read(&mut data[start..]) {
                     Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain"),
                     Ok(n) if (start + n) == data.len() => {
@@ -116,6 +133,9 @@ impl MQTTRead {
                     }
                     Ok(n) if (start + n) < data.len() => {
                         let start = start + n;
+                        Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {
                         Ok((MQTTRead::Remain { data, start, fh, max_size }, false))
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -220,6 +240,7 @@ impl MQTTRead {
 }
 
 /// Type implement a state machine to asynchronously write to socket using [mio].
+#[derive(Debug)]
 pub enum MQTTWrite {
     None,
     Init {
@@ -261,6 +282,9 @@ impl MQTTWrite {
                 // TODO: add skipped packets to connection metrics.
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
+            Init { data, max_size } if data.len() == 0 => {
+                Ok((MQTTWrite::Fin { data, max_size }, false))
+            }
             Init { data, max_size } => match stream.write(&data) {
                 Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Init"),
                 Ok(n) if n == data.len() => {
@@ -278,6 +302,9 @@ impl MQTTWrite {
                 Err(err) => err!(Disconnected, try: Err(err), "MQTTWrite::Init"),
                 Ok(_) => unreachable!(),
             },
+            Remain { data, start, max_size } if data[start..].len() == 0 => {
+                Ok((MQTTWrite::Fin { data, max_size }, false))
+            }
             Remain { data, start, max_size } => match stream.write(&data[start..]) {
                 Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Remain"),
                 Ok(n) if (start + n) == data.len() => {
@@ -303,7 +330,8 @@ impl MQTTWrite {
 
     pub fn reset(self, buf: &[u8]) -> Self {
         match self {
-            MQTTWrite::Fin { mut data, max_size } => {
+            MQTTWrite::Init { mut data, max_size }
+            | MQTTWrite::Fin { mut data, max_size } => {
                 data.truncate(0);
                 data.extend_from_slice(buf);
                 MQTTWrite::Init { data, max_size }
@@ -383,7 +411,7 @@ pub fn send_connack(
     }
 }
 
-fn read_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
+fn check_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
     if pkt_len > max_size {
         err!(
             MalformedPacket,

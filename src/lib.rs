@@ -46,6 +46,7 @@ pub use keep_alive::KeepAlive;
 pub use listener::Listener;
 pub use message::{Message, MsgRx, MsgTx};
 pub use miot::Miot;
+pub use packet::{MQTTRead, MQTTWrite};
 pub use session::Session;
 pub use shard::Shard;
 pub use socket::{PktRx, PktTx, Socket};

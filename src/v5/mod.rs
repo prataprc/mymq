@@ -273,6 +273,41 @@ pub enum Packet {
     Auth(Auth),
 }
 
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Packet {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let pkt_type: PacketType = uns.arbitrary()?;
+        let pkt = match pkt_type {
+            PacketType::Connect => Packet::Connect(uns.arbitrary()?),
+            PacketType::ConnAck => Packet::ConnAck(uns.arbitrary()?),
+            PacketType::Publish => Packet::Publish(uns.arbitrary()?),
+            PacketType::PubAck
+            | PacketType::PubRec
+            | PacketType::PubRel
+            | PacketType::PubComp => {
+                let pkt: Pub = uns.arbitrary()?;
+                match pkt.packet_type {
+                    PacketType::PubAck => Packet::PubAck(pkt),
+                    PacketType::PubRec => Packet::PubRec(pkt),
+                    PacketType::PubRel => Packet::PubRel(pkt),
+                    PacketType::PubComp => Packet::PubComp(pkt),
+                    _ => unreachable!(),
+                }
+            }
+            PacketType::Subscribe => Packet::Subscribe(uns.arbitrary()?),
+            PacketType::SubAck => Packet::SubAck(uns.arbitrary()?),
+            PacketType::UnSubscribe => Packet::UnSubscribe(uns.arbitrary()?),
+            PacketType::UnsubAck => Packet::UnsubAck(uns.arbitrary()?),
+            PacketType::PingReq => Packet::PingReq,
+            PacketType::PingResp => Packet::PingResp,
+            PacketType::Disconnect => Packet::Disconnect(uns.arbitrary()?),
+            PacketType::Auth => Packet::Auth(uns.arbitrary()?),
+        };
+
+        Ok(pkt)
+    }
+}
+
 impl Packetize for Packet {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
@@ -381,6 +416,26 @@ impl Packet {
             Packet::PingResp => PacketType::PingResp,
             Packet::Disconnect(_) => PacketType::Disconnect,
             Packet::Auth(_) => PacketType::Auth,
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        match self {
+            Packet::Connect(val) => val.normalize(),
+            Packet::ConnAck(val) => val.normalize(),
+            Packet::Publish(val) => val.normalize(),
+            Packet::PubAck(val) => val.normalize(),
+            Packet::PubRec(val) => val.normalize(),
+            Packet::PubRel(val) => val.normalize(),
+            Packet::PubComp(val) => val.normalize(),
+            Packet::Subscribe(val) => val.normalize(),
+            Packet::SubAck(val) => val.normalize(),
+            Packet::UnSubscribe(val) => val.normalize(),
+            Packet::UnsubAck(val) => val.normalize(),
+            Packet::PingReq => (),
+            Packet::PingResp => (),
+            Packet::Disconnect(val) => val.normalize(),
+            Packet::Auth(val) => val.normalize(),
         }
     }
 }

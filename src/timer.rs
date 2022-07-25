@@ -1,6 +1,6 @@
 //! Module implement differential timer.
 
-use std::{fmt, mem, result, time};
+use std::{fmt, mem, time};
 
 /// Trait to be implemented by values that are managed by [Timer].
 pub trait TimeoutValue {
@@ -233,7 +233,7 @@ impl<T> Titem<T> {
 #[cfg(any(feature = "fuzzy", test))]
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 #[cfg(any(feature = "fuzzy", test))]
-use std::sync::Arc;
+use std::{result, sync::Arc};
 
 #[cfg(any(feature = "fuzzy", test))]
 pub struct TimerEntry {
@@ -242,6 +242,7 @@ pub struct TimerEntry {
     pub deleted: AtomicBool,
 }
 
+#[cfg(any(feature = "fuzzy", test))]
 impl fmt::Display for TimerEntry {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         let deleted = self.deleted.load(SeqCst);
