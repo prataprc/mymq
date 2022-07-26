@@ -146,6 +146,7 @@ macro_rules! log_error {
 ///
 /// Before that, log the error, send "panic" message to application's back channel and
 /// then panic. `self` is the context type in which panic happens.
+#[cfg(feature = "broker")]
 macro_rules! allow_panic {
     ($self:expr, $($args:expr),+) => {{
         use log::error;

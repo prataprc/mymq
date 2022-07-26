@@ -9,7 +9,8 @@ use log::warn;
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use crate::{Error, ErrorKind, QueueStatus, Result};
+use crate::broker::QueueStatus;
+use crate::{Error, ErrorKind, Result};
 
 pub type QueueReq<Q, R> = QueueStatus<(Q, Option<mpsc::Sender<R>>)>;
 

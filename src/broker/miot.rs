@@ -4,13 +4,15 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::{mem, net, time};
 
-use crate::packet::{MQTTRead, MQTTWrite};
-use crate::thread::{Rx, Thread, Threadable};
-use crate::{socket, AppTx, ClientID, Config, QueueStatus, Shard, Socket};
+use crate::broker::packet::{MQTTRead, MQTTWrite};
+use crate::broker::thread::{Rx, Thread, Threadable};
+use crate::broker::{socket, AppTx, QueueStatus, Shard, Socket};
+
+use crate::{ClientID, Config};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
-type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
+type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
 /// Type handle sending and receiving of raw MQTT packets.
 ///
@@ -229,9 +231,11 @@ impl Threadable for Miot {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
+        use crate::broker::POLL_EVENTS_SIZE;
+
         info!("{} spawn ...", self.prefix);
 
-        let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
+        let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
@@ -284,10 +288,10 @@ impl Miot {
 
     // Return (queue-status, exit)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::thread::pending_requests;
+        use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, rx, crate::CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 

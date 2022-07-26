@@ -1,3 +1,5 @@
+//! Helper functions.
+
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 // TODO: validate whether this is what the specification means.

@@ -394,7 +394,7 @@ pub fn send_disconnect(
     timeout: time::Instant,
     max_size: u32,
 ) -> Result<()> {
-    use crate::SLEEP_10MS;
+    use crate::broker::SLEEP_10MS;
 
     let dc = v5::Disconnect::new(code, None);
     let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
@@ -429,7 +429,7 @@ pub fn send_connack(
     timeout: time::Instant,
     max_size: u32,
 ) -> Result<()> {
-    use crate::SLEEP_10MS;
+    use crate::broker::SLEEP_10MS;
 
     let cack = v5::ConnAck::from_reason_code(code);
     let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);

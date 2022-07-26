@@ -3,14 +3,16 @@ use uuid::Uuid;
 
 use std::{cmp, collections::BTreeMap, mem, net, sync::Arc};
 
-use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{message, session, socket, v5};
-use crate::{AppTx, ClientID, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket, TopicName};
+use crate::broker::thread::{Rx, Thread, Threadable, Tx};
+use crate::broker::{message, session, socket};
+use crate::broker::{AppTx, RetainedTrie, Session, Shardable, SubscribedTrie};
+use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
+
+use crate::{v5, ClientID, Config, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
-type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
+type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
 /// Type is the workhorse of MQTT, and shall host one or more sessions.
 ///
@@ -380,6 +382,7 @@ impl Threadable for Shard {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
+        use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
         info!("{} spawn ...", self.prefix);
@@ -399,7 +402,7 @@ impl Threadable for Shard {
             _ => unreachable!(),
         };
 
-        let mut events = mio::Events::with_capacity(crate::POLL_EVENTS_SIZE);
+        let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
@@ -469,10 +472,10 @@ impl Shard {
 impl Shard {
     // Return (queue-status, disconnected)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::thread::pending_requests;
+        use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
@@ -702,7 +705,7 @@ impl Shard {
     }
 
     fn handle_add_session(&mut self, req: Request) -> Response {
-        use crate::{miot::AddConnectionArgs, session::SessionArgs};
+        use crate::broker::{miot::AddConnectionArgs, session::SessionArgs};
 
         let AddSessionArgs { conn, addr, pkt } = match req {
             Request::AddSession(args) => args,
@@ -801,7 +804,7 @@ impl Shard {
     }
 
     fn handle_flush_connection(&mut self, req: Request) -> Response {
-        use crate::flush::FlushConnectionArgs;
+        use crate::broker::flush::FlushConnectionArgs;
 
         let (socket, err) = match req {
             Request::FlushConnection { socket, err } => (socket, err),

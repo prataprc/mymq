@@ -9,8 +9,11 @@ use std::sync::{mpsc, Arc};
 use std::result;
 
 #[allow(unused_imports)]
-use crate::Shard;
-use crate::{v5, ClientID, PacketID, QueueStatus, Session};
+use crate::broker::Shard;
+
+use crate::broker::{QueueStatus, Session};
+
+use crate::{v5, ClientID, PacketID};
 
 /// Type implement the tx-handle for a message-queue.
 #[derive(Clone)]

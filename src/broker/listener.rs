@@ -3,12 +3,14 @@ use mio::event::Events;
 
 use std::{net, sync::Arc, time};
 
-use crate::thread::{Rx, Thread, Threadable};
-use crate::{AppTx, Cluster, Config, QueueStatus};
+use crate::broker::thread::{Rx, Thread, Threadable};
+use crate::broker::{AppTx, Cluster, QueueStatus};
+
+use crate::Config;
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
-type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
+type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
 /// Type binds to MQTT port and listens for incoming connection.
 ///
@@ -175,9 +177,11 @@ impl Threadable for Listener {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
+        use crate::broker::POLL_EVENTS_SIZE;
+
         info!("{}, spawn thread port:{} ...", self.prefix, self.port);
 
-        let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
+        let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
@@ -240,10 +244,10 @@ impl Listener {
 
     // return (queue-status, exit)
     fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
-        use crate::thread::pending_requests;
+        use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, rx, crate::CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
@@ -263,7 +267,7 @@ impl Listener {
     }
 
     fn accept_conn(&mut self) -> QueueStatus<()> {
-        use crate::Handshake;
+        use crate::broker::Handshake;
         use std::io;
 
         let (server, cluster) = match &self.inner {

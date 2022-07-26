@@ -1,6 +1,7 @@
 use std::{borrow::Borrow, sync::Arc};
 
-use crate::{v5, v5::Subscription, IterTopicPath, Spinlock};
+use crate::broker::Spinlock;
+use crate::{v5, v5::Subscription, IterTopicPath};
 
 /// Type implement a MVCC trie for managing topic-subscriptions.
 ///

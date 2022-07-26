@@ -5,11 +5,12 @@ use uuid::Uuid;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, mpsc, Arc};
 use std::{collections::BTreeMap, net, path, time};
 
-use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{rebalance, ticker, timer, util, v5};
-use crate::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie, Timer};
-use crate::{Flusher, Listener, QueueStatus, Shard, Ticker, TopicName};
+use crate::broker::thread::{Rx, Thread, Threadable, Tx};
+use crate::broker::{rebalance, ticker};
+use crate::broker::{AppTx, Hostable, RetainedTrie, SubscribedTrie};
+use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
 
+use crate::{util, v5, Config, ConfigNode, Timer, TopicName};
 use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
@@ -21,7 +22,7 @@ use crate::{Error, ErrorKind, Result};
 // TODO: Handle retain-messages in Will, Publish, Subscribe scenarios, retain_available.
 
 type ThreadRx = Rx<Request, Result<Response>>;
-type QueueReq = crate::thread::QueueReq<Request, Result<Response>>;
+type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
 /// Type is the entry point to start/restart an MQTT instance.
 pub struct Cluster {
@@ -217,7 +218,7 @@ impl Cluster {
             for shard_id in 0..self.config.num_shards() {
                 let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = {
-                    let args = crate::shard::SpawnArgs {
+                    let args = crate::broker::shard::SpawnArgs {
                         cluster: cluster_tx,
                         flusher: flusher_tx.to_tx(),
                         topic_filters: topic_filters.clone(),
@@ -373,6 +374,8 @@ impl Threadable for Cluster {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
+        use crate::broker::POLL_EVENTS_SIZE;
+
         info!(
             "{} spawn max_nodes:{} num_shards:{} ...",
             self.prefix,
@@ -385,7 +388,7 @@ impl Threadable for Cluster {
             retain_topics: BTreeMap::default(),
         };
 
-        let mut events = Events::with_capacity(crate::POLL_EVENTS_SIZE);
+        let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
@@ -445,10 +448,10 @@ impl Cluster {
     // Return (queue-status, exit)
     // IPCFail,
     fn drain_control_chan(&mut self, rx: &ThreadRx, rt: &mut Rt) -> (QueueReq, bool) {
-        use crate::thread::pending_requests;
+        use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let mut status = pending_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
+        let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
         debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
@@ -590,7 +593,7 @@ impl Cluster {
 
     // Errors - IPCFail,
     fn handle_add_connection(&mut self, req: Request) -> Response {
-        use crate::shard::AddSessionArgs;
+        use crate::broker::shard::AddSessionArgs;
 
         let AddConnectionArgs { conn, addr, pkt: connect } = match req {
             Request::AddConnection(args) => args,
@@ -814,7 +817,7 @@ pub struct Retain {
     deleted: AtomicBool,
 }
 
-impl timer::TimeoutValue for Arc<Retain> {
+impl crate::timer::TimeoutValue for Arc<Retain> {
     fn delete(&self) {
         self.deleted.store(true, SeqCst);
     }

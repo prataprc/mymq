@@ -1,6 +1,14 @@
 build:
+	cargo build
+	cargo build --no-default-features --features client
+	cargo build --no-default-features --features broker
+	cargo build --no-default-features --features backtrace,fuzzy
 
 test:
+	cargo test
+	cargo test --no-default-features --features client
+	cargo test --no-default-features --features broker
+	cargo test --no-default-features --features backtrace,fuzzy
 
 bench:
 

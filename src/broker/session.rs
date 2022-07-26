@@ -3,10 +3,12 @@ use log::{debug, error, trace};
 use std::collections::{BTreeMap, VecDeque};
 use std::{cmp, net};
 
-use crate::{message, v5};
-use crate::{ClientID, Config, PacketID, SubscribedTrie, TopicFilter, TopicName};
+use crate::broker::message;
+use crate::broker::SubscribedTrie;
+use crate::broker::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
+
+use crate::{v5, ClientID, Config, PacketID, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
 
 type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;

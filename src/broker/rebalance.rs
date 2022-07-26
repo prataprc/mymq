@@ -34,7 +34,8 @@
 //! * Demotion of master shard as replica-shard.
 //! * Promotion of replica-shard as master-shard.
 
-use crate::{Config, Node};
+use crate::broker::Node;
+use crate::Config;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Topology {

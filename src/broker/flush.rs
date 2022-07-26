@@ -2,8 +2,10 @@ use log::{debug, error, info, trace, warn};
 
 use std::{thread, time};
 
-use crate::thread::{Rx, Thread, Threadable, Tx};
-use crate::{v5, AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
+use crate::broker::thread::{Rx, Thread, Threadable, Tx};
+use crate::broker::{AppTx, QueueStatus, Socket, SLEEP_10MS};
+
+use crate::{v5, Config};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -175,14 +177,14 @@ impl Threadable for Flusher {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
-        use crate::thread::get_requests;
+        use crate::broker::{thread::get_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
         let flush_timeout = self.config.mqtt_flush_timeout();
         info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
 
         'outer: loop {
-            let mut status = get_requests(&self.prefix, &rx, crate::CONTROL_CHAN_SIZE);
+            let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
             let reqs = status.take_values();
             debug!("{} process {} requests closed:false", self.prefix, reqs.len());
 
@@ -221,7 +223,7 @@ impl Threadable for Flusher {
 
 impl Flusher {
     fn handle_flush_connection(&self, req: Request) -> Response {
-        use crate::packet::send_disconnect;
+        use crate::broker::packet::send_disconnect;
 
         let now = time::Instant::now();
         let max_size = self.config.mqtt_max_packet_size();
