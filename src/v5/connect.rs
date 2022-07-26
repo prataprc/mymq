@@ -142,8 +142,8 @@ pub struct ConnectPayload {
     pub will_properties: Option<WillProperties>,
     pub will_topic: Option<TopicName>,
     pub will_payload: Option<Vec<u8>>,
-    pub user_name: Option<String>,
-    pub password: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<Vec<u8>>,
 }
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -151,7 +151,7 @@ impl<'a> Arbitrary<'a> for Connect {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let flags: ConnectFlags = uns.arbitrary()?;
 
-        let user_name = if flags.is_username() {
+        let username = if flags.is_username() {
             match uns.arbitrary::<u8>()? % 2 {
                 0 => Some("".to_string()),
                 1 => Some("usern".to_string()),
@@ -162,8 +162,8 @@ impl<'a> Arbitrary<'a> for Connect {
         };
         let password = if flags.is_password() {
             match uns.arbitrary::<u8>()? % 2 {
-                0 => Some("".to_string()),
-                1 => Some("passw".to_string()),
+                0 => Some("".as_bytes().to_vec()),
+                1 => Some("passw".as_bytes().to_vec()),
                 _ => unreachable!(),
             }
         } else {
@@ -191,7 +191,7 @@ impl<'a> Arbitrary<'a> for Connect {
             will_properties,
             will_topic,
             will_payload,
-            user_name,
+            username,
             password,
         };
 
@@ -232,8 +232,8 @@ impl Packetize for Connect {
         let (will_properties, n) = dec_props!(WillProperties, stream, n; will_flag);
         let (will_topic, n) = dec_field!(TopicName, stream, n; will_flag);
         let (will_payload, n) = dec_field!(Vec<u8>, stream, n; will_flag);
-        let (user_name, n) = dec_field!(String, stream, n; flags.is_username());
-        let (password, n) = dec_field!(String, stream, n; flags.is_password());
+        let (username, n) = dec_field!(String, stream, n; flags.is_username());
+        let (password, n) = dec_field!(Vec<u8>, stream, n; flags.is_password());
 
         let val = Connect {
             protocol_name,
@@ -246,7 +246,7 @@ impl Packetize for Connect {
                 will_properties,
                 will_topic,
                 will_payload,
-                user_name,
+                username,
                 password,
             },
         };
@@ -282,8 +282,8 @@ impl Packetize for Connect {
         if let Some(will_payload) = &self.payload.will_payload {
             data.extend_from_slice(will_payload.encode()?.as_ref());
         }
-        if let Some(user_name) = &self.payload.user_name {
-            data.extend_from_slice(user_name.encode()?.as_ref());
+        if let Some(username) = &self.payload.username {
+            data.extend_from_slice(username.encode()?.as_ref());
         }
         if let Some(password) = &self.payload.password {
             data.extend_from_slice(password.encode()?.as_ref());
