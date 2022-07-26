@@ -49,7 +49,7 @@ pub use miot::Miot;
 pub use packet::{MQTTRead, MQTTWrite};
 pub use session::Session;
 pub use shard::Shard;
-pub use socket::{PktRx, PktTx, Socket};
+pub use socket::{pkt_channel, PktRx, PktTx, Socket};
 pub use spinlock::Spinlock;
 pub use thread::{Rx, Thread, Threadable, Tx};
 pub use ticker::Ticker;

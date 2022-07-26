@@ -321,6 +321,10 @@ impl Socket {
     }
 }
 
+/// Create a packet-queue for shard/miot that can hold upto `size` packets.
+///
+/// `waker` is attached to the thread receiving this messages from the queue.
+/// When PktTx is dropped, thread will be woken up using `waker`.
 pub fn pkt_channel(miot_id: u32, size: usize, waker: Arc<mio::Waker>) -> (PktTx, PktRx) {
     let (tx, rx) = mpsc::sync_channel(size);
     let pkt_tx = PktTx { miot_id, tx, waker, count: usize::default() };
