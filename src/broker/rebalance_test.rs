@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use super::*;
 
 #[test]
@@ -10,8 +12,12 @@ fn test_session_to_shard() {
         config: Config::default(),
         algo: Algorithm::SingleNode,
     };
-    for _ in 0..num_sessions {
-        let off = Rebalancer::session_partition(&uuid::Uuid::new_v4(), num_shards);
+    for off in (0..num_sessions)
+        .into_par_iter()
+        .map(|_| Rebalancer::session_partition(&uuid::Uuid::new_v4(), num_shards))
+        .collect::<Vec<u32>>()
+        .into_iter()
+    {
         shards[off as usize] += 1;
     }
 
