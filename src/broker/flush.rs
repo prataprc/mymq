@@ -223,7 +223,7 @@ impl Threadable for Flusher {
 
 impl Flusher {
     fn handle_flush_connection(&self, req: Request) -> Response {
-        use crate::broker::packet::send_disconnect;
+        use crate::packet::send_disconnect;
 
         let now = time::Instant::now();
         let max_size = self.config.mqtt_max_packet_size();

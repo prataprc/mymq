@@ -363,6 +363,12 @@ impl Deref for VarU32 {
     }
 }
 
+impl From<VarU32> for u32 {
+    fn from(val: VarU32) -> u32 {
+        val.0
+    }
+}
+
 impl Packetize for VarU32 {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         use std::{cmp, mem};

@@ -1,16 +1,16 @@
+# TODO: add cargo build/test for binary artifacts.
+
 build:
 	cargo build
 	cargo build --no-default-features --features client
 	cargo build --no-default-features --features broker
 	cargo build --no-default-features --features backtrace,fuzzy
-	cargo build --all-features
 
 test:
 	cargo test
 	cargo test --no-default-features --features client
 	cargo test --no-default-features --features broker
 	cargo test --no-default-features --features backtrace,fuzzy
-	cargo test --all-features
 
 bench:
 

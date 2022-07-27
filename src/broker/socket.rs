@@ -3,10 +3,9 @@ use log::{error, trace, warn};
 use std::sync::{mpsc, Arc};
 use std::{collections::VecDeque, mem, net, time};
 
-use crate::broker::packet::{MQTTRead, MQTTWrite};
 use crate::broker::QueueStatus;
 
-use crate::{v5, ClientID, Config, Packetize};
+use crate::{v5, ClientID, Config, MQTTRead, MQTTWrite, Packetize};
 use crate::{ErrorKind, Result};
 
 pub type QueuePkt = QueueStatus<v5::Packet>;
@@ -176,7 +175,7 @@ impl Socket {
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
     fn read_packet(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
-        use crate::broker::packet::MQTTRead::{Fin, Header, Init, Remain};
+        use crate::MQTTRead::{Fin, Header, Init, Remain};
 
         let disconnected = QueuePkt::Disconnected(Vec::new());
 
@@ -288,7 +287,7 @@ impl Socket {
 
     // QueueStatus shall not carry any packets
     fn write_packet(&mut self, prefix: &str, config: &Config) -> QueuePkt {
-        use crate::broker::packet::MQTTWrite::{Fin, Init, Remain};
+        use crate::MQTTWrite::{Fin, Init, Remain};
 
         let timeout = config.mqtt_write_timeout();
         let pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());

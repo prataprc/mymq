@@ -12,6 +12,7 @@ name = "play"
 required-features = ["play"]
 
 [dependencies]
+# TODO: split the dependency between "broker" and "client" features.
 log = "0.4.17"
 rand = { version = "0.8.5", features = ["std_rng"] }
 uuid = { version = "1.1.2", features = ["v4"] }

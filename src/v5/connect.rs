@@ -77,6 +77,12 @@ impl Packetize for ConnectFlags {
     }
 }
 
+impl Default for ConnectFlags {
+    fn default() -> ConnectFlags {
+        ConnectFlags::new(&[ConnectFlags::CLEAN_START])
+    }
+}
+
 impl ConnectFlags {
     pub const CLEAN_START: ConnectFlags = ConnectFlags(0b_0000_0010);
     pub const WILL_FLAG: ConnectFlags = ConnectFlags(0b_0000_0100);
@@ -144,6 +150,39 @@ pub struct ConnectPayload {
     pub will_payload: Option<Vec<u8>>,
     pub username: Option<String>,
     pub password: Option<Vec<u8>>,
+}
+
+impl Default for Connect {
+    fn default() -> Connect {
+        Connect {
+            protocol_name: "MQTT".to_string(),
+            protocol_version: MqttProtocol::V5,
+            flags: ConnectFlags::default(),
+            keep_alive: 0,
+            properties: None,
+            payload: ConnectPayload {
+                client_id: ClientID::new_uuid_v4(),
+                will_properties: None,
+                will_topic: None,
+                will_payload: None,
+                username: None,
+                password: None,
+            },
+        }
+    }
+}
+
+impl Default for ConnectPayload {
+    fn default() -> ConnectPayload {
+        ConnectPayload {
+            client_id: ClientID::new_uuid_v4(),
+            will_properties: None,
+            will_topic: None,
+            will_payload: None,
+            username: None,
+            password: None,
+        }
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -299,11 +338,15 @@ impl Packetize for Connect {
 }
 
 impl Connect {
-    #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
-        if let Some(props) = &mut self.properties {
+        if let Some(props) = &self.properties {
             if props.is_empty() {
                 self.properties = None
+            }
+        }
+        if let Some(props) = &self.payload.will_properties {
+            if props.is_empty() {
+                self.payload.will_properties = None
             }
         }
     }
@@ -572,7 +615,6 @@ impl ConnectProperties {
         self.request_response_info.unwrap_or(true)
     }
 
-    #[cfg(any(feature = "fuzzy", test))]
     pub fn is_empty(&self) -> bool {
         self.session_expiry_interval.is_none()
             && self.receive_maximum.is_none()
@@ -713,7 +755,6 @@ impl WillProperties {
         self.payload_format_indicator == PayloadFormat::Utf8
     }
 
-    #[cfg(any(feature = "fuzzy", test))]
     pub fn is_empty(&self) -> bool {
         self.will_delay_interval.is_none()
             && self.payload_format_indicator == PayloadFormat::Binary

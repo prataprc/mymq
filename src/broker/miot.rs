@@ -4,11 +4,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::{mem, net, time};
 
-use crate::broker::packet::{MQTTRead, MQTTWrite};
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{socket, AppTx, QueueStatus, Shard, Socket};
 
-use crate::{ClientID, Config};
+use crate::{ClientID, Config, MQTTRead, MQTTWrite};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;

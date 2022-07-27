@@ -2,11 +2,10 @@ use log::{error, info};
 
 use std::{net, thread, time};
 
-use crate::broker::packet::{send_connack, MQTTRead};
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, SLEEP_10MS};
 
-use crate::{v5, Config};
+use crate::{v5, Config, MQTTRead};
 use crate::{Error, ErrorKind, ReasonCode};
 
 /// Type handles incoming connection.
@@ -28,6 +27,7 @@ impl Threadable for Handshake {
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         use crate::broker::cluster::AddConnectionArgs;
+        use crate::packet::send_connack;
 
         let now = time::Instant::now();
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);

@@ -159,6 +159,16 @@ pub struct ConnAck {
     pub properties: Option<ConnAckProperties>,
 }
 
+impl Default for ConnAck {
+    fn default() -> ConnAck {
+        ConnAck {
+            flags: ConnackFlags::default(),
+            code: ConnackReasonCode::Success,
+            properties: None,
+        }
+    }
+}
+
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for ConnAck {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
