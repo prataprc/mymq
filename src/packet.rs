@@ -49,7 +49,7 @@ impl MQTTRead {
     // Disconnected, and implies a bad connection.
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
-    pub fn read<R: io::Read>(mut self, mut stream: R) -> Result<(Self, bool)> {
+    pub fn read<R: io::Read>(mut self, stream: &mut R) -> Result<(Self, bool)> {
         use MQTTRead::{Fin, Header, Init, Remain};
 
         self = match self.pre_read()? {
@@ -319,7 +319,7 @@ impl MQTTWrite {
 
     // return (self,would_block)
     // errors shall be folded as Disconnected, and implies a bad connection.
-    pub fn write<W: io::Write>(self, mut stream: W) -> Result<(Self, bool)> {
+    pub fn write<W: io::Write>(self, stream: &mut W) -> Result<(Self, bool)> {
         use MQTTWrite::{Fin, Init, Remain};
 
         match self {
@@ -387,13 +387,16 @@ impl MQTTWrite {
     }
 }
 
-pub fn send_disconnect(
+pub fn send_disconnect<W>(
     prefix: &str,
     code: v5::DisconnReasonCode,
-    conn: &mio::net::TcpStream,
+    conn: &mut W,
     timeout: time::Instant,
     max_size: u32,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: io::Write,
+{
     use crate::broker::SLEEP_10MS;
 
     let dc = v5::Disconnect::new(code, None);
@@ -414,41 +417,6 @@ pub fn send_disconnect(
             break err!(
                 Disconnected,
                 desc: "{} failed writing disconnect after {:?}",
-                prefix, time::Instant::now()
-            );
-        } else {
-            break Ok(());
-        }
-    }
-}
-
-pub fn send_connack(
-    prefix: &str,
-    code: v5::ConnackReasonCode,
-    conn: &mio::net::TcpStream,
-    timeout: time::Instant,
-    max_size: u32,
-) -> Result<()> {
-    use crate::broker::SLEEP_10MS;
-
-    let cack = v5::ConnAck::from_reason_code(code);
-    let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
-    loop {
-        let (val, would_block) = match packetw.write(conn) {
-            Ok(args) => args,
-            Err(err) => {
-                error!("{} problem writing connack packet {}", prefix, err);
-                break Err(err);
-            }
-        };
-        packetw = val;
-
-        if would_block && timeout < time::Instant::now() {
-            thread::sleep(SLEEP_10MS);
-        } else if would_block {
-            break err!(
-                Disconnected,
-                desc: "{} failed writing connack after {:?}",
                 prefix, time::Instant::now()
             );
         } else {

@@ -181,7 +181,7 @@ impl Socket {
 
         let timeout = config.mqtt_read_timeout();
         let pr = mem::replace(&mut self.rd.pr, MQTTRead::default());
-        let mut pr = match pr.read(&self.conn) {
+        let mut pr = match pr.read(&mut self.conn) {
             Ok((pr, _would_block)) => pr,
             Err(err) if err.kind() == ErrorKind::Disconnected => return Ok(disconnected),
             Err(err) => return Err(err),
@@ -291,7 +291,7 @@ impl Socket {
 
         let timeout = config.mqtt_write_timeout();
         let pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
-        let pw = match pw.write(&self.conn) {
+        let pw = match pw.write(&mut self.conn) {
             Ok((pw, _would_block)) => pw,
             Err(err) if err.kind() == ErrorKind::Disconnected => {
                 return QueueStatus::Disconnected(Vec::new());

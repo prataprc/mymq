@@ -351,7 +351,7 @@ impl Connect {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.protocol_name != "MQTT" {
             err!(
                 ProtocolError,

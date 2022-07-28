@@ -11,7 +11,7 @@ use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
 use std::{io, mem, net, time};
 
-use crate::{v5, ClientID, Config, MQTTRead, MQTTWrite, MqttProtocol};
+use crate::{v5, ClientID, Config, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
 
 pub struct ClientBuilder {
     /// Provide a unique client identifier, if missing, will be sent empty in CONNECT.
@@ -78,11 +78,7 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        let mut client = self.into_client(remote);
-        let cio = ClientIO::Blocking { sock };
-        client.cio = cio;
-
-        Ok(client)
+        self.handshake(sock, true /*blocking*/)
     }
 
     /// Connection with `remote` and start an asynchronous client. All read/write calls
@@ -92,7 +88,7 @@ impl ClientBuilder {
     ///
     /// NOTE: This call shall block until CONNACK is successfully received from remote.
     pub fn connect_noblock(self, remote: net::SocketAddr) -> io::Result<Client> {
-        let sock = mio::net::TcpStream::connect(remote)?;
+        let sock = net::TcpStream::connect(remote)?;
         if let Some(nodelay) = self.nodelay {
             sock.set_nodelay(nodelay)?
         }
@@ -100,20 +96,92 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        let mut client = self.into_client(remote);
-        let max_packet_size = match &client.connect_properties {
-            Some(props) => props.max_packet_size(),
-            None => Config::DEF_MQTT_MAX_PACKET_SIZE,
+        self.handshake(sock, false /*blocking*/)
+    }
+
+    fn to_connect(&self) -> v5::Connect {
+        let mut flags = vec![];
+        if self.clean_start {
+            flags.push(v5::ConnectFlags::CLEAN_START);
+        }
+        if self.is_will() {
+            flags.push(v5::ConnectFlags::WILL_FLAG);
+            flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
+                v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
+                v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
+                v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
+            });
+            match self.will_retain {
+                Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
+                Some(_) | None => (),
+            }
+        }
+        match &self.connect_payload.username {
+            Some(_) => flags.push(v5::ConnectFlags::USERNAME),
+            None => (),
+        }
+        match &self.connect_payload.password {
+            Some(_) => flags.push(v5::ConnectFlags::PASSWORD),
+            None => (),
+        }
+
+        let mut pkt = v5::Connect {
+            protocol_name: "MQTT".to_string(),
+            protocol_version: self.protocol_version,
+            flags: v5::ConnectFlags::new(&flags),
+            keep_alive: self.keep_alive,
+            properties: self.connect_properties.clone(),
+            payload: self.connect_payload.clone(),
+        };
+        pkt.normalize();
+
+        pkt
+    }
+
+    fn is_will(&self) -> bool {
+        self.connect_payload.will_topic.is_some()
+            && self.connect_payload.will_properties.is_some()
+            && self.connect_payload.will_payload.is_some()
+    }
+
+    fn handshake(self, mut sock: net::TcpStream, blocking: bool) -> io::Result<Client> {
+        let max_packet_size = self.max_packet_size();
+        let remote = sock.peer_addr()?;
+        let mut pktr = MQTTRead::new(max_packet_size);
+        let mut pktw = MQTTWrite::new(&[], max_packet_size);
+
+        // handshake with remote
+        pktw = write_pkt(pktw, &mut sock, v5::Packet::Connect(self.to_connect()))?;
+        let (val, connack) = match read_pkt(pktr, &mut sock)? {
+            (val, v5::Packet::ConnAck(connack)) => (val, connack),
+            (_, pkt) => {
+                let msg =
+                    format!("unexpected packet in handshake {:?}", pkt.to_packet_type());
+                Err(io::Error::new(io::ErrorKind::InvalidData, msg))?
+            }
+        };
+        pktr = val;
+
+        let cio = match blocking {
+            true => ClientIO::Blocking { sock, pktr, pktw },
+            false => {
+                let sock = mio::net::TcpStream::from_std(sock);
+                ClientIO::NoBlock { sock, pktr, pktw }
+            }
         };
 
-        let pktr = MQTTRead::new(max_packet_size);
-        let pktw = MQTTWrite::new(&[], max_packet_size);
-
-        let cio = ClientIO::NoBlock { sock, pktr, pktw };
-
+        let mut client = self.into_client(remote);
         client.cio = cio;
+        client.connack = connack;
 
         Ok(client)
+    }
+
+    fn max_packet_size(&self) -> u32 {
+        match &self.connect_properties {
+            Some(props) => props.max_packet_size(),
+            None => Config::DEF_MQTT_MAX_PACKET_SIZE,
+        }
     }
 
     fn into_client(self, remote: net::SocketAddr) -> Client {
@@ -259,53 +327,6 @@ impl Client {
 }
 
 impl Client {
-    fn to_connect(&self) -> v5::Connect {
-        let mut flags = vec![];
-        if self.clean_start {
-            flags.push(v5::ConnectFlags::CLEAN_START);
-        }
-        if self.is_will() {
-            flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
-                v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
-                v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
-                v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
-            });
-            match self.will_retain {
-                Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
-                Some(_) | None => (),
-            }
-        }
-        match &self.connect_payload.username {
-            Some(_) => flags.push(v5::ConnectFlags::USERNAME),
-            None => (),
-        }
-        match &self.connect_payload.password {
-            Some(_) => flags.push(v5::ConnectFlags::PASSWORD),
-            None => (),
-        }
-
-        let mut pkt = v5::Connect {
-            protocol_name: "MQTT".to_string(),
-            protocol_version: self.protocol_version,
-            flags: v5::ConnectFlags::new(&flags),
-            keep_alive: self.keep_alive,
-            properties: self.connect_properties.clone(),
-            payload: self.connect_payload.clone(),
-        };
-        pkt.normalize();
-
-        pkt
-    }
-
-    fn is_will(&self) -> bool {
-        self.connect_payload.will_topic.is_some()
-            && self.connect_payload.will_properties.is_some()
-            && self.connect_payload.will_payload.is_some()
-    }
-}
-
-impl Client {
     /// Obtain the underlying [mio] socket to register with [mio::Poll]. This can be
     /// used to create an async wrapper. Calling this method on blocking connection
     /// will panic.
@@ -327,6 +348,8 @@ impl Client {
 enum ClientIO {
     Blocking {
         sock: net::TcpStream,
+        pktr: MQTTRead,
+        pktw: MQTTWrite,
     },
     NoBlock {
         sock: mio::net::TcpStream,
@@ -335,9 +358,11 @@ enum ClientIO {
     },
     BlockRd {
         sock: net::TcpStream,
+        pktr: MQTTRead,
     },
     BlockWt {
         sock: net::TcpStream,
+        pktw: MQTTWrite,
     },
     NoBlockRd {
         sock: mio::net::TcpStream,
@@ -353,12 +378,12 @@ enum ClientIO {
 impl ClientIO {
     fn split_sock(self) -> io::Result<(ClientIO, ClientIO)> {
         match self {
-            ClientIO::Blocking { sock: rd_sock } => {
+            ClientIO::Blocking { sock: rd_sock, pktr, pktw } => {
                 let wt_sock = rd_sock.try_clone()?;
-                rd_sock.shutdown(net::Shutdown::Write);
-                wt_sock.shutdown(net::Shutdown::Read);
-                let rd = ClientIO::BlockRd { sock: rd_sock };
-                let wt = ClientIO::BlockWt { sock: wt_sock };
+                rd_sock.shutdown(net::Shutdown::Write)?;
+                wt_sock.shutdown(net::Shutdown::Read)?;
+                let rd = ClientIO::BlockRd { sock: rd_sock, pktr };
+                let wt = ClientIO::BlockWt { sock: wt_sock, pktw };
                 Ok((rd, wt))
             }
             ClientIO::NoBlock { sock, pktr, pktw } => {
@@ -369,8 +394,8 @@ impl ClientIO {
                 let rd_sock = unsafe { net::TcpStream::from_raw_fd(sock.into_raw_fd()) };
 
                 let wt_sock = rd_sock.try_clone()?;
-                rd_sock.shutdown(net::Shutdown::Write);
-                wt_sock.shutdown(net::Shutdown::Read);
+                rd_sock.shutdown(net::Shutdown::Write)?;
+                wt_sock.shutdown(net::Shutdown::Read)?;
                 let rd = ClientIO::NoBlockRd {
                     sock: mio::net::TcpStream::from_std(rd_sock),
                     pktr,
@@ -387,10 +412,10 @@ impl ClientIO {
 
     fn local_addr(&self) -> io::Result<net::SocketAddr> {
         match self {
-            ClientIO::Blocking { sock } => sock.local_addr(),
+            ClientIO::Blocking { sock, .. } => sock.local_addr(),
             ClientIO::NoBlock { sock, .. } => sock.local_addr(),
-            ClientIO::BlockRd { sock } => sock.local_addr(),
-            ClientIO::BlockWt { sock } => sock.local_addr(),
+            ClientIO::BlockRd { sock, .. } => sock.local_addr(),
+            ClientIO::BlockWt { sock, .. } => sock.local_addr(),
             ClientIO::NoBlockRd { sock, .. } => sock.local_addr(),
             ClientIO::NoBlockWt { sock, .. } => sock.local_addr(),
             ClientIO::None => unreachable!(),
@@ -399,10 +424,10 @@ impl ClientIO {
 
     fn peer_addr(&self) -> io::Result<net::SocketAddr> {
         match self {
-            ClientIO::Blocking { sock } => sock.peer_addr(),
+            ClientIO::Blocking { sock, .. } => sock.peer_addr(),
             ClientIO::NoBlock { sock, .. } => sock.peer_addr(),
-            ClientIO::BlockRd { sock } => sock.peer_addr(),
-            ClientIO::BlockWt { sock } => sock.peer_addr(),
+            ClientIO::BlockRd { sock, .. } => sock.peer_addr(),
+            ClientIO::BlockWt { sock, .. } => sock.peer_addr(),
             ClientIO::NoBlockRd { sock, .. } => sock.peer_addr(),
             ClientIO::NoBlockWt { sock, .. } => sock.peer_addr(),
             ClientIO::None => unreachable!(),
@@ -411,10 +436,10 @@ impl ClientIO {
 
     fn nodelay(&self) -> io::Result<bool> {
         match self {
-            ClientIO::Blocking { sock } => sock.nodelay(),
+            ClientIO::Blocking { sock, .. } => sock.nodelay(),
             ClientIO::NoBlock { sock, .. } => sock.nodelay(),
-            ClientIO::BlockRd { sock } => sock.nodelay(),
-            ClientIO::BlockWt { sock } => sock.nodelay(),
+            ClientIO::BlockRd { sock, .. } => sock.nodelay(),
+            ClientIO::BlockWt { sock, .. } => sock.nodelay(),
             ClientIO::NoBlockRd { sock, .. } => sock.nodelay(),
             ClientIO::NoBlockWt { sock, .. } => sock.nodelay(),
             ClientIO::None => unreachable!(),
@@ -423,10 +448,10 @@ impl ClientIO {
 
     fn read_timeout(&self) -> io::Result<Option<time::Duration>> {
         match self {
-            ClientIO::Blocking { sock } => sock.read_timeout(),
+            ClientIO::Blocking { sock, .. } => sock.read_timeout(),
             ClientIO::NoBlock { .. } => Ok(None),
-            ClientIO::BlockRd { sock } => sock.read_timeout(),
-            ClientIO::BlockWt { sock } => sock.read_timeout(),
+            ClientIO::BlockRd { sock, .. } => sock.read_timeout(),
+            ClientIO::BlockWt { sock, .. } => sock.read_timeout(),
             ClientIO::NoBlockRd { .. } => Ok(None),
             ClientIO::NoBlockWt { .. } => Ok(None),
             ClientIO::None => unreachable!(),
@@ -435,10 +460,10 @@ impl ClientIO {
 
     fn write_timeout(&self) -> io::Result<Option<time::Duration>> {
         match self {
-            ClientIO::Blocking { sock } => sock.read_timeout(),
+            ClientIO::Blocking { sock, .. } => sock.read_timeout(),
             ClientIO::NoBlock { .. } => Ok(None),
-            ClientIO::BlockRd { sock } => sock.read_timeout(),
-            ClientIO::BlockWt { sock } => sock.read_timeout(),
+            ClientIO::BlockRd { sock, .. } => sock.read_timeout(),
+            ClientIO::BlockWt { sock, .. } => sock.read_timeout(),
             ClientIO::NoBlockRd { .. } => Ok(None),
             ClientIO::NoBlockWt { .. } => Ok(None),
             ClientIO::None => unreachable!(),
@@ -447,19 +472,14 @@ impl ClientIO {
 
     fn ttl(&self) -> io::Result<u32> {
         match self {
-            ClientIO::Blocking { sock } => sock.ttl(),
+            ClientIO::Blocking { sock, .. } => sock.ttl(),
             ClientIO::NoBlock { sock, .. } => sock.ttl(),
-            ClientIO::BlockRd { sock } => sock.ttl(),
-            ClientIO::BlockWt { sock } => sock.ttl(),
+            ClientIO::BlockRd { sock, .. } => sock.ttl(),
+            ClientIO::BlockWt { sock, .. } => sock.ttl(),
             ClientIO::NoBlockRd { sock, .. } => sock.ttl(),
             ClientIO::NoBlockWt { sock, .. } => sock.ttl(),
             ClientIO::None => unreachable!(),
         }
-    }
-
-    fn handshake(&mut self, client: Client) -> io::Result<()> {
-        let pkt = client.to_connect();
-        todo!()
     }
 
     fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
@@ -468,5 +488,71 @@ impl ClientIO {
 
     fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
         todo!()
+    }
+}
+
+fn write_pkt<W>(
+    mut pktw: MQTTWrite,
+    sock: &mut W,
+    pkt: v5::Packet,
+) -> io::Result<MQTTWrite>
+where
+    W: io::Write,
+{
+    use std::error::Error;
+
+    let blob = pkt
+        .encode()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+
+    pktw = pktw.reset(blob.as_ref());
+
+    loop {
+        pktw = match pktw.write(sock) {
+            Ok((pktw, false)) => break Ok(pktw),
+            Ok((pktw, true)) => pktw,
+            Err(err) => match err.source() {
+                Some(source) => match source.downcast_ref::<io::Error>() {
+                    Some(err) => break Err(err.kind().into()),
+                    None => break Err(io::ErrorKind::Other.into()),
+                },
+                None => break Err(io::ErrorKind::Other.into()),
+            },
+        }
+    }
+}
+
+fn read_pkt<R>(mut pktr: MQTTRead, sock: &mut R) -> io::Result<(MQTTRead, v5::Packet)>
+where
+    R: io::Read,
+{
+    use std::error::Error;
+    pktr = pktr.reset();
+
+    let res: io::Result<MQTTRead> = loop {
+        pktr = match pktr.read(sock) {
+            Ok((pktr, false)) => break Ok(pktr),
+            Ok((pktr, true)) => pktr,
+            Err(err) => match err.source() {
+                Some(source) => match source.downcast_ref::<io::Error>() {
+                    Some(err) => break Err(err.kind().into()),
+                    None => break Err(io::ErrorKind::Other.into()),
+                },
+                None => break Err(io::ErrorKind::Other.into()),
+            },
+        }
+    };
+
+    pktr = res?;
+
+    match pktr.parse() {
+        Ok(pkt) => Ok((pktr, pkt)),
+        Err(err) => match err.source() {
+            Some(source) => match source.downcast_ref::<io::Error>() {
+                Some(err) => Err(err.kind().into()),
+                None => Err(io::ErrorKind::Other.into()),
+            },
+            None => Err(io::ErrorKind::Other.into()),
+        },
     }
 }

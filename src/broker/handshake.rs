@@ -1,12 +1,12 @@
 use log::{error, info};
 
-use std::{net, thread, time};
+use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, SLEEP_10MS};
 
-use crate::{v5, Config, MQTTRead};
-use crate::{Error, ErrorKind, ReasonCode};
+use crate::{v5, Config, MQTTRead, Packetize};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type handles incoming connection.
 ///
@@ -27,7 +27,6 @@ impl Threadable for Handshake {
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         use crate::broker::cluster::AddConnectionArgs;
-        use crate::packet::send_connack;
 
         let now = time::Instant::now();
         info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
@@ -36,12 +35,12 @@ impl Threadable for Handshake {
         let connect_timeout = self.config.connect_timeout();
 
         let mut packetr = MQTTRead::new(max_size);
-        let (conn, addr) = (self.conn.take().unwrap(), self.addr);
+        let (mut conn, addr) = (self.conn.take().unwrap(), self.addr);
         let timeout = now + time::Duration::from_secs(connect_timeout as u64);
         let prefix = self.prefix.clone();
 
-        let (code, connack, pkt_connect) = loop {
-            packetr = match packetr.read(&conn) {
+        let (code, connack, connect) = loop {
+            packetr = match packetr.read(&mut conn) {
                 Ok((val, _would_block)) => val,
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                     error!("{}, fail read, error {}", prefix, err);
@@ -64,9 +63,13 @@ impl Threadable for Handshake {
                     thread::sleep(SLEEP_10MS);
                 }
                 MQTTRead::Fin { .. } => match packetr.parse() {
-                    Ok(v5::Packet::Connect(val)) => {
-                        break (ReasonCode::Success, false, Some(val))
-                    }
+                    Ok(v5::Packet::Connect(connect)) => match connect.validate() {
+                        Ok(()) => break (ReasonCode::Success, false, Some(connect)),
+                        Err(err) => {
+                            error!("{}, invalid connect {}", prefix, err);
+                            break (err.code(), true, None);
+                        }
+                    },
                     Ok(pkt) => {
                         let pt = pkt.to_packet_type();
                         error!("{}, unexpect {:?} on new connection", prefix, pt);
@@ -92,9 +95,9 @@ impl Threadable for Handshake {
         if connack {
             // if error, connect-ack shall be sent right here and ignored.
             let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
-            send_connack(&prefix, code, &conn, timeout, max_size).ok();
-        } else if let Some(pkt_connect) = pkt_connect {
-            let args = AddConnectionArgs { conn, addr, pkt: pkt_connect };
+            send_connack(&prefix, code, &mut conn, timeout, max_size).ok();
+        } else if let Some(connect) = connect {
+            let args = AddConnectionArgs { conn, addr, pkt: connect };
             err!(
                 IPCFail,
                 try: self.cluster.add_connection(args),
@@ -106,5 +109,43 @@ impl Threadable for Handshake {
         }
 
         self
+    }
+}
+
+fn send_connack<W>(
+    prefix: &str,
+    code: v5::ConnackReasonCode,
+    conn: &mut W,
+    timeout: time::Instant,
+    max_size: u32,
+) -> Result<()>
+where
+    W: io::Write,
+{
+    use crate::MQTTWrite;
+
+    let cack = v5::ConnAck::from_reason_code(code);
+    let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
+    loop {
+        let (val, would_block) = match packetw.write(conn) {
+            Ok(args) => args,
+            Err(err) => {
+                error!("{} problem writing connack packet {}", prefix, err);
+                break Err(err);
+            }
+        };
+        packetw = val;
+
+        if would_block && timeout < time::Instant::now() {
+            thread::sleep(SLEEP_10MS);
+        } else if would_block {
+            break err!(
+                Disconnected,
+                desc: "{} failed writing connack after {:?}",
+                prefix, time::Instant::now()
+            );
+        } else {
+            break Ok(());
+        }
     }
 }
