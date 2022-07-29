@@ -16,7 +16,6 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 pub struct Handshake {
     pub prefix: String,
     pub conn: Option<mio::net::TcpStream>,
-    pub addr: net::SocketAddr,
     pub config: Config,
     pub cluster: Cluster,
 }
@@ -29,13 +28,19 @@ impl Threadable for Handshake {
         use crate::broker::cluster::AddConnectionArgs;
 
         let now = time::Instant::now();
-        info!("{} new connection {:?} at {:?}", self.prefix, self.addr, now);
+        info!(
+            "{} new connection {:?}<-{:?} at {:?}",
+            self.prefix,
+            self.conn.local_addr().unwrap(),
+            self.conn.remote_addr().unwrap(),
+            now
+        );
 
         let max_size = self.config.mqtt_max_packet_size();
         let connect_timeout = self.config.connect_timeout();
 
         let mut packetr = MQTTRead::new(max_size);
-        let (mut conn, addr) = (self.conn.take().unwrap(), self.addr);
+        let mut conn = self.conn.take().unwrap();
         let timeout = now + time::Duration::from_secs(connect_timeout as u64);
         let prefix = self.prefix.clone();
 
@@ -97,7 +102,7 @@ impl Threadable for Handshake {
             let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
             send_connack(&prefix, code, &mut conn, timeout, max_size).ok();
         } else if let Some(connect) = connect {
-            let args = AddConnectionArgs { conn, addr, pkt: connect };
+            let args = AddConnectionArgs { conn, pkt: connect };
             err!(
                 IPCFail,
                 try: self.cluster.add_connection(args),

@@ -14,67 +14,6 @@ type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;
 type QueuePkt = QueueStatus<v5::Packet>;
 
-// TODO Revisit 2.2.1 Packet Identifier
-// TODO support topic_alias while broker publishing messages to client.
-//
-// *Will Message*
-//
-// TODO The Will Message MUST be published after the Network Connection is subsequently
-//      closed and either the Will Delay Interval has elapsed or the Session ends,
-//      unless the Will Message has been deleted by the Server on receipt of a
-//      DISCONNECT packet with Reason Code 0x00 (Normal disconnection) or a new
-//      Network Connection for the ClientID is opened before the Will Delay Interval
-//      has elapsed.
-//
-//      Situations in which the Will Message is published include, but are not
-//      limited to:
-//      * An I/O error or network failure detected by the Server.
-//      * The Client fails to communicate within the Keep Alive time.
-//      * The Client closes the Network Connection without first sending a DISCONNECT
-//        packet with a Reason Code 0x00 (Normal disconnection).
-//      * The Server closes the Network Connection without first receiving a
-//        DISCONNECT packet with a Reason Code 0x00 (Normal disconnection).
-// TODO The Will Message MUST be removed from the stored Session State in the Server
-//      once it has been published or the Server has received a DISCONNECT packet
-//      with a Reason Code of 0x00 (Normal disconnection) from the Client.
-// TODO In the case of a Server shutdown or failure, the Server MAY defer publication
-//      of Will Messages until a subsequent restart. If this happens, there might be
-//      a delay between the time the Server experienced failure and when the Will
-//      Message is published.
-// TODO If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00)
-//      If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00),
-//      1 (0x01), or 2 (0x02) [MQTT-3.1.2-12]. A value of 3 (0x03) is a Malformed Packet.
-//
-// *Session Reconnect/Restart*
-//
-// TODO: `session_expiry_interval`.
-// TODO: For restart, try seqno handshake between broker/client during CONNECT/CONNACK.
-//       seqno, can be exchanged via user-property.
-//
-// *Shared Subscription*
-//
-// TODO: In the case of a Shared Subscription where the message is too large to send to
-//       one or more of the Clients but other Clients can receive it, the Server can
-//       choose either discard the message without sending the message to any of the
-//       Clients, or to send the message to one of the Clients that can receive it.
-//
-// *CONNECT Properties*
-//
-// TODO: `request_response_info`
-// TODO: `request_problem_info`
-// TODO: `authentication_method`
-// TODO: `authentication_data`
-// TODO: `payload.username`
-// TODO: `payload.password`
-//
-// *CONNACK Properties*
-//
-// TODO: `shared_subscription_available`
-// TODO: `response_information`
-// TODO: `server_reference`
-// TODO: `authentication_method`
-// TODO: `authentication_data`
-
 pub struct SessionArgs {
     pub addr: net::SocketAddr,
     pub client_id: ClientID,
@@ -91,96 +30,95 @@ pub struct Session {
     client_id: ClientID,
     /// Remote socket address.
     prefix: String,
-    client_receive_maximum: u16,
-    client_max_packet_size: u32,
-    #[allow(dead_code)]
-    client_topic_alias_max: Option<u16>,
-    session_expiry_interval: Option<u32>,
+    /// Broker Configuration.
     config: Config,
 
-    // Outbound channel to Miot thread.
-    miot_tx: PktTx,
-    // Inbound channel from Miot thread.
-    session_rx: PktRx,
+    // Immutable set of parameters for this session, after handshake.
+    keep_alive: KeepAlive,                // Negotiated keep-alive.
+    session_expiry_interval: Option<u32>, // Negotiated session expiry.
+    connect: v5::Connect,                 // Connect msg that created this session.
+    miot_tx: PktTx,                       // Outbound channel to Miot thread.
+    session_rx: PktRx,                    // Inbound channel from Miot thread.
 
-    // MQTT Will-Delay-Publish
-    #[allow(dead_code)]
-    will_message: Option<WillMessage>,
-    // MQTT Keep alive between client and broker.
-    keep_alive: KeepAlive,
-    // MQTT topic-aliases if enabled. ZERO is not allowed.
-    topic_aliases: BTreeMap<u16, TopicName>,
-    // MQTT response-information sent via CONNACK, clients can use this to construct
-    // ResponseTopic.
-    response_info: Option<String>,
     // Sorted list of QoS-1 PacketID for which we havn't sent the acknowledgment.
-    qos1: Vec<PacketID>,
+    inp_qos1: Vec<PacketID>,
     // Sorted list of QoS-2 PacketID for which we havn't sent the acknowledgment.
-    qos2: Vec<PacketID>,
-    // Message expiry timer for PUBLISH messages on this session.
+    inp_qos2: Vec<PacketID>,
 
-    // List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
-    // messages are committed here, [Cluster::topic_filter] will also be updated.
-    subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
-    // Manages out-bound messages to client.
-    cout: message::ClientOut,
+    // List of acknowledgements that needs to be sent to remote client. Pairs with
+    // inp_qos1 and inp_qos2
+    out_acks: VecDeque<Message>,
+
+    // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
+    // messages sent to subscribed clients. Entry is deleted from `qos1_unacks` and
+    // `qos2_unacks` once ACK is received for PacketID,
+    //
+    // Note that length of this collection is only as high as the allowed limit of
+    // concurrent PUBLISH.
+    qos1_unacks: BTreeMap<PacketID, Message>,
+    qos2_unacks: BTreeMap<PacketID, Message>,
+
+    // This value is incremented for every new PUBLISH(qos>0), messages that is going
+    // out to the client.
+    //
+    // We don't increment this value if index.len() exceeds the `receive_maximum`
+    // set by the client.
+    next_packet_id: PacketID,
+
+    // Consensus state
+    state: SessionState,
+}
+
+pub struct SessionState {
+    /// MQTT topic-aliases if enabled. ZERO is not allowed.
+    pub topic_aliases: BTreeMap<u16, TopicName>,
+    /// List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
+    /// messages are committed here, [Cluster::topic_filter] will also be updated.
+    pub subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
+
+    /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
+    /// outgoing publish packet.
+    pub out_seqno: OutSeqno,
+    /// All the outgoing PUBLISH > QoS-0, after going through the consensus loop,
+    /// shall first land here. While landing here Message::inp_seqno is updated with
+    /// OutSeqno. Subsequently they are published to miot-thread and copied to
+    /// `qos1_unacks` and `qos2_unacks`.
+    ///
+    /// Entries from this index are deleted after they are removed from `qos1_unacks`
+    /// and `qos2_unacks`, and after they go through the consensus loop.
+    pub back_log: BTreeMap<OutSeqno, Message>,
 }
 
 pub struct SessionStats;
 
-#[allow(dead_code)]
-struct WillMessage {
-    retain: bool,
-    qos: v5::QoS,
-    properties: v5::WillProperties,
-    topic: TopicName,
-    payload: Vec<u8>,
-}
-
 impl Session {
-    pub fn start(args: SessionArgs, config: Config, pkt: &v5::Connect) -> Session {
-        let cout = message::ClientOut {
-            seqno: 1,
-            index: BTreeMap::default(),
+    pub fn start(args: SessionArgs, config: Config, connect: &v5::Connect) -> Session {
+        let state = SessionState {
+            topic_aliases: BTreeMap::default(),
+            subscriptions: BTreeMap::default(),
+            out_seqno: 1,
+            unacks: BTreeMap::default(),
+            back_log: BTreeMap::default(),
             next_packet_id: 1,
-            back_log: VecDeque::default(),
-        };
-
-        let (_clean_start, wflag, qos, retain) = pkt.flags.unwrap();
-        let will_message = match wflag {
-            true => Some(WillMessage {
-                retain,
-                qos,
-                properties: pkt.payload.will_properties.clone().unwrap(),
-                topic: pkt.payload.will_topic.clone().unwrap(),
-                payload: pkt.payload.will_payload.clone().unwrap(),
-            }),
-            false => None,
         };
 
         let prefix = format!("session:{}", args.addr);
-        let sei = config.mqtt_session_expiry_interval(pkt.session_expiry_interval());
+        let sei = config.mqtt_session_expiry_interval(connect.session_expiry_interval());
         Session {
             client_id: args.client_id,
             prefix: prefix,
-            client_receive_maximum: pkt.receive_maximum(),
-            client_max_packet_size: pkt.max_packet_size(),
-            client_topic_alias_max: pkt.topic_alias_max(),
-            session_expiry_interval: sei,
             config: config.clone(),
 
+            keep_alive: KeepAlive::new(args.addr, &connect, &config),
+            session_expiry_interval: sei,
+            connect: connect.clone(),
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
 
-            will_message,
-            keep_alive: KeepAlive::new(args.addr, &pkt, &config),
-            topic_aliases: BTreeMap::default(),
-            response_info: None, // TODO: get this from rr.rs
-
-            qos1: Vec::default(),
-            qos2: Vec::default(),
-            subscriptions: BTreeMap::default(),
-            cout,
+            inp_qos1: Vec::default(),
+            inp_qos2: Vec::default(),
+            state,
+            out_acks: VecDeque::default(),
         }
     }
 
@@ -221,10 +159,6 @@ impl Session {
             topic_filters.unsubscribe(topic_filter, value);
         }
     }
-
-    pub fn client_max_packet_size(&self) -> u32 {
-        self.client_max_packet_size
-    }
 }
 
 // handle incoming packets.
@@ -263,7 +197,7 @@ impl Session {
             msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
-        if let QueueStatus::Disconnected(_) = self.in_messages(msgs) {
+        if let QueueStatus::Disconnected(_) = self.out_acks.extend(msgs.into_iter()) {
             Ok(QueueStatus::Disconnected(Vec::new()))
         } else {
             Ok(self.flush_messages())
@@ -319,15 +253,13 @@ impl Session {
     }
 
     fn do_publish(&mut self, shard: &mut Shard, publ: v5::Publish) -> Result<Messages> {
-        // TODO: However, as the Server is permitted to map the Topic Name to another
-        //       name, it might not be the same as the Topic Name in the original
-        //       PUBLISH packet.
-
         if self.is_duplicate(&publ) {
             return Ok(Vec::new());
         }
+
         self.book_retain(shard, &publ)?;
         self.book_qos(&publ)?;
+
         let topic_name = self.publish_topic_name(&publ)?;
         let subscrs = shard.match_subscribers(self, &topic_name);
 
@@ -409,28 +341,25 @@ impl Session {
 }
 
 impl Session {
-    // Handle incoming messages, incoming messages could be from:
+    // Handle replicated messages, incoming messages could be from:
     // * add_session logic, sending CONNACK, part of handshake.
-    // * shard's MsgRx, Message::{LocalAck, Packet}
-    // * locally generated Message::ClientAck from Session::route_packets.
+    // * shard's MsgRx, Message::Packet
     // Note that Message::LocalAck shall not reach this far.
     pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         for msg in msgs.into_iter() {
             match msg {
-                msg @ Message::ClientAck { .. } => {
-                    self.cout.back_log.push_back(msg);
+                msg @ Message::Packet { .. } => {
+                    for (out_seqno, msg) in self.expand_subscriptions(msg) {
+                        self.back_log.insert(out_seqno, msg);
+                    }
                 }
-                msg @ Message::Packet { .. } => msg
-                    .cout_publish(self)
-                    .into_iter()
-                    .for_each(|msg| self.cout.back_log.push_back(msg)),
-                Message::LocalAck { .. } => unreachable!(),
+                Message::ClientAck { .. } | Message::LocalAck { .. } => unreachable!(),
             };
         }
 
-        let m = self.cout.back_log.len();
+        let m = self.back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (self.config.mqtt_pkt_batch_size() as usize) * 2;
+        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
@@ -441,36 +370,106 @@ impl Session {
         }
     }
 
-    pub fn flush_messages(&mut self) -> QueueStatus<v5::Packet> {
-        if self.cout.index.len() > self.client_receive_maximum.into() {
-            return QueueStatus::Block(Vec::new());
-        }
-
+    pub fn flush_out_acks(&mut self) -> QueueStatus<v5::Packet> {
         let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
 
-        let mut msgs: Vec<Message> = self.cout.back_log.drain(..).collect();
         let pkts: Vec<v5::Packet> =
-            msgs.clone().into_iter().map(|m| m.into_packet()).collect();
+            self.out_acks.clone().into_iter().map(|m| m.into_packet()).collect();
 
         let mut status = miot_tx.try_sends(&self.prefix, pkts);
-
-        let ok_msgs = msgs.split_off(msgs.len() - status.take_values().len());
-        // book `ok_msgs` as inflight messages
-        for msg in ok_msgs.into_iter() {
-            match &msg {
-                Message::Packet { packet_id, .. } => {
-                    self.cout.index.insert(*packet_id, msg);
-                }
-                Message::ClientAck { .. } => (),
-                Message::LocalAck { .. } => (),
+        match status.take_values() {
+            rems if rems.len() == 0 => status,
+            rems => {
+                let n = self.out_acks.len() - rems.len();
+                self.out_acks.drain(..n);
+                status
             }
         }
-        // remaining messages, if any.
-        for msg in msgs.into_iter() {
-            self.cout.back_log.push_back(msg);
+    }
+
+    pub fn flush_packets(&mut self) -> QueueStatus<v5::Packet> {
+        let receive_maximum = self.connect.receive_maximum();
+        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
+
+        let n = cmp::min(receive_maximum - self.unacks.len(), self.back_log.len());
+
+        let mut drained = vec![];
+        let mut iter = self.back_log.iter().take(n);
+        let status = loop {
+            match iter.next() {
+                Some((out_seqno, msg)) => {
+                    let (packet_id, pkts) = match msg.clone().into_packet() {
+                        v5::Packet::Publish(mut publish) => {
+                            let packet_id = self.incr_packet_id();
+                            publish.set_packet_id(packet_id));
+                            (packet_id, vec![v5::Packet::Publish(publish)])
+                        }
+                        _ => unreachable!(),
+                    }
+                    let mut status = miot_tx.try_sends(&self.prefix, pkts);
+                    match status.take_values() {
+                        rems if rems.len() == 0 => {
+                            drained.push(out_seqno);
+                            self.unacks.insert(packet_id, msg.clone());
+                        }
+                        rems => break status,
+                    }
+                }
+                None => QueueStatus::Ok(Vec::new())
+            }
+        };
+
+        drained.into_iter().for_each(|out_seqno| self.back_log.remove(&out_seqno));
+        status
+    }
+
+    /// Expand outgoing message for matching subscription.
+    ///
+    /// a. If there are multiple subscriptions, generate a publish-message for each
+    ///    subscription. TODO: there is scope for optimization.
+    /// b. Use appropriate seqno/packet-id specific to this session.
+    /// c. Adjust the qos based on server_qos and subscription_qos.
+    /// d. Adjust the retain flag based on subscription's retain-as-published flag.
+    /// e. TODO: Send seqno as UserProperty.
+    /// f. TODO: Use topic-alias, if enabled.
+    pub fn expand_subscriptions(&mut self, msg: Message) -> Vec<(OutSeqno, Message)> {
+        use std::cmp;
+
+        let (src_client_id, src_shard_id, subscriptions, publish) = match self {
+            Message::Packet {
+                src_client_id,
+                src_shard_id,
+                subscriptions,
+                packet: v5::Packet::Publish(publish),
+                ..
+            } => (src_client_id, src_shard_id, subscriptions, publish),
+            _ => unreachable!(),
+        };
+
+        let server_qos = v5::QoS::try_from(sess.as_config().mqtt_maximum_qos()).unwrap();
+
+        let mut msgs: Vec<Message> = Vec::with_capacity(subscriptions.len());
+        for subscr in subscriptions.into_iter() {
+            let mut publish = publish.clone();
+            let retain = subscr.retain_as_published && publish.retain;
+            let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
+            let seqno = sess.incr_out_seqno();
+
+            publish.set_fixed_header(retain, qos, false);
+            publish.add_subscription_id(subscr.subscription_id);
+
+            let msg = Message::Packet {
+                src_client_id: src_client_id.clone(),
+                src_shard_id,
+                inp_seqno: seqno,
+                packet_id: Default::default(),
+                subscriptions: Vec::new(),
+                packet: v5::Packet::Publish(publish),
+            };
+            msgs.push((seqno, msg))
         }
 
-        status
+        msgs
     }
 
     pub fn retry_publish(&mut self) {
@@ -617,14 +616,16 @@ impl Session {
 }
 
 impl Session {
-    pub fn incr_cout_seqno(&mut self) -> (u64, PacketID) {
-        let (seqno, packet_id) = (self.cout.seqno, self.cout.next_packet_id);
-        self.cout.seqno = self.cout.seqno.saturating_add(1);
-        self.cout.next_packet_id = match self.cout.next_packet_id.wrapping_add(1) {
-            0 => 1,
-            n => n,
-        };
-        (seqno, packet_id)
+    pub fn incr_out_seqno(&mut self) -> OutSeqno {
+        let seqno = self.state.out_seqno;
+        self.state.out_seqno = self.state.out_seqno.saturating_add(1);
+        seqno
+    }
+
+    pub fn incr_packet_id(&mut self) -> PacketID {
+        let packet_id = self.state.next_packet_id;
+        self.state.next_packet_id = self.state.next_packet_id.wrapping_add(1);
+        packet_id
     }
 
     #[inline]
@@ -635,5 +636,15 @@ impl Session {
     #[inline]
     pub fn as_client_id(&self) -> &ClientID {
         &self.client_id
+    }
+
+    #[inline]
+    pub fn as_connect(&self) -> &v5::Connect {
+        &self.connect
+    }
+
+    #[inline]
+    pub fn as_mut_out_acks(&mut self) -> &mut VecDeque<Message> {
+        &mut self.out_acks
     }
 }

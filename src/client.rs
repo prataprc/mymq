@@ -78,7 +78,17 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        self.handshake(sock, true /*blocking*/)
+        let (cio, connack) = {
+            let connect = self.to_connect();
+            let blocking = true;
+            ClientIO::handshake(connect, sock, blocking)?
+        };
+
+        let mut client = self.into_client(remote);
+        client.cio = cio;
+        client.connack = connack;
+
+        Ok(client)
     }
 
     /// Connection with `remote` and start an asynchronous client. All read/write calls
@@ -96,15 +106,29 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        self.handshake(sock, false /*blocking*/)
+        let (cio, connack) = {
+            let connect = self.to_connect();
+            let blocking = false;
+            ClientIO::handshake(connect, sock, blocking)?
+        };
+
+        let mut client = self.into_client(remote);
+        client.cio = cio;
+        client.connack = connack;
+
+        Ok(client)
     }
 
     fn to_connect(&self) -> v5::Connect {
+        let is_will = self.connect_payload.will_topic.is_some()
+            && self.connect_payload.will_properties.is_some()
+            && self.connect_payload.will_payload.is_some();
+
         let mut flags = vec![];
         if self.clean_start {
             flags.push(v5::ConnectFlags::CLEAN_START);
         }
-        if self.is_will() {
+        if is_will {
             flags.push(v5::ConnectFlags::WILL_FLAG);
             flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
                 v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
@@ -144,39 +168,6 @@ impl ClientBuilder {
             && self.connect_payload.will_payload.is_some()
     }
 
-    fn handshake(self, mut sock: net::TcpStream, blocking: bool) -> io::Result<Client> {
-        let max_packet_size = self.max_packet_size();
-        let remote = sock.peer_addr()?;
-        let mut pktr = MQTTRead::new(max_packet_size);
-        let mut pktw = MQTTWrite::new(&[], max_packet_size);
-
-        // handshake with remote
-        pktw = write_pkt(pktw, &mut sock, v5::Packet::Connect(self.to_connect()))?;
-        let (val, connack) = match read_pkt(pktr, &mut sock)? {
-            (val, v5::Packet::ConnAck(connack)) => (val, connack),
-            (_, pkt) => {
-                let msg =
-                    format!("unexpected packet in handshake {:?}", pkt.to_packet_type());
-                Err(io::Error::new(io::ErrorKind::InvalidData, msg))?
-            }
-        };
-        pktr = val;
-
-        let cio = match blocking {
-            true => ClientIO::Blocking { sock, pktr, pktw },
-            false => {
-                let sock = mio::net::TcpStream::from_std(sock);
-                ClientIO::NoBlock { sock, pktr, pktw }
-            }
-        };
-
-        let mut client = self.into_client(remote);
-        client.cio = cio;
-        client.connack = connack;
-
-        Ok(client)
-    }
-
     fn max_packet_size(&self) -> u32 {
         match &self.connect_properties {
             Some(props) => props.max_packet_size(),
@@ -189,6 +180,11 @@ impl ClientBuilder {
             client_id: self.client_id.unwrap_or_else(|| ClientID::new_uuid_v4()),
             remote,
             protocol_version: self.protocol_version,
+            connect_timeout: self.connect_timeout,
+            read_timeout: self.read_timeout,
+            write_timeout: self.write_timeout,
+            nodelay: self.nodelay,
+            ttl: self.ttl,
             // CONNECT options
             clean_start: self.clean_start,
             will_qos: self.will_qos,
@@ -210,6 +206,11 @@ pub struct Client {
     client_id: ClientID,
     remote: net::SocketAddr,
     protocol_version: MqttProtocol,
+    connect_timeout: Option<time::Duration>,
+    read_timeout: Option<time::Duration>,
+    write_timeout: Option<time::Duration>,
+    nodelay: Option<bool>,
+    ttl: Option<u32>,
     // CONNECT options
     clean_start: bool,
     will_qos: Option<v5::QoS>,
@@ -225,7 +226,7 @@ pub struct Client {
     cio: ClientIO,
 }
 
-/// Client administration methods.
+/// Client initialization and setup
 impl Client {
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
     /// else this call might panic. Returns a clone of underlying socket with read-only
@@ -237,6 +238,11 @@ impl Client {
             client_id: self.client_id.clone(),
             remote: self.remote,
             protocol_version: self.protocol_version,
+            connect_timeout: self.connect_timeout,
+            read_timeout: self.read_timeout,
+            write_timeout: self.write_timeout,
+            nodelay: self.nodelay,
+            ttl: self.ttl,
             // CONNECT options
             clean_start: self.clean_start,
             will_qos: self.will_qos,
@@ -256,6 +262,82 @@ impl Client {
         Ok(reader)
     }
 
+    /// If error is detected on this `Client` instance call this method. Reconnecting
+    /// will connect with the same `remote`, either in block or no-block configuration
+    /// as before.
+    pub fn reconnect(mut self) -> io::Result<Self> {
+        self.clean_start = false;
+
+        let sock = match self.connect_timeout {
+            Some(timeout) => net::TcpStream::connect_timeout(&self.remote, timeout)?,
+            None => net::TcpStream::connect(&self.remote)?,
+        };
+        sock.set_read_timeout(self.read_timeout)?;
+        sock.set_write_timeout(self.write_timeout)?;
+        if let Some(nodelay) = self.nodelay {
+            sock.set_nodelay(nodelay)?
+        }
+        if let Some(ttl) = self.ttl {
+            sock.set_ttl(ttl)?
+        }
+
+        let (cio, connack) = {
+            let connect = self.to_connect();
+            let blocking = self.cio.is_blocking();
+            ClientIO::handshake(connect, sock, blocking)?
+        };
+        self.cio = cio;
+        self.connack = connack;
+
+        Ok(self)
+    }
+
+    fn to_connect(&self) -> v5::Connect {
+        let is_will = self.connect_payload.will_topic.is_some()
+            && self.connect_payload.will_properties.is_some()
+            && self.connect_payload.will_payload.is_some();
+
+        let mut flags = vec![];
+        if self.clean_start {
+            flags.push(v5::ConnectFlags::CLEAN_START);
+        }
+        if is_will {
+            flags.push(v5::ConnectFlags::WILL_FLAG);
+            flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
+                v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
+                v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
+                v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
+            });
+            match self.will_retain {
+                Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
+                Some(_) | None => (),
+            }
+        }
+        match &self.connect_payload.username {
+            Some(_) => flags.push(v5::ConnectFlags::USERNAME),
+            None => (),
+        }
+        match &self.connect_payload.password {
+            Some(_) => flags.push(v5::ConnectFlags::PASSWORD),
+            None => (),
+        }
+
+        let mut pkt = v5::Connect {
+            protocol_name: "MQTT".to_string(),
+            protocol_version: self.protocol_version,
+            flags: v5::ConnectFlags::new(&flags),
+            keep_alive: self.keep_alive,
+            properties: self.connect_properties.clone(),
+            payload: self.connect_payload.clone(),
+        };
+        pkt.normalize();
+
+        pkt
+    }
+}
+
+/// Read information
+impl Client {
     /// Return the server recommended keep_alive or configured keep_alive, in seconds.
     /// If returned keep_alive is non-ZERO, application shall make sure that there
     /// is MQTT activity within the time-period.
@@ -376,6 +458,38 @@ enum ClientIO {
 }
 
 impl ClientIO {
+    fn handshake(
+        connect: v5::Connect,
+        mut sock: net::TcpStream,
+        blocking: bool,
+    ) -> io::Result<(ClientIO, v5::ConnAck)> {
+        let max_packet_size = connect.max_packet_size();
+        let mut pktr = MQTTRead::new(max_packet_size);
+        let mut pktw = MQTTWrite::new(&[], max_packet_size);
+
+        // handshake with remote
+        pktw = write_pkt(pktw, &mut sock, v5::Packet::Connect(connect))?;
+        let (val, connack) = match read_pkt(pktr, &mut sock)? {
+            (val, v5::Packet::ConnAck(connack)) => (val, connack),
+            (_, pkt) => {
+                let msg =
+                    format!("unexpected packet in handshake {:?}", pkt.to_packet_type());
+                Err(io::Error::new(io::ErrorKind::InvalidData, msg))?
+            }
+        };
+        pktr = val;
+
+        let cio = match blocking {
+            true => ClientIO::Blocking { sock, pktr, pktw },
+            false => {
+                let sock = mio::net::TcpStream::from_std(sock);
+                ClientIO::NoBlock { sock, pktr, pktw }
+            }
+        };
+
+        Ok((cio, connack))
+    }
+
     fn split_sock(self) -> io::Result<(ClientIO, ClientIO)> {
         match self {
             ClientIO::Blocking { sock: rd_sock, pktr, pktw } => {
@@ -482,12 +596,14 @@ impl ClientIO {
         }
     }
 
-    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-        todo!()
-    }
+    fn is_blocking(&self) -> bool {
+        use ClientIO::*;
 
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        todo!()
+        match self {
+            Blocking { .. } | BlockRd { .. } | BlockWt { .. } => true,
+            NoBlock { .. } | NoBlockRd { .. } | NoBlockWt { .. } => false,
+            None => unreachable!(),
+        }
     }
 }
 

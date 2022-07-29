@@ -277,11 +277,11 @@ impl Listener {
 
         match server.accept() {
             Ok((conn, addr)) => {
+                assert_eq!(conn.peer_addr(), addr);
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
                     prefix: format!("{}:handshake:{}", self.prefix, addr),
                     conn: Some(conn),
-                    addr,
                     config: self.config.clone(),
                     cluster: cluster.to_tx(),
                 };

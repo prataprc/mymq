@@ -169,10 +169,9 @@ pub enum Response {
 pub struct AddConnectionArgs {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,
-    pub addr: net::SocketAddr,
     pub upstream: socket::PktTx,
     pub downstream: socket::PktRx,
-    pub client_max_packet_size: u32,
+    pub max_packet_size: u32,
 }
 
 // calls to interface with miot-thread, and shall wake the thread
@@ -328,7 +327,7 @@ impl Miot {
 
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("rconn:{}:{}", socket.addr, **client_id);
+            let prefix = format!("rconn:{}:{}", socket.conn.remote_addr(), **client_id);
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
@@ -365,7 +364,7 @@ impl Miot {
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("wconn:{}:{}", socket.addr, **client_id);
+            let prefix = format!("wconn:{}:{}", socket.conn.remote_addr(), **client_id);
             match socket.write_packets(&prefix, &self.config) {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => {
                     // TODO: should we wake the session here.
@@ -392,6 +391,13 @@ impl Miot {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use mio::Interest;
 
+        let mut args = match req {
+            Request::AddConnection(args) => args,
+            _ => unreachable!(),
+        };
+        info!("{} adding connection {:?} ...", self.prefix, args.conn.peer_addr());
+
+        let max_packet_size = self.config.mqtt_max_packet_size();
         let (poll, conns, token) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, next_token, .. }) => {
                 let token = *next_token;
@@ -401,49 +407,45 @@ impl Miot {
             _ => unreachable!(),
         };
 
-        let mut args = match req {
-            Request::AddConnection(args) => args,
-            _ => unreachable!(),
-        };
         let (session_tx, miot_rx) = (args.upstream, args.downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
-        allow_panic!(&self, poll.registry().register(&mut args.conn, token, interests));
+        allow_panic!(self, poll.registry().register(&mut args.conn, token, interests));
 
         let rd = socket::Source {
-            pr: MQTTRead::new(self.config.mqtt_max_packet_size()),
+            pr: MQTTRead::new(max_packet_size),
             timeout: None,
             session_tx,
             packets: VecDeque::default(),
         };
         let wt = socket::Sink {
-            pw: MQTTWrite::new(&[], args.client_max_packet_size),
+            pw: MQTTWrite::new(&[], args.max_packet_size),
             timeout: None,
             miot_rx,
             packets: VecDeque::default(),
         };
-        let (client_id, conn, addr) = (args.client_id.clone(), args.conn, args.addr);
-        let socket = socket::Socket { client_id, conn, addr, token, rd, wt };
+        let (client_id, conn) = (args.client_id.clone(), args.conn);
+        let socket = socket::Socket { client_id, conn, token, rd, wt };
         conns.insert(args.client_id, socket);
 
         Response::Ok
     }
 
     fn handle_remove_connection(&mut self, req: Request) -> Response {
-        error!("{} removing connection ...", self.prefix);
+        let client_id = match req {
+            Request::RemoveConnection { client_id } => client_id,
+            _ => unreachable!(),
+        };
 
         let (poll, conns) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, .. }) => (poll, conns),
             _ => unreachable!(),
         };
 
-        let client_id = match req {
-            Request::RemoveConnection { client_id } => client_id,
-            _ => unreachable!(),
-        };
-
         match conns.remove(&client_id) {
             Some(mut socket) => {
+                let remote_addr = socket.conn.peer_addr();
+                info!("{} removing connection {:?} ...", self.prefix, remote_addr);
                 allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
                 Response::Removed(socket)
             }
@@ -467,9 +469,10 @@ impl Miot {
         let mut tokens = Vec::with_capacity(run_loop.conns.len());
 
         for (cid, sock) in run_loop.conns.into_iter() {
-            info!("{} closing socket {:?} client-id:{:?}", self.prefix, sock.addr, *cid);
+            let raddr = sock.conn.remote_addr();
+            info!("{} closing socket {:?} client-id:{:?}", self.prefix, raddr, *cid);
             client_ids.push(sock.client_id);
-            addrs.push(sock.addr);
+            addrs.push(raddr);
             tokens.push(sock.token);
         }
 

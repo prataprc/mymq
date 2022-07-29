@@ -306,7 +306,6 @@ pub enum Response {
 
 pub struct AddConnectionArgs {
     pub conn: mio::net::TcpStream,
-    pub addr: net::SocketAddr,
     pub pkt: v5::Connect,
 }
 
@@ -595,7 +594,7 @@ impl Cluster {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use crate::broker::shard::AddSessionArgs;
 
-        let AddConnectionArgs { conn, addr, pkt: connect } = match req {
+        let AddConnectionArgs { conn, pkt: connect } = match req {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
@@ -619,13 +618,15 @@ impl Cluster {
                 todo!()
             }
         };
-        info!("{}, new connection {:?} mapped to shard {}", self.prefix, addr, shard_id);
+        info!(
+            "{}, new connection {:?} mapped to shard {}",
+            self.prefix,
+            self.conn.remote_addr(),
+            shard_id
+        );
 
         // Add session to the shard.
-        allow_panic!(
-            &self,
-            shard.add_session(AddSessionArgs { conn, addr, pkt: connect })
-        );
+        allow_panic!(&self, shard.add_session(AddSessionArgs { conn, pkt: connect }));
 
         Response::Ok
     }

@@ -19,6 +19,20 @@ pub const CONTROL_CHAN_SIZE: usize = 1024;
 /// the application will be listening on.
 pub type AppTx = mpsc::SyncSender<String>;
 
+/// Seqno counted for every outgoing publish packet for each session.
+type OutSeqno = u64;
+
+/// Seqno counted for every incoming publish packet for each shard.
+type InpSeqno = u64;
+
+/// Timestamp list managed at incoming publish, used to track lossless publish to all
+/// subscribed-clients.
+pub struct Timestamp {
+    shard_id: u32,
+    last_routed: InpSeqno,
+    last_acked: InpSeqno,
+}
+
 /// Return type from methods used to send or receive messages/packets/commands.
 ///
 /// This type is associated with methods that communicates with:
@@ -72,6 +86,7 @@ pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
 }
 
 mod cluster;
+mod consensus;
 mod flush;
 mod handshake;
 mod keep_alive;
@@ -88,6 +103,7 @@ mod thread;
 mod ticker;
 mod ttrie;
 
+pub use cluster::Consensus;
 pub use cluster::{Cluster, Node};
 pub use flush::Flusher;
 pub use handshake::Handshake;

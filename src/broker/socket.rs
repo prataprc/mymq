@@ -87,7 +87,6 @@ impl PktRx {
 pub struct Socket {
     pub client_id: ClientID,
     pub conn: mio::net::TcpStream,
-    pub addr: net::SocketAddr,
     pub token: mio::Token,
     pub rd: Source,
     pub wt: Sink,
@@ -216,9 +215,7 @@ impl Socket {
         let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
 
         let pkts = self.rd.packets.drain(..).collect();
-
         let mut status = session_tx.try_sends(prefix, pkts);
-
         self.rd.packets = status.take_values().into(); // left over packets
 
         status
