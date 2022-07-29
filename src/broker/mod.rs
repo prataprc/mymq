@@ -103,13 +103,13 @@ mod thread;
 mod ticker;
 mod ttrie;
 
-pub use cluster::Consensus;
 pub use cluster::{Cluster, Node};
+pub use consensus::Consensus;
 pub use flush::Flusher;
 pub use handshake::Handshake;
 pub use keep_alive::KeepAlive;
 pub use listener::Listener;
-pub use message::{msg_channel, ClientInp, ClientOut, Message, MsgRx, MsgTx};
+pub use message::{msg_channel, Message, MsgRx, MsgTx};
 pub use miot::Miot;
 pub use session::Session;
 pub use shard::Shard;

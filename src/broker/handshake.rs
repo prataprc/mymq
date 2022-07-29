@@ -1,6 +1,6 @@
 use log::{error, info};
 
-use std::{io, net, thread, time};
+use std::{io, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, SLEEP_10MS};
@@ -28,13 +28,6 @@ impl Threadable for Handshake {
         use crate::broker::cluster::AddConnectionArgs;
 
         let now = time::Instant::now();
-        info!(
-            "{} new connection {:?}<-{:?} at {:?}",
-            self.prefix,
-            self.conn.local_addr().unwrap(),
-            self.conn.remote_addr().unwrap(),
-            now
-        );
 
         let max_size = self.config.mqtt_max_packet_size();
         let connect_timeout = self.config.connect_timeout();
@@ -43,6 +36,14 @@ impl Threadable for Handshake {
         let mut conn = self.conn.take().unwrap();
         let timeout = now + time::Duration::from_secs(connect_timeout as u64);
         let prefix = self.prefix.clone();
+
+        info!(
+            "{} new connection {:?}<-{:?} at {:?}",
+            prefix,
+            conn.local_addr().unwrap(),
+            conn.peer_addr().unwrap(),
+            now
+        );
 
         let (code, connack, connect) = loop {
             packetr = match packetr.read(&mut conn) {

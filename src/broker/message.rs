@@ -2,7 +2,6 @@
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use log::{error, warn};
 
-use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc};
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -11,7 +10,7 @@ use std::result;
 #[allow(unused_imports)]
 use crate::broker::Shard;
 
-use crate::broker::{QueueStatus, Session};
+use crate::broker::{InpSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};
 

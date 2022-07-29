@@ -1,11 +1,10 @@
 use log::{debug, error, trace};
 
 use std::collections::{BTreeMap, VecDeque};
-use std::{cmp, net};
+use std::{cmp, mem, net};
 
-use crate::broker::message;
 use crate::broker::SubscribedTrie;
-use crate::broker::{KeepAlive, Message, PktRx, PktTx, QueueStatus, Shard};
+use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus, Shard};
 
 use crate::{v5, ClientID, Config, PacketID, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -97,9 +96,7 @@ impl Session {
             topic_aliases: BTreeMap::default(),
             subscriptions: BTreeMap::default(),
             out_seqno: 1,
-            unacks: BTreeMap::default(),
             back_log: BTreeMap::default(),
-            next_packet_id: 1,
         };
 
         let prefix = format!("session:{}", args.addr);
@@ -117,8 +114,12 @@ impl Session {
 
             inp_qos1: Vec::default(),
             inp_qos2: Vec::default(),
-            state,
             out_acks: VecDeque::default(),
+            qos1_unacks: BTreeMap::default(),
+            qos2_unacks: BTreeMap::default(),
+
+            next_packet_id: 1,
+            state,
         }
     }
 
@@ -155,7 +156,7 @@ impl Session {
 
 impl Session {
     pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
-        for (topic_filter, value) in self.subscriptions.iter() {
+        for (topic_filter, value) in self.state.subscriptions.iter() {
             topic_filters.unsubscribe(topic_filter, value);
         }
     }
@@ -197,11 +198,8 @@ impl Session {
             msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
-        if let QueueStatus::Disconnected(_) = self.out_acks.extend(msgs.into_iter()) {
-            Ok(QueueStatus::Disconnected(Vec::new()))
-        } else {
-            Ok(self.flush_messages())
-        }
+        self.out_acks.extend(msgs.into_iter());
+        Ok(self.flush_packets())
     }
 
     // handle incoming packet, return Message::LocalAck, if any.
@@ -304,7 +302,7 @@ impl Session {
             shard
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
-            self.subscriptions.insert(filter.topic_filter.clone(), subscription);
+            self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
 
             let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
             let rc = match cmp::max(server_qos, qos) {
@@ -350,20 +348,20 @@ impl Session {
             match msg {
                 msg @ Message::Packet { .. } => {
                     for (out_seqno, msg) in self.expand_subscriptions(msg) {
-                        self.back_log.insert(out_seqno, msg);
+                        self.state.back_log.insert(out_seqno, msg);
                     }
                 }
                 Message::ClientAck { .. } | Message::LocalAck { .. } => unreachable!(),
             };
         }
 
-        let m = self.back_log.len();
+        let m = self.state.back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
         let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
-            error!("{} cout.back_log {} pressure exceeds limit {}", self.prefix, m, n);
+            error!("{} session.back_log {} pressure exceeds limit {}", self.prefix, m, n);
             QueueStatus::Disconnected(Vec::new())
         } else {
             QueueStatus::Ok(Vec::new())
@@ -388,38 +386,43 @@ impl Session {
     }
 
     pub fn flush_packets(&mut self) -> QueueStatus<v5::Packet> {
-        let receive_maximum = self.connect.receive_maximum();
+        let receive_maximum = self.connect.receive_maximum() as usize;
         let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
 
-        let n = cmp::min(receive_maximum - self.unacks.len(), self.back_log.len());
+        let n =
+            cmp::min(receive_maximum - self.qos1_unacks.len(), self.state.back_log.len());
 
         let mut drained = vec![];
-        let mut iter = self.back_log.iter().take(n);
+        let mut back_log = mem::replace(&mut self.state.back_log, BTreeMap::default());
+        let mut iter = back_log.iter().take(n);
         let status = loop {
             match iter.next() {
                 Some((out_seqno, msg)) => {
                     let (packet_id, pkts) = match msg.clone().into_packet() {
                         v5::Packet::Publish(mut publish) => {
                             let packet_id = self.incr_packet_id();
-                            publish.set_packet_id(packet_id));
+                            publish.set_packet_id(packet_id);
                             (packet_id, vec![v5::Packet::Publish(publish)])
                         }
                         _ => unreachable!(),
-                    }
+                    };
                     let mut status = miot_tx.try_sends(&self.prefix, pkts);
                     match status.take_values() {
                         rems if rems.len() == 0 => {
-                            drained.push(out_seqno);
-                            self.unacks.insert(packet_id, msg.clone());
+                            drained.push(*out_seqno);
+                            self.qos1_unacks.insert(packet_id, msg.clone());
                         }
-                        rems => break status,
+                        _rems => break status,
                     }
                 }
-                None => QueueStatus::Ok(Vec::new())
+                None => break QueueStatus::Ok(Vec::new()),
             }
         };
+        for out_seqno in drained.into_iter() {
+            back_log.remove(&out_seqno);
+        }
+        let _empty = mem::replace(&mut self.state.back_log, back_log);
 
-        drained.into_iter().for_each(|out_seqno| self.back_log.remove(&out_seqno));
         status
     }
 
@@ -433,9 +436,7 @@ impl Session {
     /// e. TODO: Send seqno as UserProperty.
     /// f. TODO: Use topic-alias, if enabled.
     pub fn expand_subscriptions(&mut self, msg: Message) -> Vec<(OutSeqno, Message)> {
-        use std::cmp;
-
-        let (src_client_id, src_shard_id, subscriptions, publish) = match self {
+        let (src_client_id, src_shard_id, subscriptions, publish) = match msg {
             Message::Packet {
                 src_client_id,
                 src_shard_id,
@@ -446,14 +447,14 @@ impl Session {
             _ => unreachable!(),
         };
 
-        let server_qos = v5::QoS::try_from(sess.as_config().mqtt_maximum_qos()).unwrap();
+        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
 
-        let mut msgs: Vec<Message> = Vec::with_capacity(subscriptions.len());
+        let mut msgs: Vec<(OutSeqno, Message)> = Vec::with_capacity(subscriptions.len());
         for subscr in subscriptions.into_iter() {
             let mut publish = publish.clone();
             let retain = subscr.retain_as_published && publish.retain;
             let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
-            let seqno = sess.incr_out_seqno();
+            let seqno = self.incr_out_seqno();
 
             publish.set_fixed_header(retain, qos, false);
             publish.add_subscription_id(subscr.subscription_id);
@@ -490,10 +491,10 @@ impl Session {
                 false
             }
             v5::QoS::AtLeastOnce => {
-                matches!(self.qos1.binary_search(&publ.packet_id.unwrap()), Ok(_))
+                matches!(self.inp_qos1.binary_search(&publ.packet_id.unwrap()), Ok(_))
             }
             v5::QoS::ExactlyOnce => {
-                matches!(self.qos2.binary_search(&publ.packet_id.unwrap()), Ok(_))
+                matches!(self.inp_qos2.binary_search(&publ.packet_id.unwrap()), Ok(_))
             }
             v5::QoS::AtMostOnce => false,
         }
@@ -513,8 +514,8 @@ impl Session {
 
         let qos_vec = match publ.qos {
             v5::QoS::AtMostOnce => return Ok(true),
-            v5::QoS::AtLeastOnce => &mut self.qos1,
-            v5::QoS::ExactlyOnce => &mut self.qos2,
+            v5::QoS::AtLeastOnce => &mut self.inp_qos1,
+            v5::QoS::ExactlyOnce => &mut self.inp_qos2,
         };
 
         let packet_id = publ.packet_id.unwrap();
@@ -530,8 +531,8 @@ impl Session {
     fn unbook_qos(&mut self, publ: &v5::Publish) -> bool {
         let qos_vec = match publ.qos {
             v5::QoS::AtMostOnce => return true,
-            v5::QoS::AtLeastOnce => &mut self.qos1,
-            v5::QoS::ExactlyOnce => &mut self.qos2,
+            v5::QoS::AtLeastOnce => &mut self.inp_qos1,
+            v5::QoS::ExactlyOnce => &mut self.inp_qos2,
         };
 
         let packet_id = publ.packet_id.unwrap();
@@ -564,7 +565,7 @@ impl Session {
                 alias_max.unwrap()
             )?,
             Some(alias) if topic_name.len() > 0 => {
-                match self.topic_aliases.insert(alias, topic_name.clone()) {
+                match self.state.topic_aliases.insert(alias, topic_name.clone()) {
                     Some(old) => debug!(
                         "{} for topic-alias {} replacing {:?} with {:?}",
                         self.prefix, alias, old, topic_name
@@ -573,7 +574,7 @@ impl Session {
                 };
                 topic_name.clone()
             }
-            Some(alias) => match self.topic_aliases.get(&alias) {
+            Some(alias) => match self.state.topic_aliases.get(&alias) {
                 Some(topic_name) => topic_name.clone(),
                 None => err!(
                     ProtocolError,
@@ -623,8 +624,8 @@ impl Session {
     }
 
     pub fn incr_packet_id(&mut self) -> PacketID {
-        let packet_id = self.state.next_packet_id;
-        self.state.next_packet_id = self.state.next_packet_id.wrapping_add(1);
+        let packet_id = self.next_packet_id;
+        self.next_packet_id = self.next_packet_id.wrapping_add(1);
         packet_id
     }
 

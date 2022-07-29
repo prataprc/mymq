@@ -327,7 +327,10 @@ impl Miot {
 
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("rconn:{}:{}", socket.conn.remote_addr(), **client_id);
+            let prefix = {
+                let remote_addr = socket.conn.peer_addr().unwrap();
+                format!("rconn:{}:{}", remote_addr, **client_id)
+            };
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
@@ -364,7 +367,10 @@ impl Miot {
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = format!("wconn:{}:{}", socket.conn.remote_addr(), **client_id);
+            let prefix = {
+                let remote_addr = socket.conn.peer_addr().unwrap();
+                format!("wconn:{}:{}", remote_addr, **client_id)
+            };
             match socket.write_packets(&prefix, &self.config) {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => {
                     // TODO: should we wake the session here.
@@ -469,7 +475,7 @@ impl Miot {
         let mut tokens = Vec::with_capacity(run_loop.conns.len());
 
         for (cid, sock) in run_loop.conns.into_iter() {
-            let raddr = sock.conn.remote_addr();
+            let raddr = sock.conn.peer_addr().unwrap();
             info!("{} closing socket {:?} client-id:{:?}", self.prefix, raddr, *cid);
             client_ids.push(sock.client_id);
             addrs.push(raddr);

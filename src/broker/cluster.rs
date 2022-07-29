@@ -598,6 +598,7 @@ impl Cluster {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
+        let remote_addr = conn.peer_addr().unwrap();
 
         let RunLoop { shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
@@ -620,9 +621,7 @@ impl Cluster {
         };
         info!(
             "{}, new connection {:?} mapped to shard {}",
-            self.prefix,
-            self.conn.remote_addr(),
-            shard_id
+            self.prefix, remote_addr, shard_id
         );
 
         // Add session to the shard.

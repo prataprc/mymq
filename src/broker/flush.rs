@@ -233,7 +233,10 @@ impl Flusher {
             Request::FlushConnection { socket, err } => (socket, err),
             _ => unreachable!(),
         };
-        let prefix = format!("{}:{}:{}", self.prefix, socket.addr, *socket.client_id);
+        let prefix = {
+            let remote_addr = socket.conn.peer_addr().unwrap();
+            format!("{}:{}:{}", self.prefix, remote_addr, *socket.client_id)
+        };
 
         // We are finishing off pening packets from Session, Disconnect and close the
         // socket.

@@ -1,12 +1,13 @@
 use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use std::{cmp, collections::BTreeMap, mem, net, sync::Arc};
+use std::{cmp, collections::BTreeMap, mem, sync::Arc};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, socket};
 use crate::broker::{AppTx, Consensus, RetainedTrie, Session, Shardable, SubscribedTrie};
 use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
+use crate::broker::{InpSeqno, Timestamp};
 
 use crate::{v5, ClientID, Config, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -193,11 +194,6 @@ impl Shard {
             let size = self.config.mqtt_pkt_batch_size() * num_shards;
             message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
-        let cinp = message::ClientInp {
-            seqno: 1,
-            unacks: BTreeMap::default(),
-            timestamp: BTreeMap::default(),
-        };
         let mut shard = Shard {
             name: format!("{}-shard-main", self.config.name),
             shard_id: self.shard_id,
@@ -212,9 +208,11 @@ impl Shard {
                 miot: Miot::default(),
 
                 sessions: BTreeMap::default(),
-                state: ShardState { cinp },
-                ack_timestamp: BTreeMap::default(),
+                inp_seqno: 1,
                 shard_back_log: BTreeMap::default(),
+                index: BTreeMap::default(),
+                ack_timestamps: Vec::default(),
+                consns: Consensus::default(),
 
                 shard_queues: BTreeMap::default(),
                 topic_filters: args.topic_filters,
@@ -564,8 +562,8 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let shard_back_log = mem::replace(shard_back_log, BTreeMap::default());
-        for (shard_id, msgs) in shard_back_log.into_iter() {
+        let back_log = mem::replace(shard_back_log, BTreeMap::default());
+        for (shard_id, msgs) in back_log.into_iter() {
             let shard = shard_queues.get_mut(&shard_id).unwrap();
 
             let mut status = shard.send_messages(msgs);
@@ -585,11 +583,10 @@ impl Shard {
     fn in_messages(&mut self, msg_rx: &MsgRx) -> QueueStatus<Message> {
         // receive messages targeting all the sessions.
         let mut status = msg_rx.try_recvs();
-        let msgs = status.take_values();
 
         // handle local-ack and filterout message-packets
-        let msgs = vec![];
-        for mut msg in msgs.into_iter() {
+        let mut msgs = vec![];
+        for mut msg in status.take_values().into_iter() {
             match &mut msg {
                 Message::LocalAck { shard_id, last_acked } => {
                     self.book_ack_timestamps(*shard_id, *last_acked)
@@ -612,13 +609,13 @@ impl Shard {
         // create local_acks and partition the messages for each session.
         let mut session_msgs: BTreeMap<ClientID, Vec<Message>> = BTreeMap::default();
         let mut local_acks = BTreeMap::default();
-        for mut msg in msgs.into_iter() {
+        for msg in msgs.into_iter() {
             match &msg {
                 Message::Packet { src_client_id, src_shard_id, inp_seqno, .. } => {
                     match local_acks.get_mut(src_shard_id) {
-                        Some(last_acked) => *last_acked = *inp_seqno;
+                        Some(last_acked) => *last_acked = *inp_seqno,
                         None => {
-                            local_acks.insert(src_shard_id, *inp_seqno);
+                            local_acks.insert(*src_shard_id, *inp_seqno);
                         }
                     }
 
@@ -657,7 +654,7 @@ impl Shard {
 
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
-                let err: Result<()> = err!(SlowClient, code: UnspecifiedError);
+                let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
                 let req = Request::FlushConnection { socket, err: err.unwrap_err() };
                 self.handle_flush_connection(req);
             }
@@ -696,7 +693,7 @@ impl Shard {
 
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
-                let err: Result<()> = err!(SlowClient, code: UnspecifiedError);
+                let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
                 let req = Request::FlushConnection { socket, err: err.unwrap_err() };
                 self.handle_flush_connection(req);
             }
@@ -715,7 +712,7 @@ impl Shard {
             match shard_back_log.get_mut(&target_shard_id) {
                 Some(msgs) => msgs.push(msg),
                 None => {
-                    shard_back_log.insert(target_shard_id, vec![inp_seqno]);
+                    shard_back_log.insert(target_shard_id, vec![msg]);
                 }
             }
         }
@@ -790,7 +787,7 @@ impl Shard {
             let msgs = vec![Message::new_client_ack(packet)];
             session.as_mut_out_acks().extend(msgs.into_iter())
         }
-        match session.flush_messages() {
+        match session.flush_packets() {
             QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
                 error!("{} fail to send CONNACK in add_session", self.prefix);
                 return Response::Ok;
@@ -816,7 +813,7 @@ impl Shard {
                     code: SessionTakenOver,
                     "{} client {}",
                     self.prefix,
-                    remote_addr,
+                    remote_addr
                 );
                 let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
 
@@ -959,6 +956,7 @@ impl Shard {
     ) {
         let target_shard_id = subscrs[0].shard_id;
         let inp_seqno = self.incr_inp_seqno();
+        let publ_qos = publ.qos;
 
         // book `shard_back_log` and `index`
         {
@@ -981,12 +979,11 @@ impl Shard {
                     shard_back_log.insert(target_shard_id, vec![msg.clone()]);
                 }
             }
-            index.insert(inp_seqno, msg)
+            index.insert(inp_seqno, msg);
         }
 
         // bool `ack_timestamps`
         let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
-        let publ_qos = publ.qos;
         match cmp::min(server_qos, publ_qos) {
             v5::QoS::AtMostOnce => (),
             v5::QoS::AtLeastOnce => self.book_inp_timestamps(target_shard_id, inp_seqno),
@@ -1014,7 +1011,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        match ack_timestamps.binary_search_by(&shard_id, |t| &t.shard_id) {
+        match ack_timestamps.binary_search_by_key(&shard_id, |t| t.shard_id) {
             Ok(off) => ack_timestamps[off].last_acked = last_acked,
             Err(_) => unreachable!(),
         }
@@ -1026,11 +1023,11 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        match ack_timestamps.binary_search_by(&shard_id, |t| &t.shard_id) {
-            Ok(off) => ack_timestamp[off].last_routed = inp_seqno,
+        match ack_timestamps.binary_search_by_key(&shard_id, |t| t.shard_id) {
+            Ok(off) => ack_timestamps[off].last_routed = inp_seqno,
             Err(off) => {
                 let t = Timestamp { shard_id, last_routed: inp_seqno, last_acked: 0 };
-                ack_timestamp[off] = t;
+                ack_timestamps[off] = t;
             }
         }
     }

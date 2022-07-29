@@ -1,7 +1,7 @@
 use log::{error, trace, warn};
 
 use std::sync::{mpsc, Arc};
-use std::{collections::VecDeque, mem, net, time};
+use std::{collections::VecDeque, mem, time};
 
 use crate::broker::QueueStatus;
 
