@@ -27,6 +27,8 @@ pub struct SessionArgs {
 pub struct Session {
     /// Client's ClientID that created this session.
     client_id: ClientID,
+    /// Shard hosting this session.
+    shard_id: u32,
     /// Remote socket address.
     prefix: String,
     /// Broker Configuration.
@@ -39,11 +41,15 @@ pub struct Session {
     miot_tx: PktTx,                       // Outbound channel to Miot thread.
     session_rx: PktRx,                    // Inbound channel from Miot thread.
 
-    // Sorted list of QoS-1 PacketID for which we havn't sent the acknowledgment.
-    inp_qos1: Vec<PacketID>,
-    // Sorted list of QoS-2 PacketID for which we havn't sent the acknowledgment.
-    inp_qos2: Vec<PacketID>,
+    // MQTT topic-aliases if enabled. ZERO is not allowed.
+    topic_aliases: BTreeMap<u16, TopicName>,
+    // List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
+    // messages are committed here, [Cluster::topic_filter] will also be updated.
+    subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
 
+    // Sorted list of QoS-1 & QoS-2 PacketID for which we havn't sent the acknowledgment.
+    inp_qos1: Vec<PacketID>,
+    inp_qos2: Vec<PacketID>,
     // List of acknowledgements that needs to be sent to remote client. Pairs with
     // inp_qos1 and inp_qos2
     out_acks: VecDeque<Message>,
@@ -56,12 +62,8 @@ pub struct Session {
     // concurrent PUBLISH.
     qos1_unacks: BTreeMap<PacketID, Message>,
     qos2_unacks: BTreeMap<PacketID, Message>,
-
-    // This value is incremented for every new PUBLISH(qos>0), messages that is going
-    // out to the client.
-    //
-    // We don't increment this value if index.len() exceeds the `receive_maximum`
-    // set by the client.
+    // This value is incremented for every out-going PUBLISH(qos>0).
+    // If index.len() > `receive_maximum`, don't increment this value.
     next_packet_id: PacketID,
 
     // Consensus state
@@ -69,12 +71,6 @@ pub struct Session {
 }
 
 pub struct SessionState {
-    /// MQTT topic-aliases if enabled. ZERO is not allowed.
-    pub topic_aliases: BTreeMap<u16, TopicName>,
-    /// List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
-    /// messages are committed here, [Cluster::topic_filter] will also be updated.
-    pub subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
-
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     /// outgoing publish packet.
     pub out_seqno: OutSeqno,
@@ -92,17 +88,13 @@ pub struct SessionStats;
 
 impl Session {
     pub fn start(args: SessionArgs, config: Config, connect: &v5::Connect) -> Session {
-        let state = SessionState {
-            topic_aliases: BTreeMap::default(),
-            subscriptions: BTreeMap::default(),
-            out_seqno: 1,
-            back_log: BTreeMap::default(),
-        };
+        let state = SessionState { out_seqno: 1, back_log: BTreeMap::default() };
 
         let prefix = format!("session:{}", args.addr);
         let sei = config.mqtt_session_expiry_interval(connect.session_expiry_interval());
         Session {
             client_id: args.client_id,
+            shard_id: args.shard_id,
             prefix: prefix,
             config: config.clone(),
 
@@ -111,6 +103,9 @@ impl Session {
             connect: connect.clone(),
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
+
+            topic_aliases: BTreeMap::default(),
+            subscriptions: BTreeMap::default(),
 
             inp_qos1: Vec::default(),
             inp_qos2: Vec::default(),
@@ -156,7 +151,7 @@ impl Session {
 
 impl Session {
     pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
-        for (topic_filter, value) in self.state.subscriptions.iter() {
+        for (topic_filter, value) in self.subscriptions.iter() {
             topic_filters.unsubscribe(topic_filter, value);
         }
     }
@@ -168,6 +163,7 @@ impl Session {
         let rc_disconnected = QueueStatus::Disconnected(Vec::new());
 
         let mut down_status = self.session_rx.try_recvs(&self.prefix);
+
         match down_status.take_values() {
             pkts if pkts.len() == 0 => {
                 self.keep_alive.check_expired()?;
@@ -199,7 +195,8 @@ impl Session {
         }
 
         self.out_acks.extend(msgs.into_iter());
-        Ok(self.flush_packets())
+
+        Ok(QueueStatus::Ok(Vec::new()))
     }
 
     // handle incoming packet, return Message::LocalAck, if any.
@@ -210,9 +207,20 @@ impl Session {
         // PUBLISH, PUBLISH-ack lead to message routing.
 
         let msgs = match pkt {
-            v5::Packet::PingReq => vec![Message::new_client_ack(v5::Packet::PingReq)],
-            v5::Packet::Publish(publish) => self.do_publish(shard, publish)?,
-            v5::Packet::Subscribe(sub) => self.do_subscribe(shard, sub)?,
+            v5::Packet::PingReq => {
+                let msg = Message::new_client_ack(v5::Packet::PingResp);
+                vec![msg]
+            }
+            v5::Packet::Publish(publ) => match self.rx_publish(shard, publ.clone())? {
+                false if publ.qos == v5::QoS::AtLeastOnce => {
+                    let pkt = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
+                    let msg = Message::new_client_ack(v5::Packet::PubAck(pkt));
+                    vec![msg]
+                }
+                false if publ.qos == v5::QoS::ExactlyOnce => todo!(),
+                false | true => vec![],
+            },
+            v5::Packet::Subscribe(sub) => self.rx_subscribe(shard, sub)?,
             v5::Packet::UnSubscribe(_unsub) => todo!(),
             v5::Packet::PubAck(_puback) => todo!(),
             v5::Packet::PubRec(_puback) => todo!(),
@@ -250,23 +258,34 @@ impl Session {
         Ok(msgs)
     }
 
-    fn do_publish(&mut self, shard: &mut Shard, publ: v5::Publish) -> Result<Messages> {
-        if self.is_duplicate(&publ) {
-            return Ok(Vec::new());
+    // return `true` if there where subscribers.
+    fn rx_publish(&mut self, shard: &mut Shard, publish: v5::Publish) -> Result<bool> {
+        if self.is_duplicate(&publish) {
+            return Ok(false);
         }
 
-        self.book_retain(shard, &publ)?;
-        self.book_qos(&publ)?;
+        self.book_retain(shard, &publish)?;
+        self.book_qos(&publish)?;
 
-        let topic_name = self.publish_topic_name(&publ)?;
+        let topic_name = self.publish_topic_name(&publish)?;
         let subscrs = shard.match_subscribers(self, &topic_name);
+        let has_subscrs = subscrs.len() > 0;
+        let inp_seqno = shard.incr_inp_seqno();
 
-        for (_match_client_id, subscrs) in subscrs.into_iter() {
+        for (_target_client_id, subscrs) in subscrs.into_iter() {
             if subscrs.len() == 0 {
+                trace!("{} no matching subscribers for {:?}", self.prefix, topic_name);
                 continue;
             }
 
-            shard.route_to_client(self, subscrs, publ.clone());
+            let shard_id = subscrs[0].shard_id;
+            let qos: v5::QoS = {
+                let iter = subscrs.iter().map(|s| s.route_qos(&publish, &self.config));
+                iter.min().unwrap()
+            };
+
+            let msg = Message::new_routed(self, inp_seqno, subscrs, publish.clone());
+            shard.route_to_client(msg, shard_id, qos);
 
             // TODO: handle retain_as_published.
             // TODO: handle retain_forward_rule
@@ -274,11 +293,11 @@ impl Session {
 
         // TODO: handle `message_expiry_interval`
 
-        Ok(Vec::new())
+        Ok(has_subscrs)
     }
 
     // return suback and retained-messages if any.
-    fn do_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
+    fn rx_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
         let subscription_id: Option<u32> = match &sub.properties {
             Some(props) => props.subscription_id.clone().map(|x| *x),
             None => None,
@@ -302,7 +321,7 @@ impl Session {
             shard
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
-            self.state.subscriptions.insert(filter.topic_filter.clone(), subscription);
+            self.subscriptions.insert(filter.topic_filter.clone(), subscription);
 
             let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
             let rc = match cmp::max(server_qos, qos) {
@@ -346,12 +365,14 @@ impl Session {
     pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         for msg in msgs.into_iter() {
             match msg {
-                msg @ Message::Packet { .. } => {
-                    for (out_seqno, msg) in self.expand_subscriptions(msg) {
+                msg @ Message::Routed { .. } => {
+                    for (out_seqno, msg) in self.to_msg_packets(msg) {
                         self.state.back_log.insert(out_seqno, msg);
                     }
                 }
-                Message::ClientAck { .. } | Message::LocalAck { .. } => unreachable!(),
+                Message::Packet { .. } => unreachable!(),
+                Message::LocalAck { .. } => unreachable!(),
+                Message::ClientAck { .. } => unreachable!(),
             };
         }
 
@@ -435,15 +456,9 @@ impl Session {
     /// d. Adjust the retain flag based on subscription's retain-as-published flag.
     /// e. TODO: Send seqno as UserProperty.
     /// f. TODO: Use topic-alias, if enabled.
-    pub fn expand_subscriptions(&mut self, msg: Message) -> Vec<(OutSeqno, Message)> {
-        let (src_client_id, src_shard_id, subscriptions, publish) = match msg {
-            Message::Packet {
-                src_client_id,
-                src_shard_id,
-                subscriptions,
-                packet: v5::Packet::Publish(publish),
-                ..
-            } => (src_client_id, src_shard_id, subscriptions, publish),
+    pub fn to_msg_packets(&mut self, msg: Message) -> Vec<(OutSeqno, Message)> {
+        let (subscriptions, publish) = match msg {
+            Message::Routed { subscriptions, publish, .. } => (subscriptions, publish),
             _ => unreachable!(),
         };
 
@@ -454,20 +469,12 @@ impl Session {
             let mut publish = publish.clone();
             let retain = subscr.retain_as_published && publish.retain;
             let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
-            let seqno = self.incr_out_seqno();
+            let out_seqno = self.incr_out_seqno();
 
             publish.set_fixed_header(retain, qos, false);
             publish.add_subscription_id(subscr.subscription_id);
 
-            let msg = Message::Packet {
-                src_client_id: src_client_id.clone(),
-                src_shard_id,
-                inp_seqno: seqno,
-                packet_id: Default::default(),
-                subscriptions: Vec::new(),
-                packet: v5::Packet::Publish(publish),
-            };
-            msgs.push((seqno, msg))
+            msgs.push((out_seqno, Message::new_packet(out_seqno, publish)));
         }
 
         msgs
@@ -484,6 +491,7 @@ impl Session {
         let ignore_dup = self.config.mqtt_ignore_duplicate();
 
         match publ.qos {
+            v5::QoS::AtMostOnce => false,
             v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce
                 if publ.duplicate && ignore_dup =>
             {
@@ -491,17 +499,24 @@ impl Session {
                 false
             }
             v5::QoS::AtLeastOnce => {
-                matches!(self.inp_qos1.binary_search(&publ.packet_id.unwrap()), Ok(_))
+                let packet_id = publ.packet_id.unwrap();
+                matches!(self.inp_qos1.binary_search(&packet_id), Ok(_))
             }
             v5::QoS::ExactlyOnce => {
-                matches!(self.inp_qos2.binary_search(&publ.packet_id.unwrap()), Ok(_))
+                let packet_id = publ.packet_id.unwrap();
+                matches!(self.inp_qos2.binary_search(&packet_id), Ok(_))
             }
-            v5::QoS::AtMostOnce => false,
         }
     }
 
-    fn book_qos(&mut self, publ: &v5::Publish) -> Result<bool> {
+    fn book_qos(&mut self, publ: &v5::Publish) -> Result<()> {
+        // Nothing to do for QoS-0
+        if let v5::QoS::AtMostOnce = publ.qos {
+            return Ok(());
+        }
+
         let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+
         if publ.qos > server_qos {
             err!(
                 ProtocolError,
@@ -513,19 +528,18 @@ impl Session {
         }
 
         let qos_vec = match publ.qos {
-            v5::QoS::AtMostOnce => return Ok(true),
             v5::QoS::AtLeastOnce => &mut self.inp_qos1,
             v5::QoS::ExactlyOnce => &mut self.inp_qos2,
+            _ => unreachable!(),
         };
 
         let packet_id = publ.packet_id.unwrap();
         match qos_vec.binary_search(&packet_id) {
-            Ok(_off) => Ok(false),
-            Err(off) => {
-                qos_vec.insert(off, packet_id);
-                Ok(true)
-            }
+            Err(off) => qos_vec.insert(off, packet_id),
+            Ok(_off) => unreachable!(), // is_duplicate() would have short-circuted
         }
+
+        Ok(())
     }
 
     fn unbook_qos(&mut self, publ: &v5::Publish) -> bool {
@@ -547,25 +561,25 @@ impl Session {
 
     fn publish_topic_name(&mut self, publ: &v5::Publish) -> Result<TopicName> {
         let (topic_name, topic_alias) = (publ.as_topic_name(), publ.topic_alias());
-        let alias_max = self.config.mqtt_topic_alias_max();
+        let server_alias_max = self.config.mqtt_topic_alias_max();
 
         let topic_name = match topic_alias {
-            Some(_alias) if alias_max.is_none() => err!(
+            Some(_alias) if server_alias_max.is_none() => err!(
                 ProtocolError,
                 code: TopicAliasInvalid,
                 "{} topic-alias-is-not-supported by broker",
                 self.prefix
             )?,
-            Some(alias) if alias > alias_max.unwrap() => err!(
+            Some(alias) if alias > server_alias_max.unwrap() => err!(
                 ProtocolError,
                 code: TopicAliasInvalid,
                 "{} topic-alias-exceeds broker limit {} > {}",
                 self.prefix,
                 alias,
-                alias_max.unwrap()
+                server_alias_max.unwrap()
             )?,
             Some(alias) if topic_name.len() > 0 => {
-                match self.state.topic_aliases.insert(alias, topic_name.clone()) {
+                match self.topic_aliases.insert(alias, topic_name.clone()) {
                     Some(old) => debug!(
                         "{} for topic-alias {} replacing {:?} with {:?}",
                         self.prefix, alias, old, topic_name
@@ -574,7 +588,7 @@ impl Session {
                 };
                 topic_name.clone()
             }
-            Some(alias) => match self.state.topic_aliases.get(&alias) {
+            Some(alias) => match self.topic_aliases.get(&alias) {
                 Some(topic_name) => topic_name.clone(),
                 None => err!(
                     ProtocolError,
@@ -627,6 +641,11 @@ impl Session {
         let packet_id = self.next_packet_id;
         self.next_packet_id = self.next_packet_id.wrapping_add(1);
         packet_id
+    }
+
+    #[inline]
+    pub fn to_shard_id(&self) -> u32 {
+        self.shard_id
     }
 
     #[inline]

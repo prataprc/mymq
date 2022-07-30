@@ -1,7 +1,7 @@
 use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use std::{cmp, collections::BTreeMap, mem, sync::Arc};
+use std::{collections::BTreeMap, mem, sync::Arc};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, socket};
@@ -591,8 +591,9 @@ impl Shard {
                 Message::LocalAck { shard_id, last_acked } => {
                     self.book_ack_timestamps(*shard_id, *last_acked)
                 }
-                Message::Packet { .. } => msgs.push(msg),
+                Message::Routed { .. } => msgs.push(msg),
                 Message::ClientAck { .. } => unreachable!(),
+                Message::Packet { .. } => unreachable!(),
             }
         }
 
@@ -611,7 +612,7 @@ impl Shard {
         let mut local_acks = BTreeMap::default();
         for msg in msgs.into_iter() {
             match &msg {
-                Message::Packet { src_client_id, src_shard_id, inp_seqno, .. } => {
+                Message::Routed { src_client_id, src_shard_id, inp_seqno, .. } => {
                     match local_acks.get_mut(src_shard_id) {
                         Some(last_acked) => *last_acked = *inp_seqno,
                         None => {
@@ -932,13 +933,13 @@ impl Shard {
         // remove no-local subscriptions for receiving session's client_id.
         match subscrs.get_mut(&sess.as_client_id()) {
             Some(subscrs) => {
-                let offs = subscrs
+                let removes = subscrs
                     .iter()
                     .enumerate()
                     .filter_map(|(i, s)| if s.no_local { Some(i) } else { None })
                     .collect::<Vec<usize>>();
 
-                for off in offs.into_iter().rev() {
+                for off in removes.into_iter().rev() {
                     subscrs.remove(off);
                 }
             }
@@ -948,45 +949,32 @@ impl Shard {
         subscrs
     }
 
-    pub fn route_to_client(
-        &mut self,
-        sess: &Session,
-        subscrs: Vec<v5::Subscription>,
-        publ: v5::Publish,
-    ) {
-        let target_shard_id = subscrs[0].shard_id;
-        let inp_seqno = self.incr_inp_seqno();
-        let publ_qos = publ.qos;
+    pub fn route_to_client(&mut self, msg: Message, target_shard_id: u32, qos: v5::QoS) {
+        match qos {
+            v5::QoS::AtMostOnce => {
+                let RunLoop { shard_back_log, .. } = match &mut self.inner {
+                    Inner::Main(run_loop) => run_loop,
+                    _ => unreachable!(),
+                };
 
-        // book `shard_back_log` and `index`
-        {
-            let src_client_id = sess.as_client_id().clone();
-            let src_shard_id = self.shard_id;
-            let msg = Message::new_packet(
-                src_client_id,
-                src_shard_id,
-                inp_seqno,
-                subscrs,
-                v5::Packet::Publish(publ),
-            );
-            let RunLoop { shard_back_log, index, .. } = match &mut self.inner {
-                Inner::Main(run_loop) => run_loop,
-                _ => unreachable!(),
-            };
-            match shard_back_log.get_mut(&target_shard_id) {
-                Some(msgs) => msgs.push(msg.clone()),
-                None => {
-                    shard_back_log.insert(target_shard_id, vec![msg.clone()]);
+                match shard_back_log.get_mut(&target_shard_id) {
+                    Some(msgs) => msgs.push(msg.clone()),
+                    None => {
+                        shard_back_log.insert(target_shard_id, vec![msg.clone()]);
+                    }
                 }
             }
-            index.insert(inp_seqno, msg);
-        }
-
-        // bool `ack_timestamps`
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
-        match cmp::min(server_qos, publ_qos) {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce => self.book_inp_timestamps(target_shard_id, inp_seqno),
+            v5::QoS::AtLeastOnce => {
+                todo!()
+                //self.book_inp_timestamps(target_shard_id, inp_seqno),
+                //match shard_back_log.get_mut(&target_shard_id) {
+                //    Some(msgs) => msgs.push(msg.clone()),
+                //    None => {
+                //        shard_back_log.insert(target_shard_id, vec![msg.clone()]);
+                //    }
+                //}
+                //index.insert(inp_seqno, msg);
+            }
             v5::QoS::ExactlyOnce => todo!(),
         }
     }
@@ -994,7 +982,7 @@ impl Shard {
 
 // These functions may be part of consensus
 impl Shard {
-    fn incr_inp_seqno(&mut self) -> u64 {
+    pub fn incr_inp_seqno(&mut self) -> u64 {
         match &mut self.inner {
             Inner::Main(RunLoop { inp_seqno, .. }) => {
                 let seqno = *inp_seqno;

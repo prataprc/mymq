@@ -5,7 +5,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::result;
 
 use crate::util::advance;
-use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
+use crate::v5::{self, FixedHeader, PacketType, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -178,6 +178,15 @@ impl Packetize for Pub {
 }
 
 impl Pub {
+    pub fn new_pub_ack(packet_id: u16) -> Pub {
+        Pub {
+            packet_type: v5::PacketType::PubAck,
+            packet_id,
+            code: (PubAckReasonCode::Success as u8).try_into().unwrap(),
+            properties: None,
+        }
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {
