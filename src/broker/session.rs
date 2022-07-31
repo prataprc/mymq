@@ -188,14 +188,12 @@ impl Session {
     }
 
     fn handle_packets(&mut self, shard: &mut Shard, pkts: Packets) -> Result<QueuePkt> {
-        let mut msgs = Vec::with_capacity(pkts.len());
-
+        let mut out_acks = mem::replace(&mut self.out_acks, VecDeque::default());
         for pkt in pkts.into_iter() {
-            msgs.extend(self.handle_packet(shard, pkt)?.into_iter());
+            out_acks.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
-        self.out_acks.extend(msgs.into_iter());
-
+        let _empty = mem::replace(&mut self.out_acks, out_acks);
         Ok(QueueStatus::Ok(Vec::new()))
     }
 
@@ -211,15 +209,18 @@ impl Session {
                 let msg = Message::new_client_ack(v5::Packet::PingResp);
                 vec![msg]
             }
-            v5::Packet::Publish(publ) => match self.rx_publish(shard, publ.clone())? {
-                false if publ.qos == v5::QoS::AtLeastOnce => {
-                    let pkt = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
-                    let msg = Message::new_client_ack(v5::Packet::PubAck(pkt));
-                    vec![msg]
+            v5::Packet::Publish(publ) => {
+                let has_subscrs = self.rx_publish(shard, publ.clone())?;
+                match (has_subscrs, publ.qos) {
+                    (false, _) | (_, v5::QoS::AtMostOnce) => vec![],
+                    (true, v5::QoS::AtLeastOnce) => {
+                        let pkt = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
+                        let msg = Message::new_client_ack(v5::Packet::PubAck(pkt));
+                        vec![msg]
+                    }
+                    (true, v5::QoS::ExactlyOnce) => todo!(),
                 }
-                false if publ.qos == v5::QoS::ExactlyOnce => todo!(),
-                false | true => vec![],
-            },
+            }
             v5::Packet::Subscribe(sub) => self.rx_subscribe(shard, sub)?,
             v5::Packet::UnSubscribe(_unsub) => todo!(),
             v5::Packet::PubAck(_puback) => todo!(),
@@ -267,10 +268,10 @@ impl Session {
         self.book_retain(shard, &publish)?;
         self.book_qos(&publish)?;
 
+        let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.publish_topic_name(&publish)?;
         let subscrs = shard.match_subscribers(self, &topic_name);
         let has_subscrs = subscrs.len() > 0;
-        let inp_seqno = shard.incr_inp_seqno();
 
         for (_target_client_id, subscrs) in subscrs.into_iter() {
             if subscrs.len() == 0 {
@@ -358,11 +359,8 @@ impl Session {
 }
 
 impl Session {
-    // Handle replicated messages, incoming messages could be from:
-    // * add_session logic, sending CONNACK, part of handshake.
-    // * shard's MsgRx, Message::Packet
-    // Note that Message::LocalAck shall not reach this far.
-    pub fn in_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+    // Handle replicated Message::Routed from other shards
+    pub fn out_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         for msg in msgs.into_iter() {
             match msg {
                 msg @ Message::Routed { .. } => {

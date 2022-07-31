@@ -105,7 +105,7 @@ pub enum Message {
         src_client_id: ClientID,     // sending client-id
         src_shard_id: u32,           // sending shard
         inp_seqno: InpSeqno,         // shard's inp_seqno
-        packet_id: Option<PacketID>, // as received from publishing client
+        packet_id: Option<PacketID>, // from publishing client, refer inp_qos1, inp_qos2
         publish: v5::Publish,        // publish packet, as received from publishing client
         subscriptions: Vec<v5::Subscription>,
     },
