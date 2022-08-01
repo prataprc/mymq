@@ -161,9 +161,9 @@ impl Publish {
         self
     }
 
-    pub fn add_subscription_id(&mut self, id: Option<u32>) {
-        match id {
-            Some(id) => match &mut self.properties {
+    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
+        for id in ids.into_iter() {
+            match &mut self.properties {
                 Some(props) => props.subscribtion_identifier.push(VarU32(id)),
                 None => {
                     self.properties = Some(PublishProperties {
@@ -171,8 +171,7 @@ impl Publish {
                         ..PublishProperties::default()
                     });
                 }
-            },
-            None => (),
+            }
         }
     }
 

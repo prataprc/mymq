@@ -1,6 +1,6 @@
 //! Broker implementation.
 
-use std::{net, path, sync::mpsc, time};
+use std::{mem, net, path, sync::mpsc, time};
 
 use crate::Config;
 
@@ -47,15 +47,35 @@ pub enum QueueStatus<T> {
 }
 
 impl<T> QueueStatus<T> {
-    fn take_values(&mut self) -> Vec<T> {
-        use std::mem;
-
+    pub fn take_values(&mut self) -> Vec<T> {
         let val = match self {
             QueueStatus::Ok(val) => val,
             QueueStatus::Block(val) => val,
             QueueStatus::Disconnected(val) => val,
         };
         mem::replace(val, Vec::new())
+    }
+
+    pub fn set_values(&mut self, values: Vec<T>) {
+        let old_values = match self {
+            QueueStatus::Ok(old_values) => old_values,
+            QueueStatus::Block(old_values) => old_values,
+            QueueStatus::Disconnected(old_values) => old_values,
+        };
+        assert!(old_values.len() == 0);
+        let _empty = mem::replace(old_values, values);
+    }
+
+    pub fn map<U>(self, values: Vec<U>) -> QueueStatus<U> {
+        use QueueStatus::*;
+
+        let (old_values, val) = match self {
+            Ok(old_values) => (old_values, Ok(values)),
+            Block(old_values) => (old_values, Block(values)),
+            Disconnected(old_values) => (old_values, Disconnected(values)),
+        };
+        assert!(old_values.len() == 0);
+        val
     }
 }
 
@@ -86,7 +106,6 @@ pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
 }
 
 mod cluster;
-mod consensus;
 mod flush;
 mod handshake;
 mod keep_alive;
@@ -104,7 +123,6 @@ mod ticker;
 mod ttrie;
 
 pub use cluster::{Cluster, Node};
-pub use consensus::Consensus;
 pub use flush::Flusher;
 pub use handshake::Handshake;
 pub use keep_alive::KeepAlive;

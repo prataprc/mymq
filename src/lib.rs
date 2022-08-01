@@ -42,6 +42,7 @@
 #![feature(backtrace_frames)]
 #![feature(backtrace)]
 #![feature(error_iter)]
+#![feature(map_first_last)]
 
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;

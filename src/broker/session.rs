@@ -1,6 +1,6 @@
 use log::{debug, error, trace};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::{cmp, mem, net};
 
 use crate::broker::SubscribedTrie;
@@ -44,27 +44,30 @@ pub struct Session {
     // MQTT topic-aliases if enabled. ZERO is not allowed.
     topic_aliases: BTreeMap<u16, TopicName>,
     // List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
-    // messages are committed here, [Cluster::topic_filter] will also be updated.
+    // messages are committed here, [Cluster::topic_filters] will also be updated.
     subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
 
-    // Sorted list of QoS-1 & QoS-2 PacketID for which we havn't sent the acknowledgment.
-    inp_qos1: Vec<PacketID>,
-    inp_qos2: Vec<PacketID>,
-    // List of acknowledgements that needs to be sent to remote client. Pairs with
-    // inp_qos1 and inp_qos2
-    out_acks: VecDeque<Message>,
+    // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
+    inp_qos12: Vec<PacketID>,
 
-    // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
-    // messages sent to subscribed clients. Entry is deleted from `qos1_unacks` and
-    // `qos2_unacks` once ACK is received for PacketID,
-    //
-    // Note that length of this collection is only as high as the allowed limit of
-    // concurrent PUBLISH.
-    qos1_unacks: BTreeMap<PacketID, Message>,
-    qos2_unacks: BTreeMap<PacketID, Message>,
     // This value is incremented for every out-going PUBLISH(qos>0).
     // If index.len() > `receive_maximum`, don't increment this value.
     next_packet_id: PacketID,
+    // Message::ClientAck that needs to be sent to remote client.
+    // CONNACK - happens during add_session.
+    // PUBACK  - happens after QoS-1 and QoS-2 messaegs are replicated.
+    // SUBACK  - happens after SUBSCRIBE is commited to [Cluster].
+    // UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
+    // PINGRESP- happens for every PINGREQ is handled by this session.
+    out_acks: Vec<Message>,
+    // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
+    // messages sent to subscribed clients. Entry is deleted from `qos1e_unacks`.
+    // ACK is received for PacketID.
+    //
+    // Note that length of this collection is only as high as the allowed limit of
+    // concurrent PUBLISH.
+    qos12_unacks: BTreeMap<PacketID, Message>,
+    qos0_back_log: Vec<Message>,
 
     // Consensus state
     state: SessionState,
@@ -74,13 +77,10 @@ pub struct SessionState {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     /// outgoing publish packet.
     pub out_seqno: OutSeqno,
-    /// All the outgoing PUBLISH > QoS-0, after going through the consensus loop,
-    /// shall first land here. While landing here Message::inp_seqno is updated with
-    /// OutSeqno. Subsequently they are published to miot-thread and copied to
-    /// `qos1_unacks` and `qos2_unacks`.
+    /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
     ///
-    /// Entries from this index are deleted after they are removed from `qos1_unacks`
-    /// and `qos2_unacks`, and after they go through the consensus loop.
+    /// Entries from this index are deleted after they are removed from `qos12_unacks`
+    /// and after they go through the consensus loop.
     pub back_log: BTreeMap<OutSeqno, Message>,
 }
 
@@ -107,13 +107,12 @@ impl Session {
             topic_aliases: BTreeMap::default(),
             subscriptions: BTreeMap::default(),
 
-            inp_qos1: Vec::default(),
-            inp_qos2: Vec::default(),
-            out_acks: VecDeque::default(),
-            qos1_unacks: BTreeMap::default(),
-            qos2_unacks: BTreeMap::default(),
+            inp_qos12: Vec::default(),
 
             next_packet_id: 1,
+            out_acks: Vec::default(),
+            qos0_back_log: Vec::default(),
+            qos12_unacks: BTreeMap::default(),
             state,
         }
     }
@@ -188,7 +187,7 @@ impl Session {
     }
 
     fn handle_packets(&mut self, shard: &mut Shard, pkts: Packets) -> Result<QueuePkt> {
-        let mut out_acks = mem::replace(&mut self.out_acks, VecDeque::default());
+        let mut out_acks = mem::replace(&mut self.out_acks, Vec::default());
         for pkt in pkts.into_iter() {
             out_acks.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
@@ -197,26 +196,30 @@ impl Session {
         Ok(QueueStatus::Ok(Vec::new()))
     }
 
-    // handle incoming packet, return Message::LocalAck, if any.
+    // handle incoming packet, return Message::ClientAck, if any.
     // Disconnected
     // ProtocolError
     fn handle_packet(&mut self, shard: &mut Shard, pkt: v5::Packet) -> Result<Messages> {
-        // SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT all lead to Message::ClientAck
-        // PUBLISH, PUBLISH-ack lead to message routing.
-
         let msgs = match pkt {
             v5::Packet::PingReq => {
-                let msg = Message::new_client_ack(v5::Packet::PingResp);
+                let msg = Message::new_ping_resp();
                 vec![msg]
             }
             v5::Packet::Publish(publ) => {
                 let has_subscrs = self.rx_publish(shard, publ.clone())?;
                 match (has_subscrs, publ.qos) {
-                    (false, _) | (_, v5::QoS::AtMostOnce) => vec![],
-                    (true, v5::QoS::AtLeastOnce) => {
-                        let pkt = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
-                        let msg = Message::new_client_ack(v5::Packet::PubAck(pkt));
+                    (_, v5::QoS::AtMostOnce) => {
+                        // QoS-0 do not have any acknowledgements.
+                        vec![]
+                    }
+                    (false, _) => {
+                        let puback = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
+                        let msg = Message::new_pub_ack(puback);
                         vec![msg]
+                    }
+                    (true, v5::QoS::AtLeastOnce) => {
+                        // QoS-1 acks happen only after replication is done.
+                        vec![]
                     }
                     (true, v5::QoS::ExactlyOnce) => todo!(),
                 }
@@ -261,6 +264,16 @@ impl Session {
 
     // return `true` if there where subscribers.
     fn rx_publish(&mut self, shard: &mut Shard, publish: v5::Publish) -> Result<bool> {
+        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap() {
+            err!(
+                ProtocolError,
+                code: QoSNotSupported,
+                "{} publish-qos exceeds server-qos {:?}",
+                self.prefix,
+                publish.qos
+            )?;
+        }
+
         if self.is_duplicate(&publish) {
             return Ok(false);
         }
@@ -270,29 +283,28 @@ impl Session {
 
         let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.publish_topic_name(&publish)?;
-        let subscrs = shard.match_subscribers(self, &topic_name);
+        let subscrs = shard.match_subscribers(&topic_name);
         let has_subscrs = subscrs.len() > 0;
 
-        for (_target_client_id, subscrs) in subscrs.into_iter() {
-            if subscrs.len() == 0 {
-                trace!("{} no matching subscribers for {:?}", self.prefix, topic_name);
+        for (id, (subscr, ids)) in subscrs.into_iter() {
+            if subscr.no_local && id == self.client_id {
+                trace!("{} skipping {:?} in {:?} no_local", self.prefix, topic_name, id);
                 continue;
             }
 
-            let shard_id = subscrs[0].shard_id;
-            let qos: v5::QoS = {
-                let iter = subscrs.iter().map(|s| s.route_qos(&publish, &self.config));
-                iter.min().unwrap()
+            let publish = {
+                let mut publish = publish.clone();
+                let retain = subscr.retain_as_published && publish.retain;
+                let qos = subscr.route_qos(&publish, &self.config);
+                publish.set_fixed_header(retain, qos, false);
+                publish.set_subscription_ids(ids);
+                publish
             };
+            let qos = publish.qos;
+            let msg = Message::new_routed(self, inp_seqno, publish, id);
 
-            let msg = Message::new_routed(self, inp_seqno, subscrs, publish.clone());
-            shard.route_to_client(msg, shard_id, qos);
-
-            // TODO: handle retain_as_published.
-            // TODO: handle retain_forward_rule
+            shard.route_to_client(&self.client_id, msg, subscr.shard_id, qos);
         }
-
-        // TODO: handle `message_expiry_interval`
 
         Ok(has_subscrs)
     }
@@ -359,202 +371,135 @@ impl Session {
 }
 
 impl Session {
-    // Handle replicated Message::Routed from other shards
-    pub fn out_messages(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        for msg in msgs.into_iter() {
-            match msg {
-                msg @ Message::Routed { .. } => {
-                    for (out_seqno, msg) in self.to_msg_packets(msg) {
-                        self.state.back_log.insert(out_seqno, msg);
-                    }
-                }
-                Message::Packet { .. } => unreachable!(),
-                Message::LocalAck { .. } => unreachable!(),
-                Message::ClientAck { .. } => unreachable!(),
-            };
+    // Handle PUBLISH QoS-0
+    pub fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        let m = self.qos0_back_log.len();
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} session.qos0_back_log {} pressure > {}", self.prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
         }
 
+        for msg in msgs.into_iter() {
+            let msg = msg.into_packet(self.incr_out_seqno(), None);
+            self.qos0_back_log.push(msg)
+        }
+
+        {
+            let back_log = mem::replace(&mut self.qos0_back_log, vec![]);
+            let mut status = self.flush_to_miot(back_log);
+            let _empty = mem::replace(&mut self.qos0_back_log, status.take_values());
+            status
+        }
+    }
+
+    // Handle PUBLISH QoS-1 and QoS-2
+    pub fn out_qos(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         let m = self.state.back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
         let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
-            error!("{} session.back_log {} pressure exceeds limit {}", self.prefix, m, n);
-            QueueStatus::Disconnected(Vec::new())
-        } else {
-            QueueStatus::Ok(Vec::new())
+            error!("{} session.state.back_log {} pressure > {}", self.prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
         }
-    }
 
-    pub fn flush_out_acks(&mut self) -> QueueStatus<v5::Packet> {
-        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
+        if self.qos12_unacks.len() >= usize::from(self.config.mqtt_receive_maximum()) {
+            return QueueStatus::Block(Vec::new());
+        }
 
-        let pkts: Vec<v5::Packet> =
-            self.out_acks.clone().into_iter().map(|m| m.into_packet()).collect();
+        for msg in msgs.into_iter() {
+            let out_seqno = self.incr_out_seqno();
+            let packet_id = self.incr_packet_id();
+            let msg = msg.into_packet(out_seqno, Some(packet_id));
+            self.state.back_log.insert(out_seqno, msg);
+        }
 
-        let mut status = miot_tx.try_sends(&self.prefix, pkts);
-        match status.take_values() {
-            rems if rems.len() == 0 => status,
-            rems => {
-                let n = self.out_acks.len() - rems.len();
-                self.out_acks.drain(..n);
-                status
+        let max = usize::try_from(self.config.mqtt_pkt_batch_size()).unwrap();
+        let mut msgs = Vec::default();
+        while let Some((_, msg)) = self.state.back_log.pop_first() {
+            self.qos12_unacks.insert(msg.to_packet_id(), msg.clone());
+            msgs.push(msg);
+            if msgs.len() >= max {
+                break;
             }
         }
-    }
-
-    pub fn flush_packets(&mut self) -> QueueStatus<v5::Packet> {
-        let receive_maximum = self.connect.receive_maximum() as usize;
-        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
-
-        let n =
-            cmp::min(receive_maximum - self.qos1_unacks.len(), self.state.back_log.len());
-
-        let mut drained = vec![];
-        let mut back_log = mem::replace(&mut self.state.back_log, BTreeMap::default());
-        let mut iter = back_log.iter().take(n);
-        let status = loop {
-            match iter.next() {
-                Some((out_seqno, msg)) => {
-                    let (packet_id, pkts) = match msg.clone().into_packet() {
-                        v5::Packet::Publish(mut publish) => {
-                            let packet_id = self.incr_packet_id();
-                            publish.set_packet_id(packet_id);
-                            (packet_id, vec![v5::Packet::Publish(publish)])
-                        }
-                        _ => unreachable!(),
-                    };
-                    let mut status = miot_tx.try_sends(&self.prefix, pkts);
-                    match status.take_values() {
-                        rems if rems.len() == 0 => {
-                            drained.push(*out_seqno);
-                            self.qos1_unacks.insert(packet_id, msg.clone());
-                        }
-                        _rems => break status,
-                    }
-                }
-                None => break QueueStatus::Ok(Vec::new()),
-            }
-        };
-        for out_seqno in drained.into_iter() {
-            back_log.remove(&out_seqno);
+        let mut status = self.flush_to_miot(msgs);
+        // re-insert, cleanup for remaining messages.
+        for msg in status.take_values().into_iter() {
+            let packet_id = msg.to_packet_id();
+            self.state.back_log.insert(msg.to_out_seqno(), msg);
+            self.qos12_unacks.remove(&packet_id);
         }
-        let _empty = mem::replace(&mut self.state.back_log, back_log);
-
         status
     }
 
-    /// Expand outgoing message for matching subscription.
-    ///
-    /// a. If there are multiple subscriptions, generate a publish-message for each
-    ///    subscription. TODO: there is scope for optimization.
-    /// b. Use appropriate seqno/packet-id specific to this session.
-    /// c. Adjust the qos based on server_qos and subscription_qos.
-    /// d. Adjust the retain flag based on subscription's retain-as-published flag.
-    /// e. TODO: Send seqno as UserProperty.
-    /// f. TODO: Use topic-alias, if enabled.
-    pub fn to_msg_packets(&mut self, msg: Message) -> Vec<(OutSeqno, Message)> {
-        let (subscriptions, publish) = match msg {
-            Message::Routed { subscriptions, publish, .. } => (subscriptions, publish),
-            _ => unreachable!(),
-        };
-
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
-
-        let mut msgs: Vec<(OutSeqno, Message)> = Vec::with_capacity(subscriptions.len());
-        for subscr in subscriptions.into_iter() {
-            let mut publish = publish.clone();
-            let retain = subscr.retain_as_published && publish.retain;
-            let qos = cmp::min(cmp::min(server_qos, subscr.qos), publish.qos);
-            let out_seqno = self.incr_out_seqno();
-
-            publish.set_fixed_header(retain, qos, false);
-            publish.add_subscription_id(subscr.subscription_id);
-
-            msgs.push((out_seqno, Message::new_packet(out_seqno, publish)));
-        }
-
-        msgs
+    pub fn flush_out_acks(&mut self) -> QueueStatus<v5::Packet> {
+        let out_acks = mem::replace(&mut self.out_acks, vec![]);
+        let mut status = self.flush_to_miot(out_acks);
+        let _empty = mem::replace(&mut self.out_acks, status.take_values());
+        status.map(vec![])
     }
 
-    pub fn retry_publish(&mut self) {
-        todo!()
+    fn flush_to_miot(&self, mut msgs: Vec<Message>) -> QueueStatus<Message> {
+        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
+
+        let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
+        let mut status = miot_tx.try_sends(&self.prefix, pkts);
+        let pkts = status.take_values();
+        let m = msgs.len();
+        let n = pkts.len();
+        msgs.drain(..(m - n));
+
+        status.map(msgs)
+    }
+
+    pub fn ack_publish(&mut self, packet_id: PacketID) {
+        let msg = Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id));
+        self.out_acks.push(msg);
     }
 }
 
 // Publish related book-keeping
 impl Session {
-    fn is_duplicate(&self, publ: &v5::Publish) -> bool {
+    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
         let ignore_dup = self.config.mqtt_ignore_duplicate();
 
-        match publ.qos {
+        match publish.qos {
             v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce
-                if publ.duplicate && ignore_dup =>
-            {
-                trace!("{} Duplicate publish received {}", self.prefix, publ);
-                false
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
+                if ignore_dup {
+                    trace!("{} Duplicate publish received {}", self.prefix, publish);
+                    false
+                } else {
+                    true
+                }
             }
-            v5::QoS::AtLeastOnce => {
-                let packet_id = publ.packet_id.unwrap();
-                matches!(self.inp_qos1.binary_search(&packet_id), Ok(_))
-            }
-            v5::QoS::ExactlyOnce => {
-                let packet_id = publ.packet_id.unwrap();
-                matches!(self.inp_qos2.binary_search(&packet_id), Ok(_))
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                matches!(self.inp_qos12.binary_search(&packet_id), Ok(_))
             }
         }
     }
 
-    fn book_qos(&mut self, publ: &v5::Publish) -> Result<()> {
-        // Nothing to do for QoS-0
-        if let v5::QoS::AtMostOnce = publ.qos {
-            return Ok(());
-        }
-
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
-
-        if publ.qos > server_qos {
-            err!(
-                ProtocolError,
-                code: QoSNotSupported,
-                "{} publish-qos exceeds server-qos {:?}",
-                self.prefix,
-                publ.qos
-            )?;
-        }
-
-        let qos_vec = match publ.qos {
-            v5::QoS::AtLeastOnce => &mut self.inp_qos1,
-            v5::QoS::ExactlyOnce => &mut self.inp_qos2,
-            _ => unreachable!(),
+    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
+        match publish.qos {
+            v5::QoS::AtMostOnce => (),
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                if let Err(off) = self.inp_qos12.binary_search(&packet_id) {
+                    self.inp_qos12.insert(off, packet_id);
+                } else {
+                    error!("{} duplicated qos1-booking", self.prefix);
+                }
+            }
         };
-
-        let packet_id = publ.packet_id.unwrap();
-        match qos_vec.binary_search(&packet_id) {
-            Err(off) => qos_vec.insert(off, packet_id),
-            Ok(_off) => unreachable!(), // is_duplicate() would have short-circuted
-        }
 
         Ok(())
-    }
-
-    fn unbook_qos(&mut self, publ: &v5::Publish) -> bool {
-        let qos_vec = match publ.qos {
-            v5::QoS::AtMostOnce => return true,
-            v5::QoS::AtLeastOnce => &mut self.inp_qos1,
-            v5::QoS::ExactlyOnce => &mut self.inp_qos2,
-        };
-
-        let packet_id = publ.packet_id.unwrap();
-        match qos_vec.binary_search(&packet_id) {
-            Ok(off) => {
-                qos_vec.remove(off);
-                true
-            }
-            Err(_off) => false,
-        }
     }
 
     fn publish_topic_name(&mut self, publ: &v5::Publish) -> Result<TopicName> {
@@ -608,19 +553,19 @@ impl Session {
         Ok(topic_name)
     }
 
-    fn book_retain(&mut self, shard: &mut Shard, publ: &v5::Publish) -> Result<()> {
-        if publ.retain && !self.config.mqtt_retain_available() {
+    fn book_retain(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
+        if publish.retain && !self.config.mqtt_retain_available() {
             err!(
                 ProtocolError,
                 code: RetainNotSupported,
                 "{} retain unavailable",
                 self.prefix
             )?;
-        } else if publ.retain {
-            if publ.payload.as_ref().map(|x| x.len() == 0).unwrap_or(true) {
-                shard.as_cluster().reset_retain_topic(publ.topic_name.clone())?;
+        } else if publish.retain {
+            if publish.payload.as_ref().map(|x| x.len() == 0).unwrap_or(true) {
+                shard.as_cluster().reset_retain_topic(publish.topic_name.clone())?;
             } else {
-                shard.as_cluster().set_retain_topic(publ.clone())?;
+                shard.as_cluster().set_retain_topic(publish.clone())?;
             }
         }
 
@@ -662,7 +607,7 @@ impl Session {
     }
 
     #[inline]
-    pub fn as_mut_out_acks(&mut self) -> &mut VecDeque<Message> {
+    pub fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
         &mut self.out_acks
     }
 }
