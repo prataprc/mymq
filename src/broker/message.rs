@@ -132,20 +132,8 @@ pub enum Message {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Message {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let val = match uns.arbitrary::<u8>()? % 3 {
-            0 => Message::LocalAck {
-                shard_id: uns.arbitrary()?,
-                last_acked: uns.arbitrary()?,
-            },
-            1 => Message::Packet {
-                client_id: uns.arbitrary()?,
-                shard_id: uns.arbitrary()?,
-                seqno: uns.arbitrary()?,
-                packet_id: uns.arbitrary()?,
-                subscriptions: uns.arbitrary()?,
-                packet: v5::Packet::Publish(uns.arbitrary()?),
-            },
-            2 => Message::ClientAck {
+        let val = match uns.arbitrary::<u8>()? % 5 {
+            0 => Message::ClientAck {
                 packet: match uns.arbitrary::<u8>()? % 9 {
                     0 => v5::Packet::ConnAck(uns.arbitrary()?),
                     1 => v5::Packet::PubAck(uns.arbitrary()?),
@@ -158,6 +146,25 @@ impl<'a> Arbitrary<'a> for Message {
                     8 => v5::Packet::Auth(uns.arbitrary()?),
                     _ => unreachable!(),
                 },
+            },
+            1 => Message::Packet {
+                out_seqno: uns.arbitrary()?,
+                packet_id: uns.arbitrary()?,
+                publish: uns.arbitrary()?,
+            },
+            2 => Message::Index {
+                src_client_id: uns.arbitrary()?,
+                packet_id: uns.arbitrary()?,
+            },
+            3 => Message::Routed {
+                src_shard_id: uns.arbitrary()?,
+                client_id: uns.arbitrary()?,
+                inp_seqno: uns.arbitrary()?,
+                publish: uns.arbitrary()?,
+            },
+            4 => Message::LocalAck {
+                shard_id: uns.arbitrary()?,
+                last_acked: uns.arbitrary()?,
             },
             _ => unreachable!(),
         };
