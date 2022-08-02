@@ -100,7 +100,8 @@ pub enum Message {
     ///
     /// CONNACK, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP
     ClientAck { packet: v5::Packet },
-    /// PUBLISH Packets received from clients and routed to other local sessions.
+    /// PUBLISH Packets Message::Routed converted to Message::Packet before sending
+    /// it downstream.
     Packet {
         out_seqno: OutSeqno,
         packet_id: Option<PacketID>,
@@ -108,7 +109,7 @@ pub enum Message {
     },
 
     // shard boundary
-    /// Incoming PUBLISH packets indexed by shards.
+    /// Incoming PUBLISH packets indexed by shards in Shard::RunLoop::index
     Index {
         src_client_id: ClientID,
         packet_id: PacketID,
@@ -121,6 +122,7 @@ pub enum Message {
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
         publish: v5::Publish, // publish packet, as received from publishing client
+        ack_needed: bool,
     },
     /// Message that is periodically published by a session to other local shards.
     LocalAck {
@@ -194,21 +196,19 @@ impl Message {
         sess: &Session,
         seqno: InpSeqno,
         publish: v5::Publish,
-        id: ClientID,
+        client_id: ClientID,
+        ack_needed: bool,
     ) -> Message {
         Message::Routed {
             src_shard_id: sess.to_shard_id(),
-            client_id: id,
+            client_id,
             inp_seqno: seqno,
             publish,
+            ack_needed,
         }
     }
 
-    pub fn to_index(&self, src_client_id: &ClientID) -> Message {
-        let packet_id = match self {
-            Message::Routed { publish, .. } => publish.packet_id.unwrap(),
-            _ => unreachable!(),
-        };
+    pub fn new_index(src_client_id: &ClientID, packet_id: PacketID) -> Message {
         Message::Index { src_client_id: src_client_id.clone(), packet_id }
     }
 
