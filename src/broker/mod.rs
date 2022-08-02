@@ -106,6 +106,7 @@ pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
 }
 
 mod cluster;
+// TODO: mod consensus;
 mod flush;
 mod handshake;
 mod keep_alive;
@@ -113,7 +114,7 @@ mod listener;
 mod message;
 mod miot;
 mod rebalance;
-mod rr;
+// TODO: mod rr;
 mod session;
 mod shard;
 mod socket;

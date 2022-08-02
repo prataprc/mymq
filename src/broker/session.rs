@@ -13,14 +13,6 @@ type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;
 type QueuePkt = QueueStatus<v5::Packet>;
 
-pub struct SessionArgs {
-    pub addr: net::SocketAddr,
-    pub client_id: ClientID,
-    pub shard_id: u32,
-    pub miot_tx: PktTx,
-    pub session_rx: PktRx,
-}
-
 /// Type implement the session for every connected client.
 ///
 /// Sessions are hosted within the shards and shards are hosted within the nodes.
@@ -41,61 +33,291 @@ pub struct Session {
     miot_tx: PktTx,                       // Outbound channel to Miot thread.
     session_rx: PktRx,                    // Inbound channel from Miot thread.
 
-    // MQTT topic-aliases if enabled. ZERO is not allowed.
-    topic_aliases: BTreeMap<u16, TopicName>,
-    // List of topic-filters subscribed by this client, when ever SUBSCRIBE/UNSUBSCRIBE
-    // messages are committed here, [Cluster::topic_filters] will also be updated.
-    subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
-
-    // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
-    inp_qos12: Vec<PacketID>,
-
-    // This value is incremented for every out-going PUBLISH(qos>0).
-    // If index.len() > `receive_maximum`, don't increment this value.
-    next_packet_id: PacketID,
-    // Message::ClientAck that needs to be sent to remote client.
-    // CONNACK - happens during add_session.
-    // PUBACK  - happens after QoS-1 and QoS-2 messaegs are replicated.
-    // SUBACK  - happens after SUBSCRIBE is commited to [Cluster].
-    // UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
-    // PINGRESP- happens for every PINGREQ is handled by this session.
-    out_acks: Vec<Message>,
-    // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
-    // messages sent to subscribed clients. Entry is deleted from `qos1e_unacks`.
-    // ACK is received for PacketID.
-    //
-    // Note that length of this collection is only as high as the allowed limit of
-    // concurrent PUBLISH.
-    qos12_unacks: BTreeMap<PacketID, Message>,
-    qos0_back_log: Vec<Message>,
-
-    // Consensus state
     state: SessionState,
 }
 
-pub struct SessionState {
-    /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
-    /// outgoing publish packet.
-    pub out_seqno: OutSeqno,
-    /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
-    ///
-    /// Entries from this index are deleted after they are removed from `qos12_unacks`
-    /// and after they go through the consensus loop.
-    pub back_log: BTreeMap<OutSeqno, Message>,
+enum SessionState {
+    Active {
+        prefix: String,
+        config: Config,
+
+        // MQTT topic-aliases if enabled. ZERO is not allowed.
+        topic_aliases: BTreeMap<u16, TopicName>,
+        // List of topic-filters subscribed by this client, when ever
+        // SUBSCRIBE/UNSUBSCRIBE messages are committed here, [Cluster::topic_filters]
+        // will also be updated.
+        subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
+
+        // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
+        inp_qos12: Vec<PacketID>,
+
+        // Message::ClientAck that needs to be sent to remote client.
+        // CONNACK - happens during add_session.
+        // PUBACK  - happens after QoS-1 and QoS-2 messaegs are replicated.
+        // SUBACK  - happens after SUBSCRIBE is commited to [Cluster].
+        // UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
+        // PINGRESP- happens for every PINGREQ is handled by this session.
+        out_acks: Vec<Message>,
+        qos0_back_log: Vec<Message>,
+
+        // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
+        // messages sent to subscribed clients. Entry is deleted from `qos1e_unacks`.
+        // ACK is received for PacketID.
+        //
+        // Note that length of this collection is only as high as the allowed limit of
+        // concurrent PUBLISH.
+        qos12_unacks: BTreeMap<PacketID, Message>,
+        // This value is incremented for every out-going PUBLISH(qos>0).
+        // If index.len() > `receive_maximum`, don't increment this value.
+        next_packet_id: PacketID,
+        /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
+        /// every outgoing publish packet.
+        out_seqno: OutSeqno,
+        /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
+        ///
+        /// Entries from this index are deleted after they are removed from
+        /// `qos12_unacks` and after they go through the consensus loop.
+        back_log: BTreeMap<OutSeqno, Message>,
+    },
+    Cold,
+    Replica,
+    None,
+}
+
+impl SessionState {
+    fn out_qos0(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueStatus<Message> {
+        let (prefix, config, qos0_back_log, out_seqno) = match self {
+            SessionState::Active { prefix, config, qos0_back_log, out_seqno, .. } => {
+                (prefix, config, qos0_back_log, out_seqno)
+            }
+            _ => unreachable!(),
+        };
+
+        let m = qos0_back_log.len();
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let n = (config.mqtt_pkt_batch_size() as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} session.qos0_back_log {} pressure > {}", prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
+        }
+
+        for msg in msgs.into_iter() {
+            let seqno = *out_seqno;
+            *out_seqno = out_seqno.saturating_add(1);
+
+            let msg = msg.into_packet(seqno, None);
+            qos0_back_log.push(msg)
+        }
+
+        let back_log = mem::replace(qos0_back_log, vec![]);
+        let mut status = sess.flush_to_miot(back_log);
+        let _empty = mem::replace(qos0_back_log, status.take_values());
+        status
+    }
+}
+
+impl SessionState {
+    fn out_qos(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueStatus<Message> {
+        let (prefix, config, qos12_unacks, next_packet_id, out_seqno, back_log) =
+            match self {
+                SessionState::Active {
+                    prefix,
+                    config,
+                    qos12_unacks,
+                    next_packet_id,
+                    out_seqno,
+                    back_log,
+                    ..
+                } => (prefix, config, qos12_unacks, next_packet_id, out_seqno, back_log),
+                _ => unreachable!(),
+            };
+
+        let m = back_log.len();
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let n = (config.mqtt_pkt_batch_size() as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} session.back_log {} pressure > {}", prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
+        }
+
+        if qos12_unacks.len() >= usize::from(config.mqtt_receive_maximum()) {
+            return QueueStatus::Block(Vec::new());
+        }
+
+        for msg in msgs.into_iter() {
+            let packet_id = *next_packet_id;
+            *next_packet_id = next_packet_id.wrapping_add(1);
+            let seqno = *out_seqno;
+            *out_seqno = out_seqno.saturating_add(1);
+
+            let msg = msg.into_packet(seqno, Some(packet_id));
+            back_log.insert(seqno, msg);
+        }
+
+        let max = usize::try_from(config.mqtt_pkt_batch_size()).unwrap();
+        let mut msgs = Vec::default();
+        while msgs.len() < max {
+            match back_log.pop_first() {
+                Some((_, msg)) => msgs.push(msg),
+                None => break,
+            }
+        }
+        for msg in msgs.clone().into_iter() {
+            qos12_unacks.insert(msg.to_packet_id(), msg);
+        }
+
+        let mut status = sess.flush_to_miot(msgs);
+
+        // re-insert, cleanup for remaining messages.
+        for msg in status.take_values().into_iter() {
+            let packet_id = msg.to_packet_id();
+            back_log.insert(msg.to_out_seqno(), msg);
+            qos12_unacks.remove(&packet_id);
+        }
+
+        status
+    }
+
+    fn ack_publish(&mut self, packet_id: PacketID) {
+        let out_acks = match self {
+            SessionState::Active { out_acks, .. } => out_acks,
+            _ => unreachable!(),
+        };
+
+        out_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
+    }
+
+    fn extend_out_acks2(&mut self, msgs: Vec<Message>) {
+        let out_acks = match self {
+            SessionState::Active { out_acks, .. } => out_acks,
+            _ => unreachable!(),
+        };
+
+        out_acks.extend(msgs.into_iter());
+    }
+
+    fn flush_out_acks(&mut self, sess: &Session) -> QueueStatus<Message> {
+        let out_acks = match self {
+            SessionState::Active { out_acks, .. } => out_acks,
+            _ => unreachable!(),
+        };
+
+        let mut status = sess.flush_to_miot(mem::replace(out_acks, Vec::default()));
+        let _empty = mem::replace(out_acks, status.take_values());
+        status
+    }
+}
+
+impl SessionState {
+    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
+        let (config, prefix, inp_qos12) = match self {
+            SessionState::Active { config, prefix, inp_qos12, .. } => {
+                (config, prefix, inp_qos12)
+            }
+            _ => unreachable!(),
+        };
+
+        let ignore_dup = config.mqtt_ignore_duplicate();
+        match publish.qos {
+            v5::QoS::AtMostOnce => false,
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
+                if ignore_dup {
+                    trace!("{} Duplicate publish recvd {}", prefix, publish);
+                    false
+                } else {
+                    true
+                }
+            }
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                matches!(inp_qos12.binary_search(&packet_id), Ok(_))
+            }
+        }
+    }
+
+    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
+        let (prefix, inp_qos12) = match self {
+            SessionState::Active { prefix, inp_qos12, .. } => (prefix, inp_qos12),
+            _ => unreachable!(),
+        };
+
+        match publish.qos {
+            v5::QoS::AtMostOnce => (),
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                if let Err(off) = inp_qos12.binary_search(&packet_id) {
+                    inp_qos12.insert(off, packet_id);
+                } else {
+                    error!("{} duplicated qos1-booking", prefix);
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    // TODO: unbook qos for inp_qos12
+}
+
+impl SessionState {
+    fn as_topic_aliases(&self) -> &BTreeMap<u16, TopicName> {
+        match self {
+            SessionState::Active { topic_aliases, .. } => topic_aliases,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_mut_topic_aliases(&mut self) -> &mut BTreeMap<u16, TopicName> {
+        match self {
+            SessionState::Active { topic_aliases, .. } => topic_aliases,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_subscriptions(&self) -> &BTreeMap<TopicFilter, v5::Subscription> {
+        match self {
+            SessionState::Active { subscriptions, .. } => subscriptions,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_mut_subscriptions(&mut self) -> &mut BTreeMap<TopicFilter, v5::Subscription> {
+        match self {
+            SessionState::Active { subscriptions, .. } => subscriptions,
+            _ => unreachable!(),
+        }
+    }
+
+    fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
+        match self {
+            SessionState::Active { out_acks, .. } => out_acks,
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub struct SessionStats;
 
+pub struct SessionArgs {
+    pub addr: net::SocketAddr,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+    pub miot_tx: PktTx,
+    pub session_rx: PktRx,
+}
+
 impl Session {
     pub fn start(args: SessionArgs, config: Config, connect: &v5::Connect) -> Session {
-        let state = SessionState { out_seqno: 1, back_log: BTreeMap::default() };
-
         let prefix = format!("session:{}", args.addr);
         let sei = config.mqtt_session_expiry_interval(connect.session_expiry_interval());
         Session {
             client_id: args.client_id,
             shard_id: args.shard_id,
-            prefix: prefix,
+            prefix: prefix.clone(),
             config: config.clone(),
 
             keep_alive: KeepAlive::new(args.addr, &connect, &config),
@@ -104,16 +326,22 @@ impl Session {
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
 
-            topic_aliases: BTreeMap::default(),
-            subscriptions: BTreeMap::default(),
+            state: SessionState::Active {
+                prefix: prefix.clone(),
+                config: config.clone(),
+                topic_aliases: BTreeMap::default(),
+                subscriptions: BTreeMap::default(),
 
-            inp_qos12: Vec::default(),
+                inp_qos12: Vec::default(),
 
-            next_packet_id: 1,
-            out_acks: Vec::default(),
-            qos0_back_log: Vec::default(),
-            qos12_unacks: BTreeMap::default(),
-            state,
+                out_acks: Vec::default(),
+                qos0_back_log: Vec::default(),
+
+                qos12_unacks: BTreeMap::default(),
+                next_packet_id: 1,
+                out_seqno: 1,
+                back_log: BTreeMap::default(),
+            },
         }
     }
 
@@ -150,7 +378,7 @@ impl Session {
 
 impl Session {
     pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
-        for (topic_filter, value) in self.subscriptions.iter() {
+        for (topic_filter, value) in self.state.as_subscriptions().iter() {
             topic_filters.unsubscribe(topic_filter, value);
         }
     }
@@ -187,12 +415,13 @@ impl Session {
     }
 
     fn handle_packets(&mut self, shard: &mut Shard, pkts: Packets) -> Result<QueuePkt> {
-        let mut out_acks = mem::replace(&mut self.out_acks, Vec::default());
+        let mut out_acks = vec![];
         for pkt in pkts.into_iter() {
             out_acks.extend(self.handle_packet(shard, pkt)?.into_iter());
         }
 
-        let _empty = mem::replace(&mut self.out_acks, out_acks);
+        self.state.extend_out_acks2(out_acks);
+
         Ok(QueueStatus::Ok(Vec::new()))
     }
 
@@ -274,12 +503,12 @@ impl Session {
             )?;
         }
 
-        if self.is_duplicate(&publish) {
+        if self.state.is_duplicate(&publish) {
             return Ok(false);
         }
 
         self.book_retain(shard, &publish)?;
-        self.book_qos(&publish)?;
+        self.state.book_qos(&publish)?;
 
         let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.publish_topic_name(&publish)?;
@@ -334,7 +563,9 @@ impl Session {
             shard
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
-            self.subscriptions.insert(filter.topic_filter.clone(), subscription);
+            self.state
+                .as_mut_subscriptions()
+                .insert(filter.topic_filter.clone(), subscription);
 
             let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
             let rc = match cmp::max(server_qos, qos) {
@@ -373,75 +604,27 @@ impl Session {
 impl Session {
     // Handle PUBLISH QoS-0
     pub fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let m = self.qos0_back_log.len();
-        // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
-        if m > n {
-            // TODO: if back-pressure is increasing due to a slow receiving client,
-            // we will have to take drastic steps, like, closing this connection.
-            error!("{} session.qos0_back_log {} pressure > {}", self.prefix, m, n);
-            return QueueStatus::Disconnected(Vec::new());
-        }
+        let mut state = mem::replace(&mut self.state, SessionState::None);
+        let status = state.out_qos0(self, msgs);
+        let _none = mem::replace(&mut self.state, state);
 
-        for msg in msgs.into_iter() {
-            let msg = msg.into_packet(self.incr_out_seqno(), None);
-            self.qos0_back_log.push(msg)
-        }
-
-        {
-            let back_log = mem::replace(&mut self.qos0_back_log, vec![]);
-            let mut status = self.flush_to_miot(back_log);
-            let _empty = mem::replace(&mut self.qos0_back_log, status.take_values());
-            status
-        }
+        status
     }
 
     // Handle PUBLISH QoS-1 and QoS-2
     pub fn out_qos(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let m = self.state.back_log.len();
-        // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (self.config.mqtt_pkt_batch_size() as usize) * 4;
-        if m > n {
-            // TODO: if back-pressure is increasing due to a slow receiving client,
-            // we will have to take drastic steps, like, closing this connection.
-            error!("{} session.state.back_log {} pressure > {}", self.prefix, m, n);
-            return QueueStatus::Disconnected(Vec::new());
-        }
+        let mut state = mem::replace(&mut self.state, SessionState::None);
+        let status = state.out_qos(self, msgs);
+        let _none = mem::replace(&mut self.state, state);
 
-        if self.qos12_unacks.len() >= usize::from(self.config.mqtt_receive_maximum()) {
-            return QueueStatus::Block(Vec::new());
-        }
-
-        for msg in msgs.into_iter() {
-            let out_seqno = self.incr_out_seqno();
-            let packet_id = self.incr_packet_id();
-            let msg = msg.into_packet(out_seqno, Some(packet_id));
-            self.state.back_log.insert(out_seqno, msg);
-        }
-
-        let max = usize::try_from(self.config.mqtt_pkt_batch_size()).unwrap();
-        let mut msgs = Vec::default();
-        while let Some((_, msg)) = self.state.back_log.pop_first() {
-            self.qos12_unacks.insert(msg.to_packet_id(), msg.clone());
-            msgs.push(msg);
-            if msgs.len() >= max {
-                break;
-            }
-        }
-        let mut status = self.flush_to_miot(msgs);
-        // re-insert, cleanup for remaining messages.
-        for msg in status.take_values().into_iter() {
-            let packet_id = msg.to_packet_id();
-            self.state.back_log.insert(msg.to_out_seqno(), msg);
-            self.qos12_unacks.remove(&packet_id);
-        }
         status
     }
 
     pub fn flush_out_acks(&mut self) -> QueueStatus<v5::Packet> {
-        let out_acks = mem::replace(&mut self.out_acks, vec![]);
-        let mut status = self.flush_to_miot(out_acks);
-        let _empty = mem::replace(&mut self.out_acks, status.take_values());
+        let mut state = mem::replace(&mut self.state, SessionState::None);
+        let status = state.flush_out_acks(self);
+        let _none = mem::replace(&mut self.state, state);
+
         status.map(vec![])
     }
 
@@ -459,49 +642,12 @@ impl Session {
     }
 
     pub fn ack_publish(&mut self, packet_id: PacketID) {
-        let msg = Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id));
-        self.out_acks.push(msg);
+        self.state.ack_publish(packet_id)
     }
 }
 
 // Publish related book-keeping
 impl Session {
-    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
-        let ignore_dup = self.config.mqtt_ignore_duplicate();
-
-        match publish.qos {
-            v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
-                if ignore_dup {
-                    trace!("{} Duplicate publish received {}", self.prefix, publish);
-                    false
-                } else {
-                    true
-                }
-            }
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                matches!(self.inp_qos12.binary_search(&packet_id), Ok(_))
-            }
-        }
-    }
-
-    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
-        match publish.qos {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                if let Err(off) = self.inp_qos12.binary_search(&packet_id) {
-                    self.inp_qos12.insert(off, packet_id);
-                } else {
-                    error!("{} duplicated qos1-booking", self.prefix);
-                }
-            }
-        };
-
-        Ok(())
-    }
-
     fn publish_topic_name(&mut self, publ: &v5::Publish) -> Result<TopicName> {
         let (topic_name, topic_alias) = (publ.as_topic_name(), publ.topic_alias());
         let server_alias_max = self.config.mqtt_topic_alias_max();
@@ -522,7 +668,8 @@ impl Session {
                 server_alias_max.unwrap()
             )?,
             Some(alias) if topic_name.len() > 0 => {
-                match self.topic_aliases.insert(alias, topic_name.clone()) {
+                match self.state.as_mut_topic_aliases().insert(alias, topic_name.clone())
+                {
                     Some(old) => debug!(
                         "{} for topic-alias {} replacing {:?} with {:?}",
                         self.prefix, alias, old, topic_name
@@ -531,7 +678,7 @@ impl Session {
                 };
                 topic_name.clone()
             }
-            Some(alias) => match self.topic_aliases.get(&alias) {
+            Some(alias) => match self.state.as_topic_aliases().get(&alias) {
                 Some(topic_name) => topic_name.clone(),
                 None => err!(
                     ProtocolError,
@@ -574,18 +721,6 @@ impl Session {
 }
 
 impl Session {
-    pub fn incr_out_seqno(&mut self) -> OutSeqno {
-        let seqno = self.state.out_seqno;
-        self.state.out_seqno = self.state.out_seqno.saturating_add(1);
-        seqno
-    }
-
-    pub fn incr_packet_id(&mut self) -> PacketID {
-        let packet_id = self.next_packet_id;
-        self.next_packet_id = self.next_packet_id.wrapping_add(1);
-        packet_id
-    }
-
     #[inline]
     pub fn to_shard_id(&self) -> u32 {
         self.shard_id
@@ -608,6 +743,6 @@ impl Session {
 
     #[inline]
     pub fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
-        &mut self.out_acks
+        self.state.as_mut_out_acks()
     }
 }

@@ -13,24 +13,31 @@ use std::{io, mem, net, time};
 
 use crate::{v5, ClientID, Config, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
 
-pub struct ClientBuilder {
-    /// Provide a unique client identifier, if missing, will be sent empty in CONNECT.
-    pub client_id: Option<ClientID>,
-    /// Socket settings for blocking io, refer [io::TcpStream::connect_timeout]
-    pub connect_timeout: Option<time::Duration>,
-    /// Socket settings for blocking io, refer [i ::TcpStream::set_read_timeout]
-    pub read_timeout: Option<time::Duration>,
-    /// Socket settings for blocking io, refer [io::TcpStream::set_write_timeout]
-    pub write_timeout: Option<time::Duration>,
-    /// Socket settings, refer [io::TcpStream::set_nodelay].
-    pub nodelay: Option<bool>,
-    /// Socket settings, refer [io::TcpStream::set_ttl].
-    pub ttl: Option<u32>,
-    // CONNECT options
+/// MQTT CONNECT flags and headers
+#[derive(Clone, Copy)]
+pub struct ConnectOptions {
     pub clean_start: bool,
     pub will_qos: Option<v5::QoS>,
     pub will_retain: Option<bool>,
     pub keep_alive: u16,
+}
+
+/// ClientBuilder to create a customized [Client].
+pub struct ClientBuilder {
+    /// Provide unique client identifier, if missing, will be sent empty in CONNECT.
+    pub client_id: Option<ClientID>,
+    /// Socket settings for blocking io, refer [net::TcpStream::connect_timeout]
+    pub connect_timeout: Option<time::Duration>,
+    /// Socket settings for blocking io, refer [net::TcpStream::set_read_timeout]
+    pub read_timeout: Option<time::Duration>,
+    /// Socket settings for blocking io, refer [net::TcpStream::set_write_timeout]
+    pub write_timeout: Option<time::Duration>,
+    /// Socket settings, refer [net::TcpStream::set_nodelay].
+    pub nodelay: Option<bool>,
+    /// Socket settings, refer [net::TcpStream::set_ttl].
+    pub ttl: Option<u32>,
+    // CONNECT options
+    pub connopts: ConnectOptions,
     pub connect_properties: Option<v5::ConnectProperties>,
     pub connect_payload: v5::ConnectPayload,
 
@@ -47,10 +54,12 @@ impl Default for ClientBuilder {
             nodelay: None,
             ttl: None,
             // CONNECT options
-            clean_start: true,
-            keep_alive: 0,
-            will_qos: None,
-            will_retain: None,
+            connopts: ConnectOptions {
+                clean_start: true,
+                will_qos: None,
+                will_retain: None,
+                keep_alive: 0,
+            },
             connect_properties: Some(v5::ConnectProperties::default()),
             connect_payload: v5::ConnectPayload::default(),
 
@@ -93,7 +102,7 @@ impl ClientBuilder {
 
     /// Connection with `remote` and start an asynchronous client. All read/write calls
     /// and other communication methods, on the returned client, shall not block.
-    /// Application will have to for [io::ErrorKind::WouldBlock] and
+    /// Application will have to check for [io::ErrorKind::WouldBlock] and
     /// [io::ErrorKind::Interrupted] returns.
     ///
     /// NOTE: This call shall block until CONNACK is successfully received from remote.
@@ -125,17 +134,17 @@ impl ClientBuilder {
             && self.connect_payload.will_payload.is_some();
 
         let mut flags = vec![];
-        if self.clean_start {
+        if self.connopts.clean_start {
             flags.push(v5::ConnectFlags::CLEAN_START);
         }
         if is_will {
             flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
+            flags.push(match self.connopts.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
                 v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
                 v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
                 v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
             });
-            match self.will_retain {
+            match self.connopts.will_retain {
                 Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
                 Some(_) | None => (),
             }
@@ -153,7 +162,7 @@ impl ClientBuilder {
             protocol_name: "MQTT".to_string(),
             protocol_version: self.protocol_version,
             flags: v5::ConnectFlags::new(&flags),
-            keep_alive: self.keep_alive,
+            keep_alive: self.connopts.keep_alive,
             properties: self.connect_properties.clone(),
             payload: self.connect_payload.clone(),
         };
@@ -185,11 +194,7 @@ impl ClientBuilder {
             write_timeout: self.write_timeout,
             nodelay: self.nodelay,
             ttl: self.ttl,
-            // CONNECT options
-            clean_start: self.clean_start,
-            will_qos: self.will_qos,
-            will_retain: self.will_retain,
-            keep_alive: self.keep_alive,
+            connopts: self.connopts,
             connect_properties: self.connect_properties.clone(),
             connect_payload: self.connect_payload.clone(),
             // CONNACK options
@@ -202,6 +207,7 @@ impl ClientBuilder {
     }
 }
 
+/// Type to interface with MQTT broker.
 pub struct Client {
     client_id: ClientID,
     remote: net::SocketAddr,
@@ -212,10 +218,7 @@ pub struct Client {
     nodelay: Option<bool>,
     ttl: Option<u32>,
     // CONNECT options
-    clean_start: bool,
-    will_qos: Option<v5::QoS>,
-    will_retain: Option<bool>,
-    keep_alive: u16,
+    connopts: ConnectOptions,
     connect_properties: Option<v5::ConnectProperties>,
     connect_payload: v5::ConnectPayload,
     // CONNACK options
@@ -244,10 +247,7 @@ impl Client {
             nodelay: self.nodelay,
             ttl: self.ttl,
             // CONNECT options
-            clean_start: self.clean_start,
-            will_qos: self.will_qos,
-            will_retain: self.will_retain,
-            keep_alive: self.keep_alive,
+            connopts: self.connopts,
             connect_properties: self.connect_properties.clone(),
             connect_payload: self.connect_payload.clone(),
             // CONNACK options
@@ -266,7 +266,7 @@ impl Client {
     /// will connect with the same `remote`, either in block or no-block configuration
     /// as before.
     pub fn reconnect(mut self) -> io::Result<Self> {
-        self.clean_start = false;
+        self.connopts.clean_start = false;
 
         let sock = match self.connect_timeout {
             Some(timeout) => net::TcpStream::connect_timeout(&self.remote, timeout)?,
@@ -298,17 +298,17 @@ impl Client {
             && self.connect_payload.will_payload.is_some();
 
         let mut flags = vec![];
-        if self.clean_start {
+        if self.connopts.clean_start {
             flags.push(v5::ConnectFlags::CLEAN_START);
         }
         if is_will {
             flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
+            flags.push(match self.connopts.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
                 v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
                 v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
                 v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
             });
-            match self.will_retain {
+            match self.connopts.will_retain {
                 Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
                 Some(_) | None => (),
             }
@@ -326,7 +326,7 @@ impl Client {
             protocol_name: "MQTT".to_string(),
             protocol_version: self.protocol_version,
             flags: v5::ConnectFlags::new(&flags),
-            keep_alive: self.keep_alive,
+            keep_alive: self.connopts.keep_alive,
             properties: self.connect_properties.clone(),
             payload: self.connect_payload.clone(),
         };
@@ -345,9 +345,9 @@ impl Client {
         match &self.connack.properties {
             Some(props) => match props.server_keep_alive {
                 Some(keep_alive) => keep_alive,
-                None => self.keep_alive,
+                None => self.connopts.keep_alive,
             },
-            None => self.keep_alive,
+            None => self.connopts.keep_alive,
         }
     }
 
@@ -389,10 +389,10 @@ impl Client {
     /// Return whether, if keep_alive non-ZERO, client's communication has exceeded 1.5
     /// times the configured `keep_alive`.
     pub fn expired(&self) -> bool {
-        if self.keep_alive == 0 {
+        if self.connopts.keep_alive == 0 {
             false
         } else {
-            let keep_alive = u64::from(self.keep_alive);
+            let keep_alive = u64::from(self.connopts.keep_alive);
             let micros = time::Duration::from_secs(keep_alive).as_micros() as f64;
             ((micros * 1.5) as u128) < self.last_tx.elapsed().as_micros()
         }
