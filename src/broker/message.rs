@@ -121,6 +121,7 @@ pub enum Message {
         src_shard_id: u32,    // sending shard-id
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
+        out_seqno: OutSeqno,  // updated by the receiving session, at a later time.
         publish: v5::Publish, // publish packet, as received from publishing client
         ack_needed: bool,
     },
@@ -203,6 +204,7 @@ impl Message {
             src_shard_id: sess.to_shard_id(),
             client_id,
             inp_seqno: seqno,
+            out_seqno: 0,
             publish,
             ack_needed,
         }
@@ -212,9 +214,9 @@ impl Message {
         Message::Index { src_client_id: src_client_id.clone(), packet_id }
     }
 
-    pub fn into_packet(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {
+    pub fn into_packet(self, pktid: Option<PacketID>) -> Message {
         match self {
-            Message::Routed { mut publish, .. } => {
+            Message::Routed { out_seqno, mut publish, .. } => {
                 if let Some(packet_id) = pktid {
                     publish.set_packet_id(packet_id);
                 }
@@ -234,6 +236,7 @@ impl Message {
 
     pub fn to_out_seqno(&self) -> OutSeqno {
         match self {
+            Message::Routed { out_seqno, .. } => *out_seqno,
             Message::Packet { out_seqno, .. } => *out_seqno,
             _ => unreachable!(),
         }

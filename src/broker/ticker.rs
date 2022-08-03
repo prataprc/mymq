@@ -36,8 +36,10 @@ pub struct RunLoop {
     ticker_count: usize,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
-    /// Shard-Tx handle to all shards hosted in this node.
-    shards: Vec<Shard>,
+    /// Shard-Tx handle to all shards active on this node.
+    active_shards: Vec<Shard>,
+    /// Shard-Tx handle to all replica shards on this node.
+    replica_shards: Vec<Shard>,
 
     /// Back channel communicate with application.
     #[allow(dead_code)]
@@ -81,7 +83,8 @@ impl Drop for Ticker {
 
 pub struct SpawnArgs {
     pub cluster: Box<Cluster>,
-    pub shards: Vec<Shard>,
+    pub active_shards: Vec<Shard>,
+    pub replica_shards: Vec<Shard>,
     pub app_tx: AppTx,
 }
 
@@ -111,7 +114,8 @@ impl Ticker {
                 born: time::Instant::now(),
                 ticker_count: 0,
                 cluster: args.cluster,
-                shards: args.shards,
+                active_shards: args.active_shards,
+                replica_shards: args.replica_shards,
                 app_tx: args.app_tx,
             }),
         };
@@ -172,7 +176,13 @@ impl Threadable for Ticker {
                 }
             }
 
-            let RunLoop { cluster, ticker_count, shards, .. } = match &mut self.inner {
+            let RunLoop {
+                cluster,
+                ticker_count,
+                active_shards,
+                replica_shards,
+                ..
+            } = match &mut self.inner {
                 Inner::Main(run_loop) => run_loop,
                 _ => unreachable!(),
             };
@@ -180,7 +190,8 @@ impl Threadable for Ticker {
             *ticker_count += 1;
 
             cluster.wake();
-            shards.iter().for_each(|shard| shard.wake());
+            active_shards.iter().for_each(|shard| shard.wake());
+            replica_shards.iter().for_each(|shard| shard.wake());
         }
 
         let inner = mem::replace(&mut self.inner, Inner::Init);

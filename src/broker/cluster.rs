@@ -59,7 +59,7 @@ struct RunLoop {
     /// Flusher thread for MQTT connections from remote/local clients.
     flusher: Flusher,
     /// Total number of shards within this node.
-    shards: BTreeMap<u32, Shard>,
+    active_shards: BTreeMap<u32, Shard>,
 
     /// Rebalancing algorithm.
     rebalancer: rebalance::Rebalancer,
@@ -80,7 +80,7 @@ pub struct FinState {
     pub listener: Listener,
     pub ticker: Ticker,
     pub flusher: Flusher,
-    pub shards: BTreeMap<u32, Shard>,
+    pub active_shards: BTreeMap<u32, Shard>,
     pub topic_filters: SubscribedTrie,
     pub retained_messages: RetainedTrie,
     pub retain_timer: Timer<Arc<Retain>>,
@@ -173,7 +173,6 @@ impl Cluster {
 
         let listener = Listener::default();
         let flusher = Flusher::from_config(self.config.clone())?.spawn(app_tx.clone())?;
-        let shards = BTreeMap::default();
 
         let flusher_tx = flusher.to_tx();
         let topic_filters = SubscribedTrie::default();
@@ -189,7 +188,7 @@ impl Cluster {
                 listener,
                 ticker: Ticker::default(),
                 flusher,
-                shards,
+                active_shards: BTreeMap::default(),
 
                 rebalancer,
                 topic_filters: topic_filters.clone(),
@@ -211,10 +210,10 @@ impl Cluster {
         cluster.prefix = cluster.prefix();
 
         {
-            let mut ticker_shards = Vec::new();
+            let mut ticker_active_shards = Vec::new();
             let mut shard_queues = BTreeMap::default();
 
-            let mut shards = BTreeMap::default();
+            let mut active_shards = BTreeMap::default();
             for shard_id in 0..self.config.num_shards() {
                 let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = {
@@ -224,16 +223,17 @@ impl Cluster {
                         topic_filters: topic_filters.clone(),
                         retained_messages: retained_messages.clone(),
                     };
-                    Shard::from_config(config, shard_id)?.spawn(args, app_tx.clone())?
+                    let app_tx = app_tx.clone();
+                    Shard::from_config(config, shard_id)?.spawn_active(args, app_tx)?
                 };
 
                 shard_queues.insert(shard.shard_id, shard.to_msg_tx());
-                ticker_shards.push(shard.to_tx());
+                ticker_active_shards.push(shard.to_tx());
 
-                shards.insert(shard_id, shard);
+                active_shards.insert(shard_id, shard);
             }
 
-            for (_shard_id, shard) in shards.iter() {
+            for (_shard_id, shard) in active_shards.iter() {
                 let iter = shard_queues.iter().map(|(id, s)| (*id, s.to_msg_tx()));
                 let shard_queues = BTreeMap::from_iter(iter);
                 shard.set_shard_queues(shard_queues)?;
@@ -248,7 +248,8 @@ impl Cluster {
             let ticker = {
                 let args = ticker::SpawnArgs {
                     cluster: Box::new(cluster.to_tx()),
-                    shards: ticker_shards,
+                    active_shards: ticker_active_shards,
+                    replica_shards: Vec::default(), // TODO
                     app_tx: app_tx.clone(),
                 };
                 Ticker::from_config(self.config.clone())?.spawn(args)?
@@ -256,7 +257,7 @@ impl Cluster {
 
             match &cluster.inner {
                 Inner::Handle(_waker, thrd) => {
-                    thrd.request(Request::Set { listener, ticker, shards })??;
+                    thrd.request(Request::Set { listener, ticker, active_shards })??;
                 }
                 _ => unreachable!(),
             }
@@ -288,7 +289,7 @@ pub enum Request {
     Set {
         listener: Listener,
         ticker: Ticker,
-        shards: BTreeMap<u32, Shard>,
+        active_shards: BTreeMap<u32, Shard>,
     },
     SetRetainTopic {
         publish: v5::Publish,
@@ -521,10 +522,10 @@ impl Cluster {
         };
 
         match req {
-            Request::Set { listener, ticker, shards } => {
+            Request::Set { listener, ticker, active_shards } => {
                 run_loop.ticker = ticker;
                 run_loop.listener = listener;
-                run_loop.shards = shards;
+                run_loop.active_shards = active_shards;
             }
             _ => unreachable!(),
         }
@@ -600,7 +601,7 @@ impl Cluster {
         };
         let remote_addr = conn.peer_addr().unwrap();
 
-        let RunLoop { shards, .. } = match &mut self.inner {
+        let RunLoop { active_shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             _ => unreachable!(),
         };
@@ -611,7 +612,7 @@ impl Cluster {
             self.config.num_shards(),
         );
 
-        let shard = match shards.get_mut(&shard_id) {
+        let shard = match active_shards.get_mut(&shard_id) {
             Some(shard) => shard,
             None => {
                 // multi-node cluster, look at the topology and redirect client using
@@ -635,13 +636,17 @@ impl Cluster {
 
         match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(mut run_loop) => {
-                info!("{}, closing shards:{}", self.prefix, run_loop.shards.len());
+                info!(
+                    "{}, closing active_shards:{}",
+                    self.prefix,
+                    run_loop.active_shards.len()
+                );
 
                 mem::drop(run_loop.poll);
 
-                let mut shards = BTreeMap::default();
-                for (shard_id, shard) in run_loop.shards.into_iter() {
-                    shards.insert(shard_id, shard.close_wait());
+                let mut active_shards = BTreeMap::default();
+                for (shard_id, shard) in run_loop.active_shards.into_iter() {
+                    active_shards.insert(shard_id, shard.close_wait());
                 }
 
                 let listener = mem::replace(&mut run_loop.listener, Listener::default())
@@ -660,7 +665,7 @@ impl Cluster {
                     listener,
                     ticker,
                     flusher,
-                    shards,
+                    active_shards,
                     topic_filters: run_loop.topic_filters,
                     retained_messages: run_loop.retained_messages,
                     retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),

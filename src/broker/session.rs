@@ -12,6 +12,8 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 type Messages = Vec<Message>;
 type Packets = Vec<v5::Packet>;
 type QueuePkt = QueueStatus<v5::Packet>;
+type QueueMsg = QueueStatus<Message>;
+type OutSeqnos = Vec<OutSeqno>;
 
 /// Type implement the session for every connected client.
 ///
@@ -26,13 +28,6 @@ pub struct Session {
     /// Broker Configuration.
     config: Config,
 
-    // Immutable set of parameters for this session, after handshake.
-    keep_alive: KeepAlive,                // Negotiated keep-alive.
-    session_expiry_interval: Option<u32>, // Negotiated session expiry.
-    connect: v5::Connect,                 // Connect msg that created this session.
-    miot_tx: PktTx,                       // Outbound channel to Miot thread.
-    session_rx: PktRx,                    // Inbound channel from Miot thread.
-
     state: SessionState,
 }
 
@@ -40,6 +35,12 @@ enum SessionState {
     Active {
         prefix: String,
         config: Config,
+
+        // Immutable set of parameters for this session, after handshake.
+        keep_alive: KeepAlive, // Negotiated keep-alive.
+        connect: v5::Connect,  // Connect msg that created this session.
+        miot_tx: PktTx,        // Outbound channel to Miot thread.
+        session_rx: PktRx,     // Inbound channel from Miot thread.
 
         // MQTT topic-aliases if enabled. ZERO is not allowed.
         topic_aliases: BTreeMap<u16, TopicName>,
@@ -80,16 +81,44 @@ enum SessionState {
         /// `qos12_unacks` and after they go through the consensus loop.
         back_log: BTreeMap<OutSeqno, Message>,
     },
+    #[allow(dead_code)]
+    Replica {
+        prefix: String,
+        config: Config,
+
+        /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
+        /// every outgoing publish packet.
+        out_seqno: OutSeqno,
+        /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
+        ///
+        /// Entries from this index are deleted after they are removed from
+        /// `qos12_unacks` and after they go through the consensus loop.
+        back_log: BTreeMap<OutSeqno, Message>,
+    },
+    #[allow(dead_code)]
     Cold,
-    Replica,
     None,
 }
 
 impl SessionState {
+    fn incr_out_seqno(&mut self, msg: &mut Message) {
+        match self {
+            SessionState::Active { out_seqno, .. } => {
+                let seqno = *out_seqno;
+                *out_seqno = out_seqno.saturating_add(1);
+                match msg {
+                    Message::Routed { out_seqno, .. } => *out_seqno = seqno,
+                    _ => (),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn out_qos0(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let (prefix, config, qos0_back_log, out_seqno) = match self {
-            SessionState::Active { prefix, config, qos0_back_log, out_seqno, .. } => {
-                (prefix, config, qos0_back_log, out_seqno)
+        let (prefix, config, qos0_back_log) = match self {
+            SessionState::Active { prefix, config, qos0_back_log, .. } => {
+                (prefix, config, qos0_back_log)
             }
             _ => unreachable!(),
         };
@@ -105,10 +134,7 @@ impl SessionState {
         }
 
         for msg in msgs.into_iter() {
-            let seqno = *out_seqno;
-            *out_seqno = out_seqno.saturating_add(1);
-
-            let msg = msg.into_packet(seqno, None);
+            let msg = msg.into_packet(None);
             qos0_back_log.push(msg)
         }
 
@@ -118,20 +144,26 @@ impl SessionState {
         status
     }
 
-    fn out_qos(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let (prefix, config, qos12_unacks, next_packet_id, out_seqno, back_log) =
-            match self {
-                SessionState::Active {
-                    prefix,
-                    config,
-                    qos12_unacks,
-                    next_packet_id,
-                    out_seqno,
-                    back_log,
-                    ..
-                } => (prefix, config, qos12_unacks, next_packet_id, out_seqno, back_log),
-                _ => unreachable!(),
-            };
+    fn out_qos(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueMsg {
+        match self {
+            SessionState::Active { .. } => self.out_qos_active(sess, msgs),
+            SessionState::Replica { .. } => self.out_qos_replica(sess, msgs),
+            _ => unreachable!(),
+        }
+    }
+
+    fn out_qos_active(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueMsg {
+        let (prefix, config, qos12_unacks, next_packet_id, back_log) = match self {
+            SessionState::Active {
+                prefix,
+                config,
+                qos12_unacks,
+                next_packet_id,
+                back_log,
+                ..
+            } => (prefix, config, qos12_unacks, next_packet_id, back_log),
+            _ => unreachable!(),
+        };
 
         let m = back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
@@ -150,11 +182,9 @@ impl SessionState {
         for msg in msgs.into_iter() {
             let packet_id = *next_packet_id;
             *next_packet_id = next_packet_id.wrapping_add(1);
-            let seqno = *out_seqno;
-            *out_seqno = out_seqno.saturating_add(1);
 
-            let msg = msg.into_packet(seqno, Some(packet_id));
-            back_log.insert(seqno, msg);
+            let msg = msg.into_packet(Some(packet_id));
+            back_log.insert(msg.to_out_seqno(), msg);
         }
 
         let max = usize::try_from(config.mqtt_pkt_batch_size()).unwrap();
@@ -179,6 +209,22 @@ impl SessionState {
         }
 
         status
+    }
+
+    fn out_qos_replica(&mut self, _sess: &Session, msgs: Vec<Message>) -> QueueMsg {
+        let back_log = match self {
+            SessionState::Active { back_log, .. } => back_log,
+            _ => unreachable!(),
+        };
+
+        for msg in msgs.into_iter() {
+            // TODO: packet_id shall be inserted into the message when replica gets
+            //       promoted to active _and_ remote is request for msgs in back_log.
+            let msg = msg.into_packet(None);
+            back_log.insert(msg.to_out_seqno(), msg);
+        }
+
+        QueueStatus::Ok(Vec::new())
     }
 
     fn out_acks_extend(&mut self, msgs: Vec<Message>) {
@@ -226,6 +272,18 @@ impl SessionState {
         let mut status = sess.flush_to_miot(mem::replace(out_acks, Vec::default()));
         let _empty = mem::replace(out_acks, status.take_values());
         status
+    }
+
+    fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
+        match self {
+            SessionState::Active { .. } => (),
+            SessionState::Replica { back_log, .. } => {
+                for out_seqno in out_seqnos.into_iter() {
+                    back_log.remove(&out_seqno);
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -370,24 +428,21 @@ pub struct SessionArgs {
 }
 
 impl Session {
-    pub fn start(args: SessionArgs, config: Config, connect: &v5::Connect) -> Session {
+    pub fn start_active(args: SessionArgs, config: Config, pkt: &v5::Connect) -> Session {
         let prefix = format!("session:{}", args.addr);
-        let sei = config.mqtt_session_expiry_interval(connect.session_expiry_interval());
         Session {
             client_id: args.client_id,
             shard_id: args.shard_id,
             prefix: prefix.clone(),
             config: config.clone(),
 
-            keep_alive: KeepAlive::new(args.addr, &connect, &config),
-            session_expiry_interval: sei,
-            connect: connect.clone(),
-            miot_tx: args.miot_tx,
-            session_rx: args.session_rx,
-
             state: SessionState::Active {
                 prefix: prefix.clone(),
                 config: config.clone(),
+                keep_alive: KeepAlive::new(args.addr, &pkt, &config),
+                connect: pkt.clone(),
+                miot_tx: args.miot_tx,
+                session_rx: args.session_rx,
                 topic_aliases: BTreeMap::default(),
                 subscriptions: BTreeMap::default(),
 
@@ -405,8 +460,9 @@ impl Session {
     }
 
     pub fn success_ack(&mut self, pkt: &v5::Connect, _shard: &Shard) -> v5::ConnAck {
+        let sei = self.config.mqtt_session_expiry_interval(pkt.session_expiry_interval());
         let mut props = v5::ConnAckProperties {
-            session_expiry_interval: self.session_expiry_interval,
+            session_expiry_interval: sei,
             receive_maximum: Some(self.config.mqtt_receive_maximum()),
             maximum_qos: Some(self.config.mqtt_maximum_qos().try_into().unwrap()),
             retain_available: Some(self.config.mqtt_retain_available()),
@@ -421,7 +477,7 @@ impl Session {
         if pkt.payload.client_id.len() == 0 {
             props.assigned_client_identifier = Some((*self.client_id).clone());
         }
-        if let Some(keep_alive) = self.keep_alive.keep_alive() {
+        if let Some(keep_alive) = self.to_keep_alive() {
             props.server_keep_alive = Some(keep_alive)
         }
         let connack = v5::ConnAck::new_success(Some(props));
@@ -445,111 +501,118 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
-    pub fn route_packets(&mut self, shard: &mut Shard) -> Result<QueuePkt> {
+    pub fn route_packets(&mut self, shard: &mut Shard) -> Result<(QueuePkt, OutSeqnos)> {
+        let (session_rx, keep_alive) = match &mut self.state {
+            SessionState::Active { session_rx, keep_alive, .. } => {
+                (session_rx, keep_alive)
+            }
+            _ => unreachable!(),
+        };
+        let mut down_status = session_rx.try_recvs(&self.prefix);
+
+        mem::drop(session_rx);
+
         let rc_disconnected = QueueStatus::Disconnected(Vec::new());
-
-        let mut down_status = self.session_rx.try_recvs(&self.prefix);
-
         match down_status.take_values() {
             pkts if pkts.len() == 0 => {
-                self.keep_alive.check_expired()?;
-                Ok(down_status)
+                keep_alive.check_expired()?;
+                Ok((down_status, OutSeqnos::default()))
             }
             pkts => {
-                self.keep_alive.live();
+                keep_alive.live();
 
-                let status = self.handle_packets(shard, pkts)?;
+                let (status, out_seqnos) = self.handle_packets(shard, pkts)?;
 
                 if let QueueStatus::Disconnected(_) = down_status {
                     error!("{} downstream-rx disconnect", self.prefix);
-                    Ok(rc_disconnected)
+                    Ok((rc_disconnected, out_seqnos))
                 } else if let QueueStatus::Disconnected(_) = status {
                     error!("{} downstream-tx disconnect, or a slow client", self.prefix);
-                    Ok(rc_disconnected)
+                    Ok((rc_disconnected, out_seqnos))
                 } else {
-                    Ok(QueueStatus::Ok(Vec::new()))
+                    Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
                 }
             }
         }
-    }
-
-    fn handle_packets(&mut self, shard: &mut Shard, pkts: Packets) -> Result<QueuePkt> {
-        let mut out_acks = vec![];
-        for pkt in pkts.into_iter() {
-            out_acks.extend(self.handle_packet(shard, pkt)?.into_iter());
-        }
-
-        self.state.out_acks_extend(out_acks);
-
-        Ok(QueueStatus::Ok(Vec::new()))
     }
 
     // handle incoming packet, return Message::ClientAck, if any.
     // Disconnected
     // ProtocolError
-    fn handle_packet(&mut self, shard: &mut Shard, pkt: v5::Packet) -> Result<Messages> {
-        let msgs = match pkt {
-            v5::Packet::PingReq => {
-                let msg = Message::new_ping_resp();
-                vec![msg]
-            }
-            v5::Packet::Publish(publ) => {
-                let has_subscrs = self.rx_publish(shard, publ.clone())?;
-                match (has_subscrs, publ.qos) {
-                    (_, v5::QoS::AtMostOnce) => {
-                        // QoS-0 do not have any acknowledgements.
-                        vec![]
-                    }
-                    (false, _) => {
-                        let puback = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
-                        vec![Message::new_pub_ack(puback)]
-                    }
-                    (true, v5::QoS::AtLeastOnce) => {
-                        // QoS-1 acks happen only after replication is done.
-                        vec![]
-                    }
-                    (true, v5::QoS::ExactlyOnce) => {
-                        // QoS-2 acks happen only after replication is done.
-                        vec![]
+    fn handle_packets(
+        &mut self,
+        shard: &mut Shard,
+        pkts: Packets,
+    ) -> Result<(QueuePkt, OutSeqnos)> {
+        let mut out_acks = Vec::default();
+        let mut out_seqnos = Vec::default();
+        for pkt in pkts.into_iter() {
+            match pkt {
+                v5::Packet::PingReq => {
+                    out_acks.push(Message::new_ping_resp());
+                }
+                v5::Packet::Publish(publ) => {
+                    let has_subscrs = self.rx_publish(shard, publ.clone())?;
+                    match (has_subscrs, publ.qos) {
+                        (_, v5::QoS::AtMostOnce) => (),
+                        (false, _) => {
+                            let puback = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
+                            out_acks.push(Message::new_pub_ack(puback))
+                        }
+                        (true, v5::QoS::AtLeastOnce) => (),
+                        (true, v5::QoS::ExactlyOnce) => (),
                     }
                 }
-            }
-            v5::Packet::Subscribe(sub) => self.rx_subscribe(shard, sub)?,
-            v5::Packet::UnSubscribe(_unsub) => todo!(),
-            v5::Packet::PubAck(_puback) => todo!(),
-            v5::Packet::PubRec(_puback) => todo!(),
-            v5::Packet::PubRel(_puback) => todo!(),
-            v5::Packet::PubComp(_puback) => todo!(),
-            v5::Packet::Disconnect(_disconn) => {
-                // TODO: handle disconnect packet, its header and properties.
-                err!(Disconnected, code: Success, "{} client disconnect", self.prefix)?
-            }
-            v5::Packet::Auth(_auth) => todo!(),
+                v5::Packet::Subscribe(sub) => {
+                    out_acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
+                }
+                v5::Packet::UnSubscribe(_unsub) => todo!(),
+                v5::Packet::PubAck(_puback) => {
+                    // TODO: cleanup qos12_unacks
+                    out_seqnos.push(0);
+                    todo!();
+                }
+                v5::Packet::PubRec(_puback) => todo!(),
+                v5::Packet::PubRel(_puback) => todo!(),
+                v5::Packet::PubComp(_puback) => todo!(),
+                v5::Packet::Disconnect(_disconn) => {
+                    // TODO: handle disconnect packet, its header and properties.
+                    err!(
+                        Disconnected,
+                        code: Success,
+                        "{} client disconnect",
+                        self.prefix
+                    )?
+                }
+                v5::Packet::Auth(_auth) => todo!(),
 
-            // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
-            v5::Packet::Connect(_) => err!(
-                ProtocolError,
-                code: ProtocolError,
-                "{} duplicate connect packet",
-                self.prefix
-            )?,
-            v5::Packet::ConnAck(_) | v5::Packet::SubAck(_) => err!(
-                ProtocolError,
-                code: ProtocolError,
-                "{} packet type {:?} not expected from client",
-                self.prefix,
-                pkt.to_packet_type()
-            )?,
-            v5::Packet::UnsubAck(_) | v5::Packet::PingResp => err!(
-                ProtocolError,
-                code: ProtocolError,
-                "{} packet type {:?} not expected from client",
-                self.prefix,
-                pkt.to_packet_type()
-            )?,
-        };
+                // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
+                v5::Packet::Connect(_) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{} duplicate connect packet",
+                    self.prefix
+                )?,
+                v5::Packet::ConnAck(_) | v5::Packet::SubAck(_) => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{} packet type {:?} not expected from client",
+                    self.prefix,
+                    pkt.to_packet_type()
+                )?,
+                v5::Packet::UnsubAck(_) | v5::Packet::PingResp => err!(
+                    ProtocolError,
+                    code: ProtocolError,
+                    "{} packet type {:?} not expected from client",
+                    self.prefix,
+                    pkt.to_packet_type()
+                )?,
+            };
+        }
 
-        Ok(msgs)
+        self.state.out_acks_extend(out_acks);
+
+        Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
     }
 
     // return suback and retained-messages if any.
@@ -691,6 +754,10 @@ impl Session {
 }
 
 impl Session {
+    pub fn incr_out_seqno(&mut self, msg: &mut Message) {
+        self.state.incr_out_seqno(msg)
+    }
+
     // Handle PUBLISH QoS-0
     pub fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         let mut state = mem::replace(&mut self.state, SessionState::None);
@@ -721,8 +788,16 @@ impl Session {
         self.state.out_acks_publish(packet_id)
     }
 
+    pub fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
+        self.state.commit_acks(out_seqnos)
+    }
+
     fn flush_to_miot(&self, mut msgs: Vec<Message>) -> QueueStatus<Message> {
-        let mut miot_tx = self.miot_tx.clone(); // when dropped miot thread woken up.
+        // when dropped miot thread woken up.
+        let mut miot_tx = match &self.state {
+            SessionState::Active { miot_tx, .. } => miot_tx.clone(),
+            _ => unreachable!(),
+        };
 
         let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
         let mut status = miot_tx.try_sends(&self.prefix, pkts);
@@ -754,11 +829,22 @@ impl Session {
 
     #[inline]
     pub fn as_connect(&self) -> &v5::Connect {
-        &self.connect
+        match &self.state {
+            SessionState::Active { connect, .. } => connect,
+            _ => unreachable!(),
+        }
     }
 
     #[inline]
     pub fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
         self.state.as_mut_out_acks()
+    }
+
+    #[inline]
+    fn to_keep_alive(&self) -> Option<u16> {
+        match &self.state {
+            SessionState::Active { keep_alive, .. } => keep_alive.keep_alive(),
+            _ => unreachable!(),
+        }
     }
 }
