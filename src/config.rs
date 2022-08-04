@@ -144,7 +144,7 @@ impl Default for Config {
                 .unwrap();
 
         Config {
-            name: "poc".to_string(),
+            name: "mqttd".to_string(),
             max_nodes: Some(Self::DEF_MAX_NODES),
             num_shards: Some(num_cores),
             port: Some(Self::DEF_MQTT_PORT),

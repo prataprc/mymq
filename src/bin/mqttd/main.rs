@@ -16,8 +16,23 @@ pub struct Opt {
     #[structopt(long = "vv")]
     vv: bool,
 
-    #[structopt(long = "log", default_value = "info")]
-    log: String,
+    #[structopt(long = "no-log")]
+    no_log: bool,
+
+    #[structopt(long = "error")]
+    error: bool,
+
+    #[structopt(long = "warn")]
+    warn: bool,
+
+    #[structopt(long = "info")]
+    info: bool,
+
+    #[structopt(long = "debug")]
+    debug: bool,
+
+    #[structopt(long = "trace")]
+    trace: bool,
 
     #[structopt(subcommand)]
     subcmd: SubCommand,
@@ -46,18 +61,21 @@ impl Opt {
         .to_string()
     }
 
-    fn to_level_filter(&self) -> log::LevelFilter {
-        match self.log.as_str() {
-            "off" => log::LevelFilter::Off,
-            "error" => log::LevelFilter::Error,
-            "warn" => log::LevelFilter::Warn,
-            "info" => log::LevelFilter::Info,
-            "debug" => log::LevelFilter::Debug,
-            "trace" => log::LevelFilter::Trace,
-            level => {
-                println!("invalid log level {}", level);
-                std::process::exit(1)
-            }
+    fn to_log_filter(&self) -> log::LevelFilter {
+        if self.no_log {
+            log::LevelFilter::Off
+        } else if self.error {
+            log::LevelFilter::Error
+        } else if self.warn {
+            log::LevelFilter::Warn
+        } else if self.info {
+            log::LevelFilter::Info
+        } else if self.debug {
+            log::LevelFilter::Debug
+        } else if self.trace {
+            log::LevelFilter::Trace
+        } else {
+            log::LevelFilter::Info
         }
     }
 }
@@ -107,7 +125,7 @@ use log::Level;
 use std::io::Write;
 fn setup_logging(opts: &Opt) {
     let verbosity = opts.to_verbosity();
-    let level_filter = opts.to_level_filter();
+    let level_filter = opts.to_log_filter();
     Builder::from_default_env()
         .format(move |f, r| {
             let target = r.target();
