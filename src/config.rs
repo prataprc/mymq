@@ -13,8 +13,8 @@ pub struct Config {
     /// * **Mutable**: No
     pub name: String,
 
-    /// Maximum nodes that can exist in this cluster, this is the limitation on
-    /// federated nodes.
+    /// Maximum nodes that can exist in this cluster. When `max_nodes` > 1 broker is
+    /// created in distributed mode using consensus algorithm (TODO).
     /// * **Default**: [Config::DEF_MAX_NODES].
     /// * **Mutable**: No
     pub max_nodes: Option<u32>,

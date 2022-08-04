@@ -18,7 +18,7 @@ type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 pub struct Listener {
     /// Human readable name for this mio thread.
     pub name: String,
-    /// Port to listen to.
+    /// Port to listen to
     pub port: u16,
     prefix: String,
     config: Config,
@@ -323,7 +323,7 @@ impl Listener {
     }
 
     fn prefix(&self) -> String {
-        format!("{}:listener:{}", self.name, self.server_address())
+        format!("{}:{}", self.name, self.server_address())
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {

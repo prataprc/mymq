@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "mqcl"
-required-features = ["mqcl"]
+name = "mqttd"
+required-features = ["mqttd"]
 
 [[bin]]
 name = "play"
@@ -14,7 +14,6 @@ required-features = ["play"]
 [dependencies]
 # TODO: split the dependency between "broker" and "client" features.
 log = "0.4.17"
-rand = { version = "0.8.5", features = ["std_rng"] }
 uuid = { version = "1.1.2", features = ["v4"] }
 num_cpus = "1.13.1"
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +27,7 @@ env_logger = { version = "0.9", optional = true }
 chrono = { version = "0.4.19", optional = true}
 
 [dev-dependencies]
+rand = { version = "0.8.5", features = ["std_rng"] }
 arbitrary = { version = "1.1.0", features = ["derive"] }
 rayon = "1.5.3"
 
@@ -37,5 +37,5 @@ client = []
 broker = ["client"]
 default = ["broker", "client"]
 fuzzy = ["arbitrary"]
-mqcl = ["structopt", "env_logger", "chrono"]
+mqttd = ["structopt", "env_logger", "chrono"]
 play = ["structopt", "env_logger"]

@@ -163,7 +163,9 @@ impl<'a> Arbitrary<'a> for Message {
                 src_shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
+                out_seqno: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
+                ack_needed: uns.arbitrary()?,
             },
             4 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,
