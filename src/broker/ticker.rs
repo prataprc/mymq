@@ -3,9 +3,8 @@ use log::{debug, error, info};
 use std::{mem, sync::mpsc, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Cluster, Shard, SLEEP_10MS};
+use crate::broker::{AppTx, Cluster, Config, Shard, SLEEP_10MS};
 
-use crate::Config;
 use crate::{Error, ErrorKind, Result};
 
 /// Type implement a periodic ticker and wake up other threads.

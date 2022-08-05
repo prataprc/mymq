@@ -1,6 +1,6 @@
 use std::{net, time};
 
-use crate::{v5, Config};
+use crate::{broker::Config, v5};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement keep-alive as per MQTT specification.
@@ -12,7 +12,7 @@ pub struct KeepAlive {
 
 impl KeepAlive {
     pub fn new(addr: net::SocketAddr, pkt: &v5::Connect, config: &Config) -> KeepAlive {
-        let factor = config.mqtt_keep_alive_factor();
+        let factor = config.mqtt_keep_alive_factor;
         let interval = match config.mqtt_keep_alive() {
             Some(val) => Some(((val as f32) * factor) as u16),
             None if pkt.keep_alive == 0 => None,

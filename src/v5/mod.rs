@@ -8,7 +8,6 @@ use std::cmp;
 use std::result;
 
 use crate::util::advance;
-use crate::Config;
 use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -203,8 +202,8 @@ impl<'a> Arbitrary<'a> for Subscription {
 }
 
 impl Subscription {
-    pub fn route_qos(&self, publish: &Publish, config: &Config) -> QoS {
-        let server_qos = QoS::try_from(config.mqtt_maximum_qos()).unwrap();
+    pub fn route_qos(&self, publish: &Publish, mqtt_maximum_qos: u8) -> QoS {
+        let server_qos = QoS::try_from(mqtt_maximum_qos).unwrap();
         cmp::min(cmp::min(server_qos, publish.qos), self.qos)
     }
 }

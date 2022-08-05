@@ -2,8 +2,6 @@
 
 use std::{mem, net, path, sync::mpsc, time};
 
-use crate::Config;
-
 /// Used by threads to sleep wait for an event to accur..
 pub const SLEEP_10MS: time::Duration = time::Duration::from_millis(10);
 
@@ -115,6 +113,7 @@ mod message;
 mod miot;
 mod rebalance;
 // TODO: mod rr;
+mod config;
 mod session;
 mod shard;
 mod socket;
@@ -124,6 +123,7 @@ mod ticker;
 mod ttrie;
 
 pub use cluster::{Cluster, Node};
+pub use config::{Config, ConfigNode};
 pub use flush::Flusher;
 pub use handshake::Handshake;
 pub use keep_alive::KeepAlive;

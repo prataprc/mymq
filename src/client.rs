@@ -13,6 +13,8 @@ use std::{error::Error, io, mem, net, time};
 
 use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
 
+pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
+
 /// MQTT CONNECT flags and headers
 #[derive(Clone, Copy)]
 pub struct ConnectOptions {
@@ -41,6 +43,8 @@ pub struct ClientBuilder {
     pub nodelay: Option<bool>,
     /// Socket settings, refer [net::TcpStream::set_ttl].
     pub ttl: Option<u32>,
+    /// Maximum packet size,
+    pub max_packet_size: u32,
     // CONNECT options
     pub connopts: ConnectOptions,
     pub connect_properties: Option<v5::ConnectProperties>,
@@ -58,6 +62,7 @@ impl Default for ClientBuilder {
             write_timeout: None,
             nodelay: None,
             ttl: None,
+            max_packet_size: CLIENT_MAX_PACKET_SIZE,
             // CONNECT options
             connopts: ConnectOptions::default(),
             connect_properties: Some(v5::ConnectProperties::default()),
@@ -90,7 +95,7 @@ impl ClientBuilder {
         let (cio, connack) = {
             let connect = self.to_connect();
             let blocking = true;
-            ClientIO::handshake(connect, sock, blocking)?
+            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
         };
 
         let mut client = self.into_client(remote);
@@ -118,7 +123,7 @@ impl ClientBuilder {
         let (cio, connack) = {
             let connect = self.to_connect();
             let blocking = false;
-            ClientIO::handshake(connect, sock, blocking)?
+            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
         };
 
         let mut client = self.into_client(remote);
@@ -180,6 +185,7 @@ impl ClientBuilder {
             write_timeout: self.write_timeout,
             nodelay: self.nodelay,
             ttl: self.ttl,
+            max_packet_size: self.max_packet_size,
             connopts: self.connopts,
             connect_properties: self.connect_properties.clone(),
             connect_payload: self.connect_payload.clone(),
@@ -203,6 +209,7 @@ pub struct Client {
     write_timeout: Option<time::Duration>,
     nodelay: Option<bool>,
     ttl: Option<u32>,
+    max_packet_size: u32,
     // CONNECT options
     connopts: ConnectOptions,
     connect_properties: Option<v5::ConnectProperties>,
@@ -232,6 +239,7 @@ impl Client {
             write_timeout: self.write_timeout,
             nodelay: self.nodelay,
             ttl: self.ttl,
+            max_packet_size: self.max_packet_size,
             // CONNECT options
             connopts: self.connopts,
             connect_properties: self.connect_properties.clone(),
@@ -268,7 +276,7 @@ impl Client {
         let (cio, connack) = {
             let connect = self.to_connect();
             let blocking = self.cio.is_blocking();
-            ClientIO::handshake(connect, sock, blocking)?
+            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
         };
         self.cio = cio;
         self.connack = connack;
@@ -442,11 +450,12 @@ enum ClientIO {
 
 impl ClientIO {
     fn handshake(
+        max_packet_size: u32,
         connect: v5::Connect,
         mut sock: net::TcpStream,
         blocking: bool,
     ) -> io::Result<(ClientIO, v5::ConnAck)> {
-        let max_packet_size = connect.max_packet_size();
+        let max_packet_size = connect.max_packet_size(max_packet_size);
 
         let mut pktr = MQTTRead::new(max_packet_size);
         let mut pktw = MQTTWrite::new(&[], max_packet_size);

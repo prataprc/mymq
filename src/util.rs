@@ -35,6 +35,10 @@ pub fn ceil_power_of_2(n: u32) -> u64 {
     }
 }
 
+pub fn num_cores() -> u32 {
+    u32::try_from(ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap())).unwrap()
+}
+
 #[cfg(test)]
 #[path = "util_test.rs"]
 mod util_test;

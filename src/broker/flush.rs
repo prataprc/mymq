@@ -3,9 +3,9 @@ use log::{debug, error, info, trace, warn};
 use std::{thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{AppTx, QueueStatus, Socket, SLEEP_10MS};
+use crate::broker::{AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
 
-use crate::{v5, Config};
+use crate::v5;
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -180,7 +180,7 @@ impl Threadable for Flusher {
         use crate::broker::{thread::get_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let flush_timeout = self.config.mqtt_flush_timeout();
+        let flush_timeout = self.config.sock_mqtt_flush_timeout;
         info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
 
         'outer: loop {
@@ -226,8 +226,8 @@ impl Flusher {
         use crate::packet::send_disconnect;
 
         let now = time::Instant::now();
-        let max_size = self.config.mqtt_max_packet_size();
-        let flush_timeout = self.config.mqtt_flush_timeout();
+        let max_size = self.config.mqtt_max_packet_size;
+        let flush_timeout = self.config.sock_mqtt_flush_timeout;
 
         let (mut socket, conn_err) = match req {
             Request::FlushConnection { socket, err } => (socket, err),

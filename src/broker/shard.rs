@@ -5,11 +5,11 @@ use std::{cmp, collections::BTreeMap, mem, sync::Arc};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, socket};
-use crate::broker::{AppTx, RetainedTrie, Session, Shardable, SubscribedTrie};
+use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
 use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
 use crate::broker::{InpSeqno, OutSeqno, Timestamp};
 
-use crate::{v5, ClientID, Config, TopicName};
+use crate::{v5, ClientID, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -214,7 +214,7 @@ impl Shard {
     }
 
     pub fn spawn_active(self, args: SpawnArgs, app_tx: AppTx) -> Result<Shard> {
-        let num_shards = self.config.num_shards();
+        let num_shards = self.config.num_shards;
         if matches!(&self.inner, Inner::Handle(_) | Inner::MainActive(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
@@ -226,7 +226,7 @@ impl Shard {
         // to another local-session. Note that the queue is shared by all the sessions
         // in this shard, hence the queue-capacity is correspondingly large.
         let (msg_tx, msg_rx) = {
-            let size = self.config.mqtt_pkt_batch_size() * num_shards;
+            let size = self.config.mqtt_pkt_batch_size * num_shards;
             message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
         let mut shard = Shard {
@@ -1110,6 +1110,7 @@ impl Shard {
         };
         let connect = pkt;
         let remote_addr = conn.peer_addr().unwrap();
+        let size = self.config.mqtt_pkt_batch_size as usize;
 
         let client_id = ClientID::from_connect(&connect.payload.client_id);
 
@@ -1119,16 +1120,12 @@ impl Shard {
         let (mut session, upstream, downstream) = {
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
-            let (upstream, session_rx) = {
-                let size = self.config.mqtt_pkt_batch_size() as usize;
-                socket::pkt_channel(self.shard_id, size, self.to_waker())
-            };
+            let (upstream, session_rx) =
+                { socket::pkt_channel(self.shard_id, size, self.to_waker()) };
             // This queue is wired up with miot-thread. This queue carries v5::Packet,
             // and there is a separate queue for every session.
-            let (miot_tx, downstream) = {
-                let size = self.config.mqtt_pkt_batch_size() as usize;
-                socket::pkt_channel(self.shard_id, size, self.as_miot().to_waker())
-            };
+            let (miot_tx, downstream) =
+                { socket::pkt_channel(self.shard_id, size, self.as_miot().to_waker()) };
             let args = SessionArgs {
                 addr: remote_addr,
                 client_id: client_id.clone(),
@@ -1190,12 +1187,13 @@ impl Shard {
         };
         {
             let client_id = client_id.clone();
+            let def = Config::DEF_MQTT_MAX_PACKET_SIZE;
             let args = AddConnectionArgs {
                 client_id,
                 conn,
                 upstream,
                 downstream,
-                max_packet_size: session.as_connect().max_packet_size(),
+                max_packet_size: session.as_connect().max_packet_size(def),
             };
             allow_panic!(&self, miot.add_connection(args));
         }

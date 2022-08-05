@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::{mem, net, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{socket, AppTx, QueueStatus, Shard, Socket};
+use crate::broker::{socket, AppTx, Config, QueueStatus, Shard, Socket};
 
-use crate::{ClientID, Config, MQTTRead, MQTTWrite};
+use crate::{ClientID, MQTTRead, MQTTWrite};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -403,7 +403,7 @@ impl Miot {
         };
         info!("{} adding connection {:?} ...", self.prefix, args.conn.peer_addr());
 
-        let max_packet_size = self.config.mqtt_max_packet_size();
+        let max_packet_size = self.config.mqtt_max_packet_size;
         let (poll, conns, token) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, next_token, .. }) => {
                 let token = *next_token;

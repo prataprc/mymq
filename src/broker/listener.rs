@@ -4,9 +4,8 @@ use mio::event::Events;
 use std::{net, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Cluster, QueueStatus};
+use crate::broker::{AppTx, Cluster, Config, QueueStatus};
 
-use crate::Config;
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -17,9 +16,7 @@ type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 /// This type is threadable and singleton.
 pub struct Listener {
     /// Human readable name for this mio thread.
-    pub name: String,
-    /// Port to listen to
-    pub port: u16,
+    name: String,
     prefix: String,
     config: Config,
     inner: Inner,
@@ -55,7 +52,6 @@ impl Default for Listener {
         let config = Config::default();
         let mut def = Listener {
             name: format!("{}-listener-init", config.name),
-            port: config.port.unwrap(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -89,10 +85,8 @@ impl Listener {
     /// Create a listener from configuration. Listener shall be in `Init` state. To start
     /// this listener thread call [Listener::spawn].
     pub fn from_config(config: Config) -> Result<Listener> {
-        let def = Listener::default();
         let mut val = Listener {
             name: format!("{}-listener-init", config.name),
-            port: config.port.unwrap_or(def.port),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -120,7 +114,6 @@ impl Listener {
 
         let mut listener = Listener {
             name: format!("{}-listener-main", self.config.name),
-            port: self.port,
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -137,7 +130,6 @@ impl Listener {
 
         let mut listener = Listener {
             name: format!("{}-listener-handle", self.config.name),
-            port: self.port,
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -179,7 +171,7 @@ impl Threadable for Listener {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{}, spawn thread port:{} ...", self.prefix, self.port);
+        info!("{}, spawn thread port:{} ...", self.prefix, self.config.port);
 
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -319,7 +311,7 @@ impl Listener {
 
 impl Listener {
     fn server_address(&self) -> String {
-        format!("0.0.0.0:{}", self.port)
+        format!("0.0.0.0:{}", self.config.port)
     }
 
     fn prefix(&self) -> String {

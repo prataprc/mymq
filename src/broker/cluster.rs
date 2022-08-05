@@ -7,10 +7,10 @@ use std::{collections::BTreeMap, net, path, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{rebalance, ticker};
-use crate::broker::{AppTx, Hostable, RetainedTrie, SubscribedTrie};
+use crate::broker::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
 use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
 
-use crate::{util, v5, Config, ConfigNode, Timer, TopicName};
+use crate::{util, v5, Timer, TopicName};
 use crate::{Error, ErrorKind, Result};
 
 // TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
@@ -128,13 +128,13 @@ impl Cluster {
     /// the cluster call [Cluster::spawn]
     pub fn from_config(config: Config) -> Result<Cluster> {
         // validate
-        if config.num_shards() == 0 {
+        if config.num_shards == 0 {
             err!(InvalidInput, desc: "num_shards can't be ZERO")?;
-        } else if !util::is_power_of_2(config.num_shards()) {
+        } else if !util::is_power_of_2(config.num_shards) {
             err!(
                 InvalidInput,
                 desc: "num. of shards must be power of 2 {}",
-                config.num_shards()
+                config.num_shards
             )?;
         }
 
@@ -214,7 +214,7 @@ impl Cluster {
             let mut shard_queues = BTreeMap::default();
 
             let mut active_shards = BTreeMap::default();
-            for shard_id in 0..self.config.num_shards() {
+            for shard_id in 0..self.config.num_shards {
                 let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
                 let shard = {
                     let args = crate::broker::shard::SpawnArgs {
@@ -378,9 +378,7 @@ impl Threadable for Cluster {
 
         info!(
             "{} spawn max_nodes:{} num_shards:{} ...",
-            self.prefix,
-            self.config.max_nodes(),
-            self.config.num_shards(),
+            self.prefix, self.config.max_nodes, self.config.num_shards,
         );
 
         let mut rt = Rt {
@@ -607,10 +605,8 @@ impl Cluster {
         };
 
         let client_id = connect.payload.client_id.clone();
-        let shard_id = rebalance::Rebalancer::session_partition(
-            &*client_id,
-            self.config.num_shards(),
-        );
+        let shard_id =
+            rebalance::Rebalancer::session_partition(&*client_id, self.config.num_shards);
 
         let shard = match active_shards.get_mut(&shard_id) {
             Some(shard) => shard,
@@ -736,7 +732,7 @@ impl Default for Node {
             mqtt_address: config.mqtt_address.clone(),
             path: config.path.clone(),
             weight: config.weight.unwrap(),
-            uuid: config.uuid.unwrap().parse().unwrap(),
+            uuid: config.uuid.parse().unwrap(),
         }
     }
 }
@@ -746,10 +742,7 @@ impl TryFrom<ConfigNode> for Node {
 
     fn try_from(c: ConfigNode) -> Result<Node> {
         let node = Node::default();
-        let uuid = match c.uuid.clone() {
-            Some(uuid) => err!(InvalidInput, try: uuid.parse::<Uuid>())?,
-            None => node.uuid,
-        };
+        let uuid = err!(InvalidInput, try: c.uuid.clone().parse::<Uuid>())?;
 
         let val = Node {
             mqtt_address: c.mqtt_address,

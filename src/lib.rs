@@ -73,12 +73,10 @@ pub trait IterTopicPath<'a> {
 
 #[macro_use]
 mod error;
-mod config;
 mod packet;
 mod timer;
 mod types;
 
-pub use config::{Config, ConfigNode};
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use packet::{MQTTRead, MQTTWrite};
 pub use timer::{TimeoutValue, Timer};

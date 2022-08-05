@@ -3,9 +3,9 @@ use log::{error, trace, warn};
 use std::sync::{mpsc, Arc};
 use std::{collections::VecDeque, mem, time};
 
-use crate::broker::QueueStatus;
+use crate::broker::{Config, QueueStatus};
 
-use crate::{v5, ClientID, Config, MQTTRead, MQTTWrite, Packetize};
+use crate::{v5, ClientID, MQTTRead, MQTTWrite, Packetize};
 use crate::{ErrorKind, Result};
 
 pub type QueuePkt = QueueStatus<v5::Packet>;
@@ -146,7 +146,7 @@ impl Socket {
     // returned QueueStatus shall not carry any packets, packets are booked in Socket
     // MalformedPacket, ProtocolError
     pub fn read_packets(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
-        let pkt_batch_size = config.mqtt_pkt_batch_size() as usize;
+        let pkt_batch_size = config.mqtt_pkt_batch_size as usize;
 
         // before reading from socket, send remaining packets to shard.
         loop {
@@ -178,7 +178,6 @@ impl Socket {
 
         let disconnected = QueuePkt::Disconnected(Vec::new());
 
-        let timeout = config.mqtt_read_timeout();
         let pr = mem::replace(&mut self.rd.pr, MQTTRead::default());
         let mut pr = match pr.read(&mut self.conn) {
             Ok((pr, _would_block)) => pr,
@@ -189,16 +188,16 @@ impl Socket {
         let status = match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !self.read_elapsed() => {
                 trace!("{} read retrying", prefix);
-                self.set_read_timeout(true, timeout);
+                self.set_read_timeout(true, config.sock_mqtt_read_timeout);
                 QueueStatus::Block(Vec::new())
             }
             Init { .. } | Header { .. } | Remain { .. } => {
-                self.set_read_timeout(false, timeout);
+                self.set_read_timeout(false, config.sock_mqtt_read_timeout);
                 error!("{} disconnect, pkt-read timesout {:?}", prefix, self.wt.timeout);
                 QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
-                self.set_read_timeout(false, timeout);
+                self.set_read_timeout(false, config.sock_mqtt_read_timeout);
                 let pkt = pr.parse()?;
                 pr = pr.reset();
                 QueueStatus::Ok(vec![pkt])
@@ -286,7 +285,6 @@ impl Socket {
     fn write_packet(&mut self, prefix: &str, config: &Config) -> QueuePkt {
         use crate::MQTTWrite::{Fin, Init, Remain};
 
-        let timeout = config.mqtt_write_timeout();
         let pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
         let pw = match pw.write(&mut self.conn) {
             Ok((pw, _would_block)) => pw,
@@ -299,16 +297,16 @@ impl Socket {
         let res = match &pw {
             Init { .. } | Remain { .. } if !self.write_elapsed() => {
                 trace!("{} write retrying", prefix);
-                self.set_write_timeout(true, timeout);
+                self.set_write_timeout(true, config.sock_mqtt_write_timeout);
                 QueueStatus::Block(Vec::new())
             }
             Init { .. } | Remain { .. } => {
-                self.set_write_timeout(false, timeout);
+                self.set_write_timeout(false, config.sock_mqtt_write_timeout);
                 error!("{} packet write fail after {:?}", prefix, self.wt.timeout);
                 QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
-                self.set_write_timeout(false, timeout);
+                self.set_write_timeout(false, config.sock_mqtt_write_timeout);
                 QueueStatus::Ok(Vec::new())
             }
             MQTTWrite::None => unreachable!(),

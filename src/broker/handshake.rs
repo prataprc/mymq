@@ -3,9 +3,9 @@ use log::{error, info};
 use std::{io, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
-use crate::broker::{Cluster, SLEEP_10MS};
+use crate::broker::{Cluster, Config, SLEEP_10MS};
 
-use crate::{v5, Config, MQTTRead, Packetize};
+use crate::{v5, MQTTRead, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type handles incoming connection.
@@ -29,8 +29,8 @@ impl Threadable for Handshake {
 
         let now = time::Instant::now();
 
-        let max_size = self.config.mqtt_max_packet_size();
-        let connect_timeout = self.config.connect_timeout();
+        let max_size = self.config.mqtt_max_packet_size;
+        let connect_timeout = self.config.sock_mqtt_connect_timeout;
 
         let mut packetr = MQTTRead::new(max_size);
         let mut conn = self.conn.take().unwrap();

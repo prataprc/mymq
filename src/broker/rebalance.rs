@@ -34,8 +34,7 @@
 //! * Demotion of master shard as replica-shard.
 //! * Promotion of replica-shard as master-shard.
 
-use crate::broker::Node;
-use crate::Config;
+use crate::broker::{Config, Node};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct Topology {
@@ -78,7 +77,7 @@ impl Algorithm {
         match self {
             Algorithm::SingleNode => {
                 let node = &nodes[0];
-                (0..c.num_shards())
+                (0..c.num_shards)
                     .map(|shard| Topology {
                         shard,
                         master: node.clone(),

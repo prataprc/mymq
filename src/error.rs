@@ -232,9 +232,45 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<std::convert::Infallible> for Error {
+    fn from(val: std::convert::Infallible) -> Self {
+        let err: result::Result<(), Error> = err!(Infallible, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
+impl From<std::str::ParseBoolError> for Error {
+    fn from(val: std::str::ParseBoolError) -> Self {
+        let err: result::Result<(), Error> = err!(ParseBoolError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
+impl From<std::num::ParseFloatError> for Error {
+    fn from(val: std::num::ParseFloatError) -> Self {
+        let err: result::Result<(), Error> = err!(ParseFloatError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
+impl From<std::num::ParseIntError> for Error {
+    fn from(val: std::num::ParseIntError) -> Self {
+        let err: result::Result<(), Error> = err!(ParseIntError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
 impl From<std::num::TryFromIntError> for Error {
     fn from(val: std::num::TryFromIntError) -> Self {
         let err: result::Result<(), Error> = err!(TryFromIntError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
+impl From<std::net::AddrParseError> for Error {
+    fn from(val: std::net::AddrParseError) -> Self {
+        let err: result::Result<(), Error> =
+            err!(TryFromAddrError, cause: val, "{}", val);
         err.unwrap_err()
     }
 }
@@ -308,7 +344,12 @@ pub enum ErrorKind {
     RxClosed,
     TxFinish,
     // chain of error
+    Infallible,
+    ParseBoolError,
+    ParseFloatError,
+    ParseIntError,
     TryFromIntError,
+    TryFromAddrError,
     IOError,
 }
 
@@ -334,7 +375,12 @@ impl fmt::Display for ErrorKind {
             RxClosed => write!(f, "RxClosed"),
             TxFinish => write!(f, "TxFinish"),
             // chain of error
+            Infallible => write!(f, "Infallible"),
+            ParseBoolError => write!(f, "ParseBoolError"),
+            ParseFloatError => write!(f, "ParseFloatError"),
+            ParseIntError => write!(f, "ParseIntError"),
             TryFromIntError => write!(f, "TryFromIntError"),
+            TryFromAddrError => write!(f, "TryFromAddrError"),
             IOError => write!(f, "IOError"),
         }
     }

@@ -3,10 +3,10 @@ use log::{debug, error, trace};
 use std::collections::BTreeMap;
 use std::{cmp, mem, net};
 
-use crate::broker::SubscribedTrie;
+use crate::broker::{Config, SubscribedTrie};
 use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus, Shard};
 
-use crate::{v5, ClientID, Config, PacketID, TopicFilter, TopicName};
+use crate::{v5, ClientID, PacketID, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type Messages = Vec<Message>;
@@ -125,7 +125,7 @@ impl SessionState {
 
         let m = qos0_back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (config.mqtt_pkt_batch_size() as usize) * 4;
+        let n = (config.mqtt_pkt_batch_size as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
@@ -167,7 +167,7 @@ impl SessionState {
 
         let m = back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (config.mqtt_pkt_batch_size() as usize) * 4;
+        let n = (config.mqtt_pkt_batch_size as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
@@ -175,7 +175,7 @@ impl SessionState {
             return QueueStatus::Disconnected(Vec::new());
         }
 
-        if qos12_unacks.len() >= usize::from(config.mqtt_receive_maximum()) {
+        if qos12_unacks.len() >= usize::from(config.mqtt_receive_maximum) {
             return QueueStatus::Block(Vec::new());
         }
 
@@ -187,7 +187,7 @@ impl SessionState {
             back_log.insert(msg.to_out_seqno(), msg);
         }
 
-        let max = usize::try_from(config.mqtt_pkt_batch_size()).unwrap();
+        let max = usize::try_from(config.mqtt_pkt_batch_size).unwrap();
         let mut msgs = Vec::default();
         while msgs.len() < max {
             match back_log.pop_first() {
@@ -354,7 +354,7 @@ impl SessionState {
             _ => unreachable!(),
         };
 
-        let ignore_dup = config.mqtt_ignore_duplicate();
+        let ignore_dup = config.mqtt_ignore_duplicate;
         match publish.qos {
             v5::QoS::AtMostOnce => false,
             v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
@@ -460,13 +460,19 @@ impl Session {
     }
 
     pub fn success_ack(&mut self, pkt: &v5::Connect, _shard: &Shard) -> v5::ConnAck {
-        let sei = self.config.mqtt_session_expiry_interval(pkt.session_expiry_interval());
+        let val = pkt.session_expiry_interval();
+        let sei = match (self.config.mqtt_session_expiry_interval, val) {
+            (Some(_one), Some(two)) => Some(two),
+            (Some(one), None) => Some(one),
+            (None, Some(two)) => Some(two),
+            (None, None) => None,
+        };
         let mut props = v5::ConnAckProperties {
             session_expiry_interval: sei,
-            receive_maximum: Some(self.config.mqtt_receive_maximum()),
-            maximum_qos: Some(self.config.mqtt_maximum_qos().try_into().unwrap()),
-            retain_available: Some(self.config.mqtt_retain_available()),
-            max_packet_size: Some(self.config.mqtt_max_packet_size()),
+            receive_maximum: Some(self.config.mqtt_receive_maximum),
+            maximum_qos: Some(self.config.mqtt_maximum_qos.try_into().unwrap()),
+            retain_available: Some(self.config.mqtt_retain_available),
+            max_packet_size: Some(self.config.mqtt_max_packet_size),
             assigned_client_identifier: None,
             wildcard_subscription_available: Some(true),
             subscription_identifiers_available: Some(true),
@@ -644,7 +650,7 @@ impl Session {
                 .as_mut_subscriptions()
                 .insert(filter.topic_filter.clone(), subscription);
 
-            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap();
+            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
             let rc = match cmp::max(server_qos, qos) {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
                 v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
@@ -681,7 +687,7 @@ impl Session {
 impl Session {
     // return `true` if there where subscribers.
     fn rx_publish(&mut self, shard: &mut Shard, publish: v5::Publish) -> Result<bool> {
-        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos()).unwrap() {
+        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap() {
             err!(
                 ProtocolError,
                 code: QoSNotSupported,
@@ -721,7 +727,7 @@ impl Session {
             let publish = {
                 let mut publish = publish.clone();
                 let retain = subscr.retain_as_published && publish.retain;
-                let qos = subscr.route_qos(&publish, &self.config);
+                let qos = subscr.route_qos(&publish, self.config.mqtt_maximum_qos);
                 publish.set_fixed_header(retain, qos, false);
                 publish.set_subscription_ids(ids);
                 publish
@@ -734,7 +740,7 @@ impl Session {
     }
 
     fn book_retain(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
-        if publish.retain && !self.config.mqtt_retain_available() {
+        if publish.retain && !self.config.mqtt_retain_available {
             err!(
                 ProtocolError,
                 code: RetainNotSupported,
