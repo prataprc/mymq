@@ -7,3 +7,7 @@
 * Cleanup src/broker/chash.rs,src/broker/crc.rs
 * Create a script to calculate the bare-minimum `rustc` version required.
 * Create a script to list unstable features required by this crate and depended crates.
+* While mqttd boots,
+  * Log version and SHA1.
+  * Log system resources like CPU, Memory (Total, Free), Net-Interfaces,
+    Disks (Count, Total, Free).
