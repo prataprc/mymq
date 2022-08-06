@@ -6,6 +6,7 @@ use std::{net, sync::Arc, time};
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Cluster, Config, QueueStatus};
 
+use crate::ToJson;
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -75,6 +76,16 @@ impl Drop for Listener {
     }
 }
 
+impl ToJson for Listener {
+    fn to_config_json(&self) -> String {
+        format!(concat!("{{ {:?}: {} }}"), "port", self.config.port)
+    }
+
+    fn to_stats_json(&self) -> String {
+        "".to_string()
+    }
+}
+
 impl Listener {
     /// Poll register token for waker event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
@@ -85,7 +96,7 @@ impl Listener {
     /// this listener thread call [Listener::spawn].
     pub fn from_config(config: &Config) -> Result<Listener> {
         let mut val = Listener {
-            name: format!("{}-listener-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
             inner: Inner::Init,
@@ -112,7 +123,7 @@ impl Listener {
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
 
         let mut listener = Listener {
-            name: format!("{}-listener-main", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
@@ -128,7 +139,7 @@ impl Listener {
         thrd.set_waker(Arc::clone(&waker));
 
         let mut listener = Listener {
-            name: format!("{}-listener-handle", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
@@ -170,7 +181,7 @@ impl Threadable for Listener {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{}, spawn thread port:{} ...", self.prefix, self.config.port);
+        info!("{} spawn thread {}", self.prefix, self.to_config_json());
 
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -189,7 +200,7 @@ impl Threadable for Listener {
             _ => unreachable!(),
         };
 
-        info!("{}, thread exit ...", self.prefix);
+        info!("{} thread exit", self.prefix);
         self
     }
 }
@@ -270,12 +281,13 @@ impl Listener {
             Ok((conn, addr)) => {
                 assert_eq!(conn.peer_addr().unwrap(), addr);
                 // for every successful accept launch a handshake thread.
-                let hs = Handshake {
-                    prefix: format!("{}:handshake:{}", self.prefix, addr),
+                let mut hs = Handshake {
+                    prefix: self.config.name.clone(),
                     conn: Some(conn),
                     config: self.config.clone(),
                     cluster: cluster.to_tx(),
                 };
+                hs.prefix = hs.prefix();
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
                 QueueStatus::Ok(Vec::new())
             }
@@ -296,7 +308,7 @@ impl Listener {
 
         match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(_run_loop) => {
-                info!("{} closing ...", self.prefix);
+                info!("{} closing", self.prefix);
 
                 // Drop, poll, server, cluster and app_tx.
                 let _init = mem::replace(&mut self.inner, Inner::Close(FinState));
@@ -314,7 +326,13 @@ impl Listener {
     }
 
     fn prefix(&self) -> String {
-        format!("{}:{}", self.name, self.server_address())
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_, _) => "hndl",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<l:{}:{}>", self.name, state)
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {

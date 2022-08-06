@@ -118,6 +118,12 @@ impl Threadable for Handshake {
     }
 }
 
+impl Handshake {
+    pub(crate) fn prefix(&self) -> String {
+        format!("h:{}", self.config.name)
+    }
+}
+
 fn send_connack<W>(
     prefix: &str,
     code: v5::ConnackReasonCode,

@@ -10,7 +10,7 @@ use crate::broker::{rebalance, ticker};
 use crate::broker::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
 use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
 
-use crate::{util, v5, Timer, TopicName};
+use crate::{util, v5, Timer, ToJson, TopicName};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -109,6 +109,24 @@ impl Drop for Cluster {
             Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+        }
+    }
+}
+
+impl ToJson for Cluster {
+    fn to_config_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "max_nodes", self.config.max_nodes, "num_shards", self.config.num_shards
+        )
+    }
+
+    fn to_stats_json(&self) -> String {
+        match &self.inner {
+            Inner::Main(RunLoop { active_shards, .. }) => {
+                format!(concat!("{{ {:?}: {} }}"), "active_shards", active_shards.len())
+            }
+            _ => "".to_string(),
         }
     }
 }
@@ -226,38 +244,42 @@ impl Cluster {
         };
         cluster.prefix = cluster.prefix();
 
-        //{
-        //    let listener = Self::spawn_listener(SpawnListener {
-        //        config: &self.config,
-        //        cluster: &cluster,
-        //        app_tx: &app_tx,
-        //    })?;
-        //    let active_shards = Self::spawn_active_shards(SpawnShards {
-        //        config: &self.config,
-        //        cluster: &cluster,
-        //        flusher_tx,
-        //        topic_filters: &topic_filters,
-        //        retained_messages: &retained_messages,
-        //        app_tx: &app_tx,
-        //    })?;
+        {
+            let listener = Self::spawn_listener(SpawnListener {
+                config: &self.config,
+                cluster: &cluster,
+                app_tx: &app_tx,
+            })?;
+            let active_shards = Self::spawn_active_shards(SpawnShards {
+                config: &self.config,
+                cluster: &cluster,
+                flusher_tx,
+                topic_filters: &topic_filters,
+                retained_messages: &retained_messages,
+                app_tx: &app_tx,
+            })?;
 
-        //    Self::set_shard_queues(&active_shards);
+            //Self::set_shard_queues(&active_shards);
 
-        //    let ticker = Self::spawn_ticker(SpawnTicker {
-        //        config: &self.config,
-        //        cluster: &cluster,
-        //        // TODO: include replica-shards in ticker_shards
-        //        shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
-        //        app_tx: &app_tx,
-        //    })?;
+            //let ticker = Self::spawn_ticker(SpawnTicker {
+            //    config: &self.config,
+            //    cluster: &cluster,
+            //    // TODO: include replica-shards in ticker_shards
+            //    shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
+            //    app_tx: &app_tx,
+            //})?;
 
-        //    match &cluster.inner {
-        //        Inner::Handle(_waker, thrd) => {
-        //            thrd.request(Request::Set { listener, ticker, active_shards })??;
-        //        }
-        //        _ => unreachable!(),
-        //    }
-        //}
+            match &cluster.inner {
+                Inner::Handle(_waker, thrd) => {
+                    thrd.request(Request::Set {
+                        listener,
+                        ticker: Ticker::default(),
+                        active_shards: BTreeMap::default(),
+                    })??;
+                }
+                _ => unreachable!(),
+            }
+        }
 
         Ok(cluster)
     }
@@ -415,10 +437,7 @@ impl Threadable for Cluster {
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!(
-            "{} spawn max_nodes:{} num_shards:{} ...",
-            self.prefix, self.config.max_nodes, self.config.num_shards,
-        );
+        info!("{} spawn thread {}", self.prefix, self.to_config_json());
 
         let mut rt = Rt {
             retain_timer: Timer::default(),
@@ -457,7 +476,7 @@ impl Cluster {
         let exit = 'outer: loop {
             match iter.next() {
                 Some(event) => {
-                    trace!("{}, poll-event token:{}", self.prefix, event.token().0);
+                    trace!("{} poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
 
                     match event.token() {
@@ -478,7 +497,7 @@ impl Cluster {
             }
         };
 
-        debug!("{}, polled and got {} events", self.prefix, count);
+        debug!("{} polled and got {} events", self.prefix, count);
         exit
     }
 
@@ -656,7 +675,7 @@ impl Cluster {
             }
         };
         info!(
-            "{}, new connection {:?} mapped to shard {}",
+            "{} new connection {:?} mapped to shard {}",
             self.prefix, remote_addr, shard_id
         );
 
@@ -671,12 +690,6 @@ impl Cluster {
 
         match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(mut run_loop) => {
-                info!(
-                    "{}, closing active_shards:{}",
-                    self.prefix,
-                    run_loop.active_shards.len()
-                );
-
                 mem::drop(run_loop.poll);
 
                 let mut active_shards = BTreeMap::default();
@@ -709,6 +722,8 @@ impl Cluster {
                         BTreeMap::default(),
                     ),
                 };
+
+                info!("{} close {}", self.prefix, self.to_stats_json());
 
                 let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
                 Response::Ok

@@ -47,6 +47,9 @@ pub enum SubCommand {
 
         #[structopt(long = "port", default_value = "1883")]
         port: u16,
+
+        #[structopt(long = "num-shards", default_value = "1")]
+        num_shards: u32,
     },
 }
 
@@ -60,7 +63,7 @@ fn main() {
 
     let (tx, rx) = mpsc::sync_channel(2);
     let ctrlc_tx = tx.clone();
-    ctrlc::set_handler(move || ctrlc_tx.send("ctrlc".to_string()).unwrap());
+    ctrlc::set_handler(move || ctrlc_tx.send("ctrlc".to_string()).unwrap()).unwrap();
 
     let config = exit_on_error(parse_config(&opts), 1);
     let cluster = {
@@ -103,9 +106,10 @@ fn parse_config(opts: &Opt) -> Result<Config> {
 
 fn parse_cmd_opts(opts: &Opt, mut config: Config) -> Result<Config> {
     match &opts.subcmd {
-        SubCommand::Start { name, port } => {
+        SubCommand::Start { name, port, num_shards } => {
             config.name = name.clone();
             config.port = port.clone();
+            config.num_shards = num_shards.clone();
         }
     }
 
@@ -155,7 +159,7 @@ fn log_format(f: &mut Formatter, r: &log::Record<'_>) -> io::Result<()> {
     let loc = mod_style.value(format!("{}:{}", file, r.line().unwrap()));
     writeln!(
         f,
-        "{} [{:5}] [{:>11}] {}",
+        "{} [{:5}] [{:>13}] {}",
         chrono::Local::now().format("%Y-%m-%dT%H:%M:%.3f%Z"),
         level_style.value(r.level()),
         loc,
