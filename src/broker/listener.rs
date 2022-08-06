@@ -51,7 +51,7 @@ impl Default for Listener {
     fn default() -> Listener {
         let config = Config::default();
         let mut def = Listener {
-            name: format!("{}-listener-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -76,19 +76,18 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    /// Poll register token for waker event, OTP calls made to this thread shall trigger
-    /// this event.
+    /// Poll register token for waker event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
     /// Poll register for server TcpStream.
     pub const TOKEN_SERVER: mio::Token = mio::Token(2);
 
     /// Create a listener from configuration. Listener shall be in `Init` state. To start
     /// this listener thread call [Listener::spawn].
-    pub fn from_config(config: Config) -> Result<Listener> {
+    pub fn from_config(config: &Config) -> Result<Listener> {
         let mut val = Listener {
             name: format!("{}-listener-init", config.name),
             prefix: String::default(),
-            config,
+            config: config.clone(),
             inner: Inner::Init,
         };
         val.prefix = val.prefix();

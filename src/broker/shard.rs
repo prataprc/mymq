@@ -198,7 +198,7 @@ pub struct SpawnArgs {
 impl Shard {
     const WAKE_TOKEN: mio::Token = mio::Token(1);
 
-    pub fn from_config(config: Config, shard_id: u32) -> Result<Shard> {
+    pub fn from_config(config: &Config, shard_id: u32) -> Result<Shard> {
         let def = Shard::default();
         let mut val = Shard {
             name: format!("{}-shard-init", config.name),
@@ -213,7 +213,7 @@ impl Shard {
         Ok(val)
     }
 
-    pub fn spawn_active(self, args: SpawnArgs, app_tx: AppTx) -> Result<Shard> {
+    pub fn spawn_active(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
         let num_shards = self.config.num_shards;
         if matches!(&self.inner, Inner::Handle(_) | Inner::MainActive(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
@@ -286,7 +286,7 @@ impl Shard {
         Ok(shard)
     }
 
-    pub fn spawn_replica(self, args: SpawnArgs, app_tx: AppTx) -> Result<Shard> {
+    pub fn spawn_replica(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
         if matches!(&self.inner, Inner::Handle(_) | Inner::MainReplica(_)) {
             err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
         }
@@ -401,13 +401,11 @@ impl Shard {
         }
     }
 
-    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) -> Result<()> {
+    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) {
         match &self.inner {
             Inner::Handle(Handle { thrd, .. }) => {
                 let req = Request::SetShardQueues(shards);
-                match thrd.request(req)?? {
-                    Response::Ok => Ok(()),
-                }
+                allow_panic!(self, thrd.request(req).flatten());
             }
             _ => unreachable!(),
         }

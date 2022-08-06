@@ -43,6 +43,7 @@
 #![feature(backtrace)]
 #![feature(error_iter)]
 #![feature(map_first_last)]
+#![feature(result_flattening)]
 
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -69,6 +70,15 @@ pub trait IterTopicPath<'a> {
     type Iter: Iterator<Item = &'a str> + Clone;
 
     fn iter_topic_path(&'a self) -> Self::Iter;
+}
+
+/// Trait that returns Jsonified strings.
+pub trait ToJson {
+    /// Implementing type shall return configuration as JSON string.
+    fn to_config_json(&self) -> String;
+
+    /// Implementing type shall return statistics as JSON string.
+    fn to_stats_json(&self) -> String;
 }
 
 #[macro_use]

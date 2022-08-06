@@ -65,21 +65,21 @@ pub struct Config {
     /// Connect handshake timeout on MQTT socket, in seconds. For every new connection,
     /// this timer will kick in, and within the timeout period if connect/connack
     /// handshake is not complete, connection will be closed.
-    /// * **Default**: [Config::DEF_CONNECT_TIMEOUT]
+    /// * **Default**: [Config::DEF_SOCK_MQTT_CONNECT_TIMEOUT]
     /// * **Mutable**: No
     pub sock_mqtt_connect_timeout: u32,
 
     /// Read timeout on MQTT socket, in seconds. For every new packet this timeout
     /// will kick in, and within the timeout period if a new packet is not completely
     /// read, connection will be closed.
-    /// * **Default**: [Config::DEF_MQTT_READ_TIMEOUT]
+    /// * **Default**: [Config::DEF_SOCK_MQTT_READ_TIMEOUT]
     /// * **Mutable**: No
     pub sock_mqtt_read_timeout: u32,
 
     /// Write timeout on MQTT socket, in seconds. For every new packet this timeout
     /// will kick in, and within the timeout period if a new packet is not completely
     /// written, connection will be closed.
-    /// * **Default**: [Config::DEF_MQTT_WRITE_TIMEOUT]
+    /// * **Default**: [Config::DEF_SOCK_MQTT_WRITE_TIMEOUT]
     /// * **Mutable**: No
     pub sock_mqtt_write_timeout: u32,
 
@@ -89,7 +89,7 @@ pub struct Config {
     /// pending packets upstream and downstream. This timeout shall kick in once the
     /// flush thread is spawned and all flush activities are expected to be completed
     /// before the timeout expires.
-    /// * **Default**: [Config::DEF_MQTT_FLUSH_TIMEOUT]
+    /// * **Default**: [Config::DEF_SOCK_MQTT_FLUSH_TIMEOUT]
     /// * **Mutable**: No
     pub sock_mqtt_flush_timeout: u32,
 
@@ -162,12 +162,13 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
+        let node = ConfigNode::default();
         Config {
             name: "mqttd".to_string(),
             max_nodes: Self::DEF_MAX_NODES,
-            num_shards: util::num_cores(),
+            num_shards: util::num_cores_ceiled(),
             port: Self::DEF_MQTT_PORT,
-            nodes: Vec::default(),
+            nodes: vec![node],
             sock_mqtt_connect_timeout: Self::DEF_SOCK_MQTT_CONNECT_TIMEOUT,
             sock_mqtt_read_timeout: Self::DEF_SOCK_MQTT_READ_TIMEOUT,
             sock_mqtt_write_timeout: Self::DEF_SOCK_MQTT_WRITE_TIMEOUT,

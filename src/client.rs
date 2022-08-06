@@ -1,8 +1,4 @@
-//! Clients can send CONNECT, PUBLISH, PUBACK, PUBREC, PUBREL, PUBCOMP,
-//! SUBSCRIBE, UNSUBSCRIBE, PINGREQ, DISCONNECT, AUTH packets
-//!
-//! Clients can recieve CONNACK, PUBLISH, PUBACK, PUBREC, PUBREL, PUBCOMP,
-//! SUBACK, UNSUBACK, PINGRESP, DISCONNECT, AUTH packets
+//! Module implement MQTT Client.
 
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};

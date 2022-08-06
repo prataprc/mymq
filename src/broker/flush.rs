@@ -5,7 +5,7 @@ use std::{thread, time};
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
 
-use crate::v5;
+use crate::{v5, ToJson};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -45,7 +45,7 @@ impl Default for Flusher {
     fn default() -> Flusher {
         let config = Config::default();
         let mut def = Flusher {
-            name: format!("{}-flush-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -70,14 +70,30 @@ impl Drop for Flusher {
     }
 }
 
+impl ToJson for Flusher {
+    fn to_config_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "sock_mqtt_flush_timeout",
+            self.config.sock_mqtt_flush_timeout,
+            "mqtt_max_packet_size",
+            self.config.mqtt_max_packet_size
+        )
+    }
+
+    fn to_stats_json(&self) -> String {
+        "{{}}".to_string()
+    }
+}
+
 impl Flusher {
     /// Create a flusher from configuration. Flusher shall be in `Init` state. To start
     /// this flusher thread call [Flusher::spawn].
-    pub fn from_config(config: Config) -> Result<Flusher> {
+    pub fn from_config(config: &Config) -> Result<Flusher> {
         let mut val = Flusher {
-            name: format!("{}-flush-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
-            config,
+            config: config.clone(),
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -86,12 +102,8 @@ impl Flusher {
     }
 
     pub fn spawn(self, app_tx: AppTx) -> Result<Flusher> {
-        if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
-            err!(InvalidInput, desc: "flusher can be spawned only in init-state ")?;
-        }
-
         let mut flush = Flusher {
-            name: format!("{}-flush-main", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop { app_tx }),
@@ -100,19 +112,18 @@ impl Flusher {
         let thrd = Thread::spawn(&self.prefix, flush);
 
         let mut flush = Flusher {
-            name: format!("{}-flush-handle", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(thrd),
         };
         flush.prefix = flush.prefix();
 
+        info!("{} flush handle", flush.prefix);
         Ok(flush)
     }
 
     pub fn to_tx(&self) -> Self {
-        trace!("{} cloning tx ...", self.prefix);
-
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
             Inner::Tx(tx) => Inner::Tx(tx.clone()),
@@ -120,12 +131,14 @@ impl Flusher {
         };
 
         let mut flush = Flusher {
-            name: format!("{}-flush-tx", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner,
         };
-        flush.prefix = self.prefix();
+        flush.prefix = flush.prefix();
+
+        info!("{} cloned ...", flush.prefix);
         flush
     }
 }
@@ -180,9 +193,9 @@ impl Threadable for Flusher {
         use crate::broker::{thread::get_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        let flush_timeout = self.config.sock_mqtt_flush_timeout;
-        info!("{}, spawn thread flush_timeout:{} ...", self.prefix, flush_timeout);
+        info!("{} spawn thread {}", self.prefix, self.to_config_json());
 
+        let flush_timeout = self.config.sock_mqtt_flush_timeout;
         'outer: loop {
             let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
             let reqs = status.take_values();
@@ -298,7 +311,14 @@ impl Flusher {
 
 impl Flusher {
     fn prefix(&self) -> String {
-        format!("{}:flush", self.name)
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_) => "hndl",
+            Inner::Tx(_) => "tx",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<f:{}:{}>", self.name, state)
     }
 
     #[allow(dead_code)]

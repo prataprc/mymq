@@ -275,6 +275,13 @@ impl From<std::net::AddrParseError> for Error {
     }
 }
 
+impl From<uuid::Error> for Error {
+    fn from(val: uuid::Error) -> Self {
+        let err: result::Result<(), Error> = err!(UuidError, cause: val, "{}", val);
+        err.unwrap_err()
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(val: std::io::Error) -> Self {
         let err: result::Result<(), Error> = err!(IOError, cause: val, "{}", val);
@@ -350,6 +357,7 @@ pub enum ErrorKind {
     ParseIntError,
     TryFromIntError,
     TryFromAddrError,
+    UuidError,
     IOError,
 }
 
@@ -381,6 +389,7 @@ impl fmt::Display for ErrorKind {
             ParseIntError => write!(f, "ParseIntError"),
             TryFromIntError => write!(f, "TryFromIntError"),
             TryFromAddrError => write!(f, "TryFromAddrError"),
+            UuidError => write!(f, "UuidError"),
             IOError => write!(f, "IOError"),
         }
     }

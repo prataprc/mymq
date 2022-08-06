@@ -13,14 +13,6 @@ use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
 use crate::{util, v5, Timer, TopicName};
 use crate::{Error, ErrorKind, Result};
 
-// TODO: Review .ok() .unwrap() allow_panic!(), panic!() and unreachable!() calls.
-// TODO: Review assert macro calls.
-// TODO: Review `as` type-casting for numbers.
-// TODO: Review code for #[allow(dead_code)]
-// TODO: Validate and document all thread handles, cluster, listener, flusher, shard,
-//       miot.
-// TODO: Handle retain-messages in Will, Publish, Subscribe scenarios, retain_available.
-
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
@@ -54,10 +46,10 @@ struct RunLoop {
     poll: mio::Poll,
     /// Listener thread for MQTT connections from remote/local clients.
     listener: Listener,
-    /// Ticker thread to periodically wake up other threads, defaul is 10ms.
-    ticker: Ticker,
     /// Flusher thread for MQTT connections from remote/local clients.
     flusher: Flusher,
+    /// Ticker thread to periodically wake up other threads, defaul is 10ms.
+    ticker: Ticker,
     /// Total number of shards within this node.
     active_shards: BTreeMap<u32, Shard>,
 
@@ -73,6 +65,11 @@ struct RunLoop {
 
     /// Back channel communicate with application.
     app_tx: AppTx,
+}
+
+pub enum ClusterState {
+    /// Cluster is single-node.
+    SingleNode { state: SingleNode },
 }
 
 pub struct FinState {
@@ -116,16 +113,35 @@ impl Drop for Cluster {
     }
 }
 
+struct SpawnListener<'a> {
+    config: &'a Config,
+    cluster: &'a Cluster,
+    app_tx: &'a AppTx,
+}
+struct SpawnShards<'a> {
+    config: &'a Config,
+    cluster: &'a Cluster,
+    flusher_tx: Flusher,
+    topic_filters: &'a SubscribedTrie,
+    retained_messages: &'a RetainedTrie,
+    app_tx: &'a AppTx,
+}
+struct SpawnTicker<'a> {
+    config: &'a Config,
+    cluster: &'a Cluster,
+    shards: Vec<Shard>,
+    app_tx: &'a AppTx,
+}
+
 // Handle cluster
 impl Cluster {
-    /// Poll register token for waker event, OTP calls makde to this thread shall trigger
-    /// this event.
+    /// Poll register token for waker event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
     /// Poll register for consensus TcpStream.
     pub const TOKEN_CONSENSUS: mio::Token = mio::Token(2);
 
-    /// Create a cluster from configuration. Cluster shall be in `Init` state. To start
-    /// the cluster call [Cluster::spawn]
+    /// Create a cluster from configuration. Returned Cluster shall be in `Init` state.
+    /// To start the cluster call [Cluster::spawn].
     pub fn from_config(config: Config) -> Result<Cluster> {
         // validate
         if config.num_shards == 0 {
@@ -139,7 +155,7 @@ impl Cluster {
         }
 
         let mut val = Cluster {
-            name: format!("{}-cluster-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -149,12 +165,9 @@ impl Cluster {
         Ok(val)
     }
 
-    pub fn spawn(self, node: Node, app_tx: AppTx) -> Result<Cluster> {
+    /// Start this cluster instance
+    pub fn spawn(self, app_tx: AppTx) -> Result<Cluster> {
         use mio::Waker;
-
-        if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
-            err!(InvalidInput, desc: "cluster can be spawned only in init-state ")?;
-        }
 
         let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
@@ -164,30 +177,34 @@ impl Cluster {
             algo: rebalance::Algorithm::SingleNode,
         };
 
-        let state = {
-            let topology = rebalancer.rebalance(&vec![node.clone()], Vec::new());
-            ClusterState::SingleNode {
-                state: SingleNode { config: self.config.clone(), node, topology },
+        let state = match self.config.nodes.len() {
+            1 => {
+                let node = Node::try_from(self.config.nodes[0].clone())?;
+                let topology = rebalancer.rebalance(&vec![node.clone()], Vec::new());
+                ClusterState::SingleNode {
+                    state: SingleNode { config: self.config.clone(), node, topology },
+                }
             }
+            _ => todo!(),
         };
 
-        let listener = Listener::default();
-        let flusher = Flusher::from_config(self.config.clone())?.spawn(app_tx.clone())?;
-
+        let flusher = Flusher::from_config(&self.config)?.spawn(app_tx.clone())?;
         let flusher_tx = flusher.to_tx();
+
         let topic_filters = SubscribedTrie::default();
         let retained_messages = RetainedTrie::default();
+
         let mut cluster = Cluster {
-            name: format!("{}-cluster-main", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 state,
 
                 poll,
-                listener,
-                ticker: Ticker::default(),
+                listener: Listener::default(),
                 flusher,
+                ticker: Ticker::default(),
                 active_shards: BTreeMap::default(),
 
                 rebalancer,
@@ -202,71 +219,50 @@ impl Cluster {
         thrd.set_waker(Arc::clone(&waker));
 
         let mut cluster = Cluster {
-            name: format!("{}-cluster-handle", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(waker, thrd),
         };
         cluster.prefix = cluster.prefix();
 
-        {
-            let mut ticker_active_shards = Vec::new();
-            let mut shard_queues = BTreeMap::default();
+        //{
+        //    let listener = Self::spawn_listener(SpawnListener {
+        //        config: &self.config,
+        //        cluster: &cluster,
+        //        app_tx: &app_tx,
+        //    })?;
+        //    let active_shards = Self::spawn_active_shards(SpawnShards {
+        //        config: &self.config,
+        //        cluster: &cluster,
+        //        flusher_tx,
+        //        topic_filters: &topic_filters,
+        //        retained_messages: &retained_messages,
+        //        app_tx: &app_tx,
+        //    })?;
 
-            let mut active_shards = BTreeMap::default();
-            for shard_id in 0..self.config.num_shards {
-                let (config, cluster_tx) = (self.config.clone(), cluster.to_tx());
-                let shard = {
-                    let args = crate::broker::shard::SpawnArgs {
-                        cluster: cluster_tx,
-                        flusher: flusher_tx.to_tx(),
-                        topic_filters: topic_filters.clone(),
-                        retained_messages: retained_messages.clone(),
-                    };
-                    let app_tx = app_tx.clone();
-                    Shard::from_config(config, shard_id)?.spawn_active(args, app_tx)?
-                };
+        //    Self::set_shard_queues(&active_shards);
 
-                shard_queues.insert(shard.shard_id, shard.to_msg_tx());
-                ticker_active_shards.push(shard.to_tx());
+        //    let ticker = Self::spawn_ticker(SpawnTicker {
+        //        config: &self.config,
+        //        cluster: &cluster,
+        //        // TODO: include replica-shards in ticker_shards
+        //        shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
+        //        app_tx: &app_tx,
+        //    })?;
 
-                active_shards.insert(shard_id, shard);
-            }
-
-            for (_shard_id, shard) in active_shards.iter() {
-                let iter = shard_queues.iter().map(|(id, s)| (*id, s.to_msg_tx()));
-                let shard_queues = BTreeMap::from_iter(iter);
-                shard.set_shard_queues(shard_queues)?;
-            }
-
-            let (config, clust_tx) = (self.config.clone(), cluster.to_tx());
-            let listener = {
-                let listener = Listener::from_config(config)?;
-                listener.spawn(clust_tx, app_tx.clone())?
-            };
-
-            let ticker = {
-                let args = ticker::SpawnArgs {
-                    cluster: Box::new(cluster.to_tx()),
-                    active_shards: ticker_active_shards,
-                    replica_shards: Vec::default(), // TODO
-                    app_tx: app_tx.clone(),
-                };
-                Ticker::from_config(self.config.clone())?.spawn(args)?
-            };
-
-            match &cluster.inner {
-                Inner::Handle(_waker, thrd) => {
-                    thrd.request(Request::Set { listener, ticker, active_shards })??;
-                }
-                _ => unreachable!(),
-            }
-        }
+        //    match &cluster.inner {
+        //        Inner::Handle(_waker, thrd) => {
+        //            thrd.request(Request::Set { listener, ticker, active_shards })??;
+        //        }
+        //        _ => unreachable!(),
+        //    }
+        //}
 
         Ok(cluster)
     }
 
-    pub fn to_tx(&self) -> Self {
+    pub(crate) fn to_tx(&self) -> Self {
         info!("{} cloning tx ...", self.prefix);
 
         let inner = match &self.inner {
@@ -275,13 +271,54 @@ impl Cluster {
             _ => unreachable!(),
         };
         let mut val = Cluster {
-            name: format!("{}-cluster-tx", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner,
         };
         val.prefix = val.prefix();
         val
+    }
+
+    fn spawn_listener(args: SpawnListener) -> Result<Listener> {
+        let listener = Listener::from_config(args.config)?;
+        listener.spawn(args.cluster.to_tx(), args.app_tx.clone())
+    }
+
+    fn spawn_active_shards(args: SpawnShards) -> Result<BTreeMap<u32, Shard>> {
+        let mut active_shards = BTreeMap::default();
+        for shard_id in 0..args.config.num_shards {
+            let shard = {
+                let spawn_args = crate::broker::shard::SpawnArgs {
+                    cluster: args.cluster.to_tx(),
+                    flusher: args.flusher_tx.to_tx(),
+                    topic_filters: args.topic_filters.clone(),
+                    retained_messages: args.retained_messages.clone(),
+                };
+                let shard = Shard::from_config(args.config, shard_id)?;
+                shard.spawn_active(spawn_args, args.app_tx)?
+            };
+
+            active_shards.insert(shard_id, shard);
+        }
+
+        Ok(active_shards)
+    }
+
+    fn spawn_ticker(args: SpawnTicker) -> Result<Ticker> {
+        let ticker_args = ticker::SpawnArgs {
+            cluster: Box::new(args.cluster.to_tx()),
+            shards: args.shards,
+            app_tx: args.app_tx.clone(),
+        };
+        Ticker::from_config(args.config.clone())?.spawn(ticker_args)
+    }
+
+    fn set_shard_queues(active_shards: &BTreeMap<u32, Shard>) {
+        for (_shard_id, shard) in active_shards.iter() {
+            let iter = active_shards.iter().map(|(id, s)| (*id, s.to_msg_tx()));
+            shard.set_shard_queues(BTreeMap::from_iter(iter));
+        }
     }
 }
 
@@ -312,14 +349,14 @@ pub struct AddConnectionArgs {
 
 // calls to interface with cluster-thread.
 impl Cluster {
-    pub fn wake(&self) {
+    pub(crate) fn wake(&self) {
         match &self.inner {
             Inner::Tx(waker, _) => allow_panic!(self, waker.wake()),
             _ => unreachable!(),
         }
     }
 
-    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
+    pub(crate) fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::AddConnection(args);
@@ -331,7 +368,7 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn set_retain_topic(&self, publish: v5::Publish) -> Result<()> {
+    pub(crate) fn set_retain_topic(&self, publish: v5::Publish) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::SetRetainTopic { publish };
@@ -343,7 +380,7 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn reset_retain_topic(&self, topic_name: TopicName) -> Result<()> {
+    pub(crate) fn reset_retain_topic(&self, topic_name: TopicName) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::ResetRetainTopic { topic_name };
@@ -355,6 +392,8 @@ impl Cluster {
         Ok(())
     }
 
+    /// Close this cluster and get back the statistics. Call return only after all the
+    /// children threads are gracefully shutdown.
     pub fn close_wait(mut self) -> Cluster {
         use std::mem;
 
@@ -682,7 +721,14 @@ impl Cluster {
 
 impl Cluster {
     fn prefix(&self) -> String {
-        format!("{}", self.name)
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_, _) => "hndl",
+            Inner::Tx(_, _) => "tx",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<c:{}:{}>", self.name, state)
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
@@ -725,30 +771,16 @@ impl PartialEq for Node {
 
 impl Eq for Node {}
 
-impl Default for Node {
-    fn default() -> Node {
-        let config = ConfigNode::default();
-        Node {
-            mqtt_address: config.mqtt_address.clone(),
-            path: config.path.clone(),
-            weight: config.weight.unwrap(),
-            uuid: config.uuid.parse().unwrap(),
-        }
-    }
-}
-
 impl TryFrom<ConfigNode> for Node {
     type Error = Error;
 
     fn try_from(c: ConfigNode) -> Result<Node> {
-        let node = Node::default();
-        let uuid = err!(InvalidInput, try: c.uuid.clone().parse::<Uuid>())?;
-
+        let num_cores = u16::try_from(num_cpus::get()).unwrap();
         let val = Node {
+            uuid: c.uuid.parse()?,
             mqtt_address: c.mqtt_address,
             path: c.path,
-            weight: c.weight.unwrap_or(node.weight),
-            uuid,
+            weight: c.weight.unwrap_or(num_cores),
         };
 
         Ok(val)
@@ -767,17 +799,6 @@ impl Hostable for Node {
     fn path(&self) -> path::PathBuf {
         self.path.clone()
     }
-}
-
-pub enum ClusterState {
-    /// Cluster is single-node.
-    SingleNode { state: SingleNode },
-    /// Cluster is in the process of updating its gods&nodes, and working out rebalance.
-    #[allow(dead_code)]
-    Elastic { state: MultiNode },
-    /// Cluster is stable.
-    #[allow(dead_code)]
-    Stable { state: MultiNode },
 }
 
 // TODO: Do we really needs all this field for a single node cluster ?
@@ -803,8 +824,7 @@ impl ClusterState {
 
         let topology = match self {
             SingleNode { state } if node == &state.node.uuid => &state.topology,
-            Stable { state } => &state.topology,
-            _ => unreachable!(), // TODO: meaningful return.
+            _ => unreachable!(),
         };
         topology.iter().filter(|t| node == &t.master.uuid).map(|t| t.shard).collect()
     }

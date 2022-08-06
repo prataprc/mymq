@@ -11,3 +11,9 @@
   * Log version and SHA1.
   * Log system resources like CPU, Memory (Total, Free), Net-Interfaces,
     Disks (Count, Total, Free).
+* Review .ok() .unwrap() `allow_panic!()`, panic!() and unreachable!() calls.
+* Review assert macro calls.
+* Review `as` type-casting for numbers.
+* Review code for `#[allow(dead_code)]`.
+* Validate and document all thread handles, cluster, listener, flusher, shard, miot.
+* Handle retain-messages in Will, Publish, Subscribe scenarios, `retain_available`.
