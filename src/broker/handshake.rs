@@ -5,7 +5,7 @@ use std::{io, thread, time};
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, Config, SLEEP_10MS};
 
-use crate::{v5, MQTTRead, Packetize};
+use crate::{v5, MQTTRead, Packetize, ToJson};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type handles incoming connection.
@@ -20,6 +20,22 @@ pub struct Handshake {
     pub cluster: Cluster,
 }
 
+impl ToJson for Handshake {
+    fn to_config_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "sock_mqtt_connect_timeout",
+            self.config.sock_mqtt_connect_timeout,
+            "mqtt_max_packet_size",
+            self.config.mqtt_max_packet_size,
+        )
+    }
+
+    fn to_stats_json(&self) -> String {
+        "{{}}".to_string()
+    }
+}
+
 impl Threadable for Handshake {
     type Req = ();
     type Resp = ();
@@ -28,6 +44,7 @@ impl Threadable for Handshake {
         use crate::broker::cluster::AddConnectionArgs;
 
         let now = time::Instant::now();
+        let prefix = self.prefix.clone();
 
         let max_size = self.config.mqtt_max_packet_size;
         let connect_timeout = self.config.sock_mqtt_connect_timeout;
@@ -35,8 +52,8 @@ impl Threadable for Handshake {
         let mut packetr = MQTTRead::new(max_size);
         let mut conn = self.conn.take().unwrap();
         let timeout = now + time::Duration::from_secs(connect_timeout as u64);
-        let prefix = self.prefix.clone();
 
+        info!("{} spawn thread config {}", prefix, self.to_config_json());
         info!(
             "{} new connection {:?}<-{:?} at {:?}",
             prefix,
@@ -115,12 +132,6 @@ impl Threadable for Handshake {
         }
 
         self
-    }
-}
-
-impl Handshake {
-    pub(crate) fn prefix(&self) -> String {
-        format!("h:{}", self.config.name)
     }
 }
 

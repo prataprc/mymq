@@ -1,7 +1,7 @@
 use log::{debug, error, info, trace};
 use mio::event::Events;
 
-use std::{net, sync::Arc, time};
+use std::{fmt, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Cluster, Config, QueueStatus};
@@ -33,6 +33,17 @@ enum Inner {
     Close(FinState),
 }
 
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Listener::Inner::Init"),
+            Inner::Handle(_, _) => write!(f, "Listener::Inner::Handle"),
+            Inner::Main(_) => write!(f, "Listener::Inner::Main"),
+            Inner::Close(_) => write!(f, "Listener::Inner::Close"),
+        }
+    }
+}
+
 struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from server and
     /// thread-waker.
@@ -42,11 +53,37 @@ struct RunLoop {
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
 
+    /// Statistics
+    n_polls: usize,
+    n_events: usize,
+    n_accepted: usize,
+
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
-pub struct FinState;
+pub struct FinState {
+    /// Number of times poll was woken up.
+    pub n_polls: usize,
+    /// Number events received via mio-poll.
+    pub n_events: usize,
+    /// Total number of connections accepted.
+    pub n_accepted: usize,
+}
+
+impl FinState {
+    fn to_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {} }}"),
+            "n_polls",
+            self.n_polls,
+            "n_events",
+            self.n_events,
+            "n_accepted",
+            self.n_accepted
+        )
+    }
+}
 
 impl Default for Listener {
     fn default() -> Listener {
@@ -69,9 +106,9 @@ impl Drop for Listener {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
+            Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
-            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
         }
     }
 }
@@ -82,7 +119,10 @@ impl ToJson for Listener {
     }
 
     fn to_stats_json(&self) -> String {
-        "".to_string()
+        match &self.inner {
+            Inner::Close(stats) => stats.to_json(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
     }
 }
 
@@ -109,10 +149,6 @@ impl Listener {
     pub fn spawn(self, cluster: Cluster, app_tx: AppTx) -> Result<Listener> {
         use mio::{Interest, Waker};
 
-        if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
-            err!(InvalidInput, desc: "listener can be spawned only in init-state ")?;
-        }
-
         let mut server = {
             let sock_addr: net::SocketAddr = self.server_address().parse().unwrap();
             mio::net::TcpListener::bind(sock_addr)?
@@ -130,6 +166,10 @@ impl Listener {
                 poll,
                 server: server,
                 cluster: Box::new(cluster),
+
+                n_polls: usize::default(),
+                n_events: usize::default(),
+                n_accepted: usize::default(),
 
                 app_tx,
             }),
@@ -169,7 +209,7 @@ impl Listener {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
@@ -181,12 +221,13 @@ impl Threadable for Listener {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn thread {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
 
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+            self.incr_n_polls();
 
             match self.mio_events(&rx, &events) {
                 true => break,
@@ -197,7 +238,7 @@ impl Threadable for Listener {
         match &self.inner {
             Inner::Main(_) => self.handle_close(Request::Close),
             Inner::Close(_) => Response::Ok,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         info!("{} thread exit", self.prefix);
@@ -240,6 +281,8 @@ impl Listener {
             }
         };
 
+        self.incr_n_events(count);
+
         debug!("{}, polled and got {} events", self.prefix, count);
         exit
     }
@@ -272,30 +315,31 @@ impl Listener {
         use crate::broker::Handshake;
         use std::io;
 
-        let (server, cluster) = match &self.inner {
-            Inner::Main(RunLoop { server, cluster, .. }) => (server, cluster),
-            _ => unreachable!(),
+        let RunLoop { server, cluster, n_accepted, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         match server.accept() {
             Ok((conn, addr)) => {
                 assert_eq!(conn.peer_addr().unwrap(), addr);
                 // for every successful accept launch a handshake thread.
-                let mut hs = Handshake {
-                    prefix: self.config.name.clone(),
+                let hs = Handshake {
+                    prefix: format!("<h:{}>", self.config.name),
                     conn: Some(conn),
                     config: self.config.clone(),
                     cluster: cluster.to_tx(),
                 };
-                hs.prefix = hs.prefix();
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
+
+                *n_accepted += 1;
                 QueueStatus::Ok(Vec::new())
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 QueueStatus::Block(Vec::new())
             }
             Err(err) => {
-                error!("{}, connection accept error, {}", self.prefix, err);
+                error!("{} connection accept error, {}", self.prefix, err);
                 QueueStatus::Disconnected(Vec::new())
             }
         }
@@ -306,21 +350,48 @@ impl Listener {
     fn handle_close(&mut self, _req: Request) -> Response {
         use std::mem;
 
-        match mem::replace(&mut self.inner, Inner::Init) {
-            Inner::Main(_run_loop) => {
-                info!("{} closing", self.prefix);
+        let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(run_loop) => run_loop,
+            Inner::Close(_) => return Response::Ok,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
 
-                // Drop, poll, server, cluster and app_tx.
-                let _init = mem::replace(&mut self.inner, Inner::Close(FinState));
-                Response::Ok
-            }
-            Inner::Close(_) => Response::Ok,
-            _ => unreachable!(),
-        }
+        info!("{} closing listener", self.prefix);
+
+        mem::drop(run_loop.poll);
+        mem::drop(run_loop.server);
+        mem::drop(run_loop.cluster);
+        mem::drop(run_loop.app_tx);
+
+        let fin_state = FinState {
+            n_polls: run_loop.n_polls,
+            n_events: run_loop.n_events,
+            n_accepted: run_loop.n_accepted,
+        };
+
+        info!("{} stats {}", self.prefix, fin_state.to_json());
+
+        let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        Response::Ok
     }
 }
 
 impl Listener {
+    fn incr_n_polls(&mut self) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_polls, .. }) => *n_polls += 1,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_events(&mut self, n: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
+            Inner::Close(stats) => stats.n_events += n,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
     fn server_address(&self) -> String {
         format!("0.0.0.0:{}", self.config.port)
     }
@@ -338,14 +409,14 @@ impl Listener {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn as_app_tx(&self) -> &AppTx {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }

@@ -5,6 +5,7 @@ use std::{mem, sync::mpsc, thread, time};
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Cluster, Config, Shard, SLEEP_10MS};
 
+use crate::ToJson;
 use crate::{Error, ErrorKind, Result};
 
 /// Type implement a periodic ticker and wake up other threads.
@@ -29,14 +30,15 @@ pub enum Inner {
 }
 
 pub struct RunLoop {
-    /// Born Instant
-    born: time::Instant,
-    /// Ticker count
-    ticker_count: usize,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
     /// Shard-Tx handle to all shards active and replica shards on this node.
     shards: Vec<Shard>,
+
+    /// Born Instant
+    born: time::Instant,
+    /// Ticker count
+    ticker_count: usize,
 
     /// Back channel communicate with application.
     #[allow(dead_code)]
@@ -52,11 +54,20 @@ pub struct FinState {
     pub dead: time::Instant,
 }
 
+impl FinState {
+    fn to_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: \"{:?}\", {:?}: {}, {:?}: \"{:?}\" }}"),
+            "born", self.born, "ticket_count", self.ticker_count, "dead", self.dead
+        )
+    }
+}
+
 impl Default for Ticker {
     fn default() -> Ticker {
         let config = Config::default();
         let mut def = Ticker {
-            name: format!("{}-ticker-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
@@ -71,9 +82,22 @@ impl Drop for Ticker {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_thrd) => info!("{} invalid drop ...", self.prefix),
+            Inner::Handle(_thrd) => debug!("{} invalid drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
-            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
+        }
+    }
+}
+
+impl ToJson for Ticker {
+    fn to_config_json(&self) -> String {
+        "".to_string()
+    }
+
+    fn to_stats_json(&self) -> String {
+        match &self.inner {
+            Inner::Close(fin_state) => fin_state.to_json(),
+            _ => unreachable!(),
         }
     }
 }
@@ -87,7 +111,7 @@ pub struct SpawnArgs {
 impl Ticker {
     pub fn from_config(config: Config) -> Result<Ticker> {
         let mut val = Ticker {
-            name: format!("{}-ticker-init", config.name),
+            name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
             inner: Inner::Init,
@@ -98,19 +122,17 @@ impl Ticker {
     }
 
     pub fn spawn(self, args: SpawnArgs) -> Result<Ticker> {
-        if matches!(&self.inner, Inner::Handle(_) | Inner::Main(_)) {
-            err!(InvalidInput, desc: "ticker can be spawned only in init-state ")?;
-        }
-
         let mut ticker = Ticker {
-            name: format!("{}-ticker-main", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
-                born: time::Instant::now(),
-                ticker_count: 0,
                 cluster: args.cluster,
                 shards: args.shards,
+
+                born: time::Instant::now(),
+                ticker_count: 0,
+
                 app_tx: args.app_tx,
             }),
         };
@@ -118,7 +140,7 @@ impl Ticker {
         let thrd = Thread::spawn(&self.prefix, ticker);
 
         let mut ticker = Ticker {
-            name: format!("{}-ticker-handle", self.config.name),
+            name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
             inner: Inner::Handle(thrd),
@@ -156,12 +178,15 @@ impl Threadable for Ticker {
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: Rx<Request, Result<Response>>) -> Self {
+        info!("{} spawn thread, staring 10ms ticker", self.prefix);
+
         'outer: loop {
             thread::sleep(SLEEP_10MS);
 
             loop {
                 match rx.try_recv() {
                     Ok((Request::Close, Some(tx))) => {
+                        info!("{} closing ticker", self.prefix);
                         err!(IPCFail, try: tx.send(Ok(Response::Ok))).ok();
                         break 'outer;
                     }
@@ -189,22 +214,23 @@ impl Threadable for Ticker {
         };
 
         let fin_state = FinState { born, ticker_count, dead: time::Instant::now() };
+        info!("{} stats {}", self.prefix, fin_state.to_json());
+
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
 
+        info!("{} thread exit", self.prefix);
         self
     }
 }
 
 impl Ticker {
     fn prefix(&self) -> String {
-        format!("{}-ticker", self.name)
-    }
-
-    #[allow(dead_code)]
-    fn as_app_tx(&self) -> &mpsc::SyncSender<String> {
-        match &self.inner {
-            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
-            _ => unreachable!(),
-        }
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_) => "hndl",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<t:{}:{}>", self.name, state)
     }
 }

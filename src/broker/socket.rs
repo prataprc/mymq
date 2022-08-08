@@ -83,6 +83,23 @@ impl PktRx {
     }
 }
 
+#[derive(Default)]
+pub struct Stats {
+    pub items: usize,
+    pub bytes: usize,
+}
+
+impl Stats {
+    pub fn update(&mut self, other: &Stats) {
+        self.items = other.items;
+        self.bytes = other.bytes;
+    }
+
+    pub fn to_json(&self) -> String {
+        format!("{{ {:?}: {}, {:?}: {} }}", "items", self.items, "bytes", self.bytes)
+    }
+}
+
 /// Type encapsulates the socket connection and associated data-structures.
 pub struct Socket {
     pub client_id: ClientID,
@@ -222,13 +239,20 @@ impl Socket {
 }
 
 impl Socket {
-    pub fn write_packets(&mut self, prefix: &str, config: &Config) -> QueuePkt {
+    pub fn write_packets(&mut self, prefix: &str, config: &Config) -> (QueuePkt, Stats) {
         // before reading from socket, send remaining packets to connection.
+        let mut stats = Stats::default();
         loop {
             match self.flush_packets(prefix, config) {
-                QueueStatus::Ok(_) => (),
-                status @ QueueStatus::Block(_) => break status,
-                status @ QueueStatus::Disconnected(_) => break status,
+                (QueueStatus::Ok(_), flush_stats) => stats.update(&flush_stats),
+                (status @ QueueStatus::Block(_), flush_stats) => {
+                    stats.update(&flush_stats);
+                    break (status, stats);
+                }
+                (status @ QueueStatus::Disconnected(_), flush_stats) => {
+                    stats.update(&flush_stats);
+                    break (status, stats);
+                }
             }
 
             let mut status = self.wt.miot_rx.try_recvs(prefix);
@@ -236,14 +260,18 @@ impl Socket {
 
             match status {
                 QueueStatus::Ok(_) => (),
-                QueueStatus::Block(_) => break self.flush_packets(prefix, config),
-                status @ QueueStatus::Disconnected(_) => break status,
+                QueueStatus::Block(_) => {
+                    let (status, flush_stats) = self.flush_packets(prefix, config);
+                    stats.update(&flush_stats);
+                    break (status, stats);
+                }
+                status @ QueueStatus::Disconnected(_) => break (status, stats),
             }
         }
     }
 
     // QueueStatus shall not carry any packets
-    pub fn flush_packets(&mut self, prefix: &str, config: &Config) -> QueuePkt {
+    pub fn flush_packets(&mut self, prefix: &str, config: &Config) -> (QueuePkt, Stats) {
         use std::io::Write;
 
         let mut pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
@@ -251,6 +279,9 @@ impl Socket {
             let packets = self.wt.packets.drain(..).collect::<Vec<v5::Packet>>();
             packets.into_iter()
         };
+
+        let mut stats = Stats::default();
+
         let res = loop {
             match self.write_packet(prefix, config) {
                 QueueStatus::Ok(_) => (),
@@ -266,8 +297,12 @@ impl Socket {
                         continue;
                     }
                 };
+                stats.bytes += blob.as_ref().len();
                 pw = match self.conn.flush() {
-                    Ok(()) => pw.reset(blob.as_ref()),
+                    Ok(()) => {
+                        stats.items += 1;
+                        pw.reset(blob.as_ref())
+                    }
                     Err(_) => break QueueStatus::Disconnected(Vec::new()),
                 };
             } else {
@@ -278,7 +313,7 @@ impl Socket {
         self.wt.packets.extend(iter);
         let _pw_none = mem::replace(&mut self.wt.pw, pw);
 
-        res
+        (res, stats)
     }
 
     // QueueStatus shall not carry any packets

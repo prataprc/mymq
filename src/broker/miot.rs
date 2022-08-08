@@ -1,13 +1,12 @@
 use log::{debug, error, info, trace};
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
-use std::{mem, net, time};
+use std::{fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Shard, Socket};
 
-use crate::{ClientID, MQTTRead, MQTTWrite};
+use crate::{ClientID, MQTTRead, MQTTWrite, ToJson};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -38,6 +37,17 @@ enum Inner {
     Close(FinState),
 }
 
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Miot::Inner::Init"),
+            Inner::Handle(_, _) => write!(f, "Miot::Inner::Handle"),
+            Inner::Main(_) => write!(f, "Miot::Inner::Main"),
+            Inner::Close(_) => write!(f, "Miot::Inner::Close"),
+        }
+    }
+}
+
 struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from remote client and
     /// thread-waker.
@@ -50,6 +60,12 @@ struct RunLoop {
     /// collection of all active socket connections, and its associated data.
     conns: BTreeMap<ClientID, Socket>,
 
+    /// Statistics
+    n_polls: usize,
+    n_events: usize,
+    n_add_conns: usize,
+    n_rem_conns: usize,
+
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
@@ -59,13 +75,37 @@ pub struct FinState {
     pub client_ids: Vec<ClientID>,
     pub addrs: Vec<net::SocketAddr>,
     pub tokens: Vec<mio::Token>,
+    pub n_polls: usize,
+    pub n_events: usize,
+    pub n_add_conns: usize,
+    pub n_rem_conns: usize,
+}
+
+impl FinState {
+    fn to_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
+            "next_token",
+            self.next_token.0,
+            "n_conns",
+            self.client_ids.len(),
+            "n_polls",
+            self.n_polls,
+            "n_events",
+            self.n_events,
+            "n_add_conns",
+            self.n_add_conns,
+            "n_rem_conns",
+            self.n_rem_conns
+        )
+    }
 }
 
 impl Default for Miot {
     fn default() -> Miot {
         let config = Config::default();
         let mut def = Miot {
-            name: format!("{}-miot-init", config.name),
+            name: config.name.clone(),
             miot_id: u32::default(),
             prefix: String::default(),
             config,
@@ -81,9 +121,25 @@ impl Drop for Miot {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
+            Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
-            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
+        }
+    }
+}
+
+impl ToJson for Miot {
+    fn to_config_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {} }}"),
+            "mqtt_max_packet_size", self.config.mqtt_max_packet_size,
+        )
+    }
+
+    fn to_stats_json(&self) -> String {
+        match &self.inner {
+            Inner::Close(stats) => stats.to_json(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
@@ -96,7 +152,7 @@ impl Miot {
     /// the miot thread call [Miot::spawn].
     pub fn from_config(config: Config, miot_id: u32) -> Result<Miot> {
         let mut val = Miot {
-            name: format!("{}-miot-init", config.name),
+            name: config.name.clone(),
             miot_id,
             prefix: String::default(),
             config: config.clone(),
@@ -108,15 +164,11 @@ impl Miot {
     }
 
     pub fn spawn(self, shard: Shard, app_tx: AppTx) -> Result<Miot> {
-        if matches!(&self.inner, Inner::Handle(_, _) | Inner::Main(_)) {
-            err!(InvalidInput, desc: "miot can be spawned only in init-state ")?;
-        }
-
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
         let mut miot = Miot {
-            name: format!("{}-miot-main", self.config.name),
+            name: self.config.name.clone(),
             miot_id: self.miot_id,
             prefix: String::default(),
             config: self.config.clone(),
@@ -128,6 +180,11 @@ impl Miot {
                 next_token: Self::FIRST_TOKEN,
                 conns: BTreeMap::default(),
 
+                n_polls: 0,
+                n_events: 0,
+                n_add_conns: 0,
+                n_rem_conns: 0,
+
                 app_tx: app_tx.clone(),
             }),
         };
@@ -136,7 +193,7 @@ impl Miot {
         thrd.set_waker(Arc::clone(&waker));
 
         let mut val = Miot {
-            name: format!("{}-miot-handle", self.config.name),
+            name: self.config.name.clone(),
             miot_id: self.miot_id,
             prefix: String::default(),
             config: self.config.clone(),
@@ -150,7 +207,7 @@ impl Miot {
     pub fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
             Inner::Handle(waker, _thrd) => Arc::clone(waker),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
@@ -179,7 +236,7 @@ impl Miot {
     pub fn wake(&self) {
         match &self.inner {
             Inner::Handle(waker, _thrd) => allow_panic!(self, waker.wake()),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
@@ -192,7 +249,7 @@ impl Miot {
                     _ => unreachable!("{} unxpected response", self.prefix),
                 }
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
@@ -205,7 +262,7 @@ impl Miot {
                     Response::Ok => Ok(None),
                 }
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
@@ -219,7 +276,7 @@ impl Miot {
                     _ => unreachable!("{} unxpected response", self.prefix),
                 }
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
@@ -231,12 +288,14 @@ impl Threadable for Miot {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn ...", self.prefix);
+        info!("{} spawn config {}", self.prefix, self.to_config_json());
 
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
             allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+
+            self.incr_n_polls();
 
             match self.mio_events(&rx, &events) {
                 true => break,
@@ -247,10 +306,10 @@ impl Threadable for Miot {
         match &self.inner {
             Inner::Main(_) => self.handle_close(Request::Close),
             Inner::Close(_) => Response::Ok,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        info!("{} thread exit...", self.prefix);
+        info!("{} thread exit", self.prefix);
         self
     }
 }
@@ -280,6 +339,8 @@ impl Miot {
             self.socket_to_session();
             self.session_to_socket();
         }
+
+        self.incr_n_events(count);
 
         exit
     }
@@ -321,7 +382,7 @@ impl Miot {
     fn socket_to_session(&mut self) {
         let (shard, conns) = match &mut self.inner {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
         let shard = shard.to_tx();
 
@@ -360,7 +421,7 @@ impl Miot {
     fn session_to_socket(&mut self) {
         let (shard, conns) = match &mut self.inner {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
         let shard = shard.to_tx();
 
@@ -372,11 +433,15 @@ impl Miot {
                 format!("wconn:{}:{}", remote_addr, **client_id)
             };
             match socket.write_packets(&prefix, &self.config) {
-                QueueStatus::Ok(_) | QueueStatus::Block(_) => {
+                (QueueStatus::Ok(_), write_stats) => {
                     // TODO: should we wake the session here.
                     ()
                 }
-                QueueStatus::Disconnected(_) => {
+                (QueueStatus::Block(_), write_stats) => {
+                    // TODO: should we wake the session here.
+                    ()
+                }
+                (QueueStatus::Disconnected(_), write_stats) => {
                     error!("{} disconnected write_packets ...", prefix);
                     let err: Result<()> = err!(Disconnected, desc: "");
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
@@ -410,7 +475,7 @@ impl Miot {
                 *next_token = mio::Token(next_token.0 + 1);
                 (poll, conns, token)
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         let (session_tx, miot_rx) = (args.upstream, args.downstream);
@@ -434,6 +499,8 @@ impl Miot {
         let socket = socket::Socket { client_id, conn, token, rd, wt };
         conns.insert(args.client_id, socket);
 
+        self.incr_n_add_conns();
+
         Response::Ok
     }
 
@@ -445,10 +512,10 @@ impl Miot {
 
         let (poll, conns) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, .. }) => (poll, conns),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        match conns.remove(&client_id) {
+        let res = match conns.remove(&client_id) {
             Some(mut socket) => {
                 let remote_addr = socket.conn.peer_addr();
                 info!("{} removing connection {:?} ...", self.prefix, remote_addr);
@@ -456,25 +523,29 @@ impl Miot {
                 Response::Removed(socket)
             }
             None => Response::Ok,
-        }
+        };
+
+        self.incr_n_rem_conns();
+        res
     }
 
     fn handle_close(&mut self, _req: Request) -> Response {
-        let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
+        let mut run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        info!("{} closing connections:{} ...", self.prefix, run_loop.conns.len());
+        info!("{} closing miot", self.prefix);
 
         mem::drop(run_loop.poll);
         mem::drop(run_loop.shard);
+        let conns = mem::replace(&mut run_loop.conns, BTreeMap::default());
 
-        let mut client_ids = Vec::with_capacity(run_loop.conns.len());
-        let mut addrs = Vec::with_capacity(run_loop.conns.len());
-        let mut tokens = Vec::with_capacity(run_loop.conns.len());
+        let mut client_ids = Vec::with_capacity(conns.len());
+        let mut addrs = Vec::with_capacity(conns.len());
+        let mut tokens = Vec::with_capacity(conns.len());
 
-        for (cid, sock) in run_loop.conns.into_iter() {
+        for (cid, sock) in conns.into_iter() {
             let raddr = sock.conn.peer_addr().unwrap();
             info!("{} closing socket {:?} client-id:{:?}", self.prefix, raddr, *cid);
             client_ids.push(sock.client_id);
@@ -487,7 +558,13 @@ impl Miot {
             client_ids,
             addrs,
             tokens,
+            n_polls: run_loop.n_polls,
+            n_events: run_loop.n_events,
+            n_add_conns: run_loop.n_add_conns,
+            n_rem_conns: run_loop.n_rem_conns,
         };
+
+        info!("{} stats {}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
 
         Response::Ok
@@ -495,21 +572,56 @@ impl Miot {
 }
 
 impl Miot {
+    fn incr_n_polls(&mut self) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_polls, .. }) => *n_polls += 1,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_events(&mut self, n: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
+            Inner::Close(stats) => stats.n_events += n,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_add_conns(&mut self) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_add_conns, .. }) => *n_add_conns += 1,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_rem_conns(&mut self) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_rem_conns, .. }) => *n_rem_conns += 1,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
     fn prefix(&self) -> String {
-        format!("{}:{}", self.name, self.miot_id)
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_, _) => "hndl",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<m:{}:{}>", self.name, state)
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn as_app_tx(&self) -> &AppTx {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }

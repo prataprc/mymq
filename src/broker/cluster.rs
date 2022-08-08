@@ -77,11 +77,17 @@ pub struct FinState {
     pub listener: Listener,
     pub ticker: Ticker,
     pub flusher: Flusher,
-    pub active_shards: BTreeMap<u32, Shard>,
+    pub active_shards: Vec<Shard>,
     pub topic_filters: SubscribedTrie,
     pub retained_messages: RetainedTrie,
     pub retain_timer: Timer<Arc<Retain>>,
     pub retain_topics: BTreeMap<TopicName, Arc<Retain>>,
+}
+
+impl FinState {
+    fn to_json(&self) -> String {
+        format!(concat!("{{ }}"))
+    }
 }
 
 impl Default for Cluster {
@@ -105,10 +111,10 @@ impl Drop for Cluster {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_waker, _thrd) => info!("{} drop ...", self.prefix),
-            Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
+            Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
+            Inner::Tx(_waker, _tx) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
-            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
         }
     }
 }
@@ -126,7 +132,7 @@ impl ToJson for Cluster {
             Inner::Main(RunLoop { active_shards, .. }) => {
                 format!(concat!("{{ {:?}: {} }}"), "active_shards", active_shards.len())
             }
-            _ => "".to_string(),
+            _ => "{{}}".to_string(),
         }
     }
 }
@@ -259,23 +265,19 @@ impl Cluster {
                 app_tx: &app_tx,
             })?;
 
-            //Self::set_shard_queues(&active_shards);
+            Self::set_shard_queues(&active_shards);
 
-            //let ticker = Self::spawn_ticker(SpawnTicker {
-            //    config: &self.config,
-            //    cluster: &cluster,
-            //    // TODO: include replica-shards in ticker_shards
-            //    shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
-            //    app_tx: &app_tx,
-            //})?;
+            let ticker = Self::spawn_ticker(SpawnTicker {
+                config: &self.config,
+                cluster: &cluster,
+                // TODO: include replica-shards in ticker_shards
+                shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
+                app_tx: &app_tx,
+            })?;
 
             match &cluster.inner {
                 Inner::Handle(_waker, thrd) => {
-                    thrd.request(Request::Set {
-                        listener,
-                        ticker: Ticker::default(),
-                        active_shards: BTreeMap::default(),
-                    })??;
+                    thrd.request(Request::Set { listener, ticker, active_shards })??;
                 }
                 _ => unreachable!(),
             }
@@ -285,8 +287,6 @@ impl Cluster {
     }
 
     pub(crate) fn to_tx(&self) -> Self {
-        info!("{} cloning tx ...", self.prefix);
-
         let inner = match &self.inner {
             Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(waker), thrd.to_tx()),
             Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
@@ -299,6 +299,8 @@ impl Cluster {
             inner,
         };
         val.prefix = val.prefix();
+
+        debug!("{} cloned", self.prefix);
         val
     }
 
@@ -437,7 +439,7 @@ impl Threadable for Cluster {
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn thread {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
 
         let mut rt = Rt {
             retain_timer: Timer::default(),
@@ -688,49 +690,49 @@ impl Cluster {
     fn handle_close(&mut self, _: Request, rt: &mut Rt) -> Response {
         use std::mem;
 
-        match mem::replace(&mut self.inner, Inner::Init) {
-            Inner::Main(mut run_loop) => {
-                mem::drop(run_loop.poll);
-
-                let mut active_shards = BTreeMap::default();
-                for (shard_id, shard) in run_loop.active_shards.into_iter() {
-                    active_shards.insert(shard_id, shard.close_wait());
-                }
-
-                let listener = mem::replace(&mut run_loop.listener, Listener::default())
-                    .close_wait();
-
-                let ticker =
-                    mem::replace(&mut run_loop.ticker, Ticker::default()).close_wait();
-
-                let flusher =
-                    mem::replace(&mut run_loop.flusher, Flusher::default()).close_wait();
-
-                mem::drop(run_loop.rebalancer);
-
-                let fin_state = FinState {
-                    state: run_loop.state,
-                    listener,
-                    ticker,
-                    flusher,
-                    active_shards,
-                    topic_filters: run_loop.topic_filters,
-                    retained_messages: run_loop.retained_messages,
-                    retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
-                    retain_topics: mem::replace(
-                        &mut rt.retain_topics,
-                        BTreeMap::default(),
-                    ),
-                };
-
-                info!("{} close {}", self.prefix, self.to_stats_json());
-
-                let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
-                Response::Ok
-            }
-            Inner::Close(_) => Response::Ok,
+        let mut run_loop = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::Main(run_loop) => run_loop,
+            Inner::Close(_) => return Response::Ok,
             _ => unreachable!(),
+        };
+
+        info!("{} close cluster", self.prefix);
+
+        mem::drop(run_loop.poll);
+        mem::drop(run_loop.rebalancer);
+
+        let listener = {
+            let val = mem::replace(&mut run_loop.listener, Listener::default());
+            val.close_wait()
+        };
+        let ticker = mem::replace(&mut run_loop.ticker, Ticker::default()).close_wait();
+
+        let ashards = mem::replace(&mut run_loop.active_shards, BTreeMap::default());
+        let mut shards = vec![];
+        for (_, shard) in ashards.into_iter() {
+            shards.push(shard.close_wait())
         }
+
+        let flusher = {
+            let val = mem::replace(&mut run_loop.flusher, Flusher::default());
+            val.close_wait()
+        };
+
+        let fin_state = FinState {
+            state: run_loop.state,
+            listener,
+            ticker,
+            flusher,
+            active_shards: shards,
+            topic_filters: run_loop.topic_filters,
+            retained_messages: run_loop.retained_messages,
+            retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
+            retain_topics: mem::replace(&mut rt.retain_topics, BTreeMap::default()),
+        };
+
+        info!("{} stats {}", self.prefix, fin_state.to_json());
+        let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        Response::Ok
     }
 }
 

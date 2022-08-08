@@ -9,7 +9,7 @@ use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedT
 use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
 use crate::broker::{InpSeqno, OutSeqno, Timestamp};
 
-use crate::{v5, ClientID, TopicName};
+use crate::{v5, ClientID, ToJson, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -149,13 +149,28 @@ pub struct ReplicaLoop {
 pub struct FinState {
     pub miot: Miot,
     pub sessions: BTreeMap<ClientID, session::SessionStats>,
+    pub inp_seqno: InpSeqno,
+    pub shard_back_log: BTreeMap<u32, usize>,
+    pub ack_timestamps: Vec<Timestamp>,
+}
+
+impl FinState {
+    fn to_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "n_sessions",
+            self.sessions.len(),
+            "inp_seqno",
+            self.inp_seqno,
+        )
+    }
 }
 
 impl Default for Shard {
     fn default() -> Shard {
         let config = Config::default();
         let mut def = Shard {
-            name: format!("{}-shard-init", config.name),
+            name: config.name.clone(),
             shard_id: u32::default(),
             uuid: Uuid::new_v4(),
             prefix: String::default(),
@@ -178,13 +193,29 @@ impl Drop for Shard {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => debug!("{} drop ...", self.prefix),
-            Inner::Handle(_hndl) => info!("{} drop ...", self.prefix),
-            Inner::Tx(_waker, _tx) => info!("{} drop ...", self.prefix),
-            Inner::MsgTx(_waker, _tx) => info!("{} drop ...", self.prefix),
+            Inner::Handle(_hndl) => debug!("{} drop ...", self.prefix),
+            Inner::Tx(_waker, _tx) => debug!("{} drop ...", self.prefix),
+            Inner::MsgTx(_waker, _tx) => debug!("{} drop ...", self.prefix),
             Inner::MainActive(_active_loop) => info!("{} drop ...", self.prefix),
             Inner::MainReplica(_replica_loop) => info!("{} drop ...", self.prefix),
-            Inner::Close(_fin_state) => info!("{} drop ...", self.prefix),
+            Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
         }
+    }
+}
+
+impl ToJson for Shard {
+    fn to_config_json(&self) -> String {
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "num_shards",
+            self.config.num_shards,
+            "mqtt_pkt_batch_size",
+            self.config.mqtt_pkt_batch_size,
+        )
+    }
+
+    fn to_stats_json(&self) -> String {
+        "{{}}".to_string()
     }
 }
 
@@ -201,7 +232,7 @@ impl Shard {
     pub fn from_config(config: &Config, shard_id: u32) -> Result<Shard> {
         let def = Shard::default();
         let mut val = Shard {
-            name: format!("{}-shard-init", config.name),
+            name: config.name.clone(),
             shard_id,
             uuid: def.uuid,
             prefix: def.prefix.clone(),
@@ -215,9 +246,6 @@ impl Shard {
 
     pub fn spawn_active(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
         let num_shards = self.config.num_shards;
-        if matches!(&self.inner, Inner::Handle(_) | Inner::MainActive(_)) {
-            err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
-        }
 
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
@@ -230,7 +258,7 @@ impl Shard {
             message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
         let mut shard = Shard {
-            name: format!("{}-shard-main", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: String::default(),
@@ -260,7 +288,7 @@ impl Shard {
         thrd.set_waker(Arc::clone(&waker));
 
         let mut shard = Shard {
-            name: format!("{}-shard-handle", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: String::default(),
@@ -287,15 +315,11 @@ impl Shard {
     }
 
     pub fn spawn_replica(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
-        if matches!(&self.inner, Inner::Handle(_) | Inner::MainReplica(_)) {
-            err!(InvalidInput, desc: "shard can be spawned only in init-state ")?;
-        }
-
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
         let mut shard = Shard {
-            name: format!("{}-shard-main", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: String::default(),
@@ -315,7 +339,7 @@ impl Shard {
         thrd.set_waker(Arc::clone(&waker));
 
         let mut shard = Shard {
-            name: format!("{}-shard-handle", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: String::default(),
@@ -328,8 +352,6 @@ impl Shard {
     }
 
     pub fn to_tx(&self) -> Self {
-        trace!("{} cloning tx ...", self.prefix);
-
         let inner = match &self.inner {
             Inner::Handle(Handle { waker, thrd, .. }) => {
                 Inner::Tx(Arc::clone(waker), thrd.to_tx())
@@ -339,7 +361,7 @@ impl Shard {
         };
 
         let mut shard = Shard {
-            name: format!("{}-shard-tx", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: String::default(),
@@ -347,12 +369,12 @@ impl Shard {
             inner,
         };
         shard.prefix = shard.prefix();
+
+        debug!("{} cloned", self.prefix);
         shard
     }
 
     pub fn to_msg_tx(&self) -> Self {
-        trace!("{} cloning tx ...", self.prefix);
-
         let inner = match &self.inner {
             Inner::Handle(Handle { waker, msg_tx: Some(msg_tx), .. }) => {
                 Inner::MsgTx(Arc::clone(waker), msg_tx.clone())
@@ -361,7 +383,7 @@ impl Shard {
         };
 
         let mut shard = Shard {
-            name: format!("{}-shard-msg-tx", self.config.name),
+            name: self.config.name.clone(),
             shard_id: self.shard_id,
             uuid: self.uuid,
             prefix: self.prefix.clone(),
@@ -369,6 +391,8 @@ impl Shard {
             inner,
         };
         shard.prefix = shard.prefix();
+
+        debug!("{} cloned", self.prefix);
         shard
     }
 }
@@ -474,7 +498,7 @@ impl Shard {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
-        info!("{} spawn ...", self.prefix);
+        info!("{} spawn config {}", self.prefix, self.to_config_json());
 
         // this a work around to wire up all the threads without using unsafe.
         let req = allow_panic!(self, rx.recv());
@@ -536,7 +560,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        info!("{} thread exit ...", self.prefix);
+        info!("{} thread exit", self.prefix);
         self
     }
 
@@ -1240,7 +1264,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        info!("{} close sessions:{} ...", self.prefix, active_loop.sessions.len());
+        info!("{} closing shard", self.prefix);
 
         let miot = mem::replace(&mut active_loop.miot, Miot::default()).close_wait();
 
@@ -1258,7 +1282,15 @@ impl Shard {
             new_sessions.insert(client_id, sess.close());
         }
 
-        let fin_state = FinState { miot, sessions: new_sessions };
+        let fin_state = FinState {
+            miot,
+            sessions: new_sessions,
+            inp_seqno: active_loop.inp_seqno,
+            shard_back_log: BTreeMap::default(), // TODO
+            ack_timestamps: active_loop.ack_timestamps,
+        };
+
+        info!("{} stats {}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
 
         Response::Ok
@@ -1267,7 +1299,16 @@ impl Shard {
 
 impl Shard {
     pub fn prefix(&self) -> String {
-        format!("{}:{}", self.name, self.shard_id)
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_) => "hndl",
+            Inner::Tx(_, _) => "tx",
+            Inner::MsgTx(_, _) => "msgtx",
+            Inner::MainActive(_) => "active",
+            Inner::MainReplica(_) => "replica",
+            Inner::Close(_) => "close",
+        };
+        format!("<s:{}:{}>", self.name, state)
     }
 
     pub fn as_mut_poll(&mut self) -> &mut mio::Poll {

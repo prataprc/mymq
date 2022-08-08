@@ -290,17 +290,18 @@ pub fn pending_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueR
 /// use pending_requests.
 pub fn get_requests<Q, R>(prefix: &str, rx: &Rx<Q, R>, max: usize) -> QueueReq<Q, R> {
     let mut reqs = Vec::with_capacity(max);
-    loop {
-        match rx.recv() {
-            Ok(req) if reqs.len() < max => reqs.push(req),
-            Ok(req) => {
-                reqs.push(req);
-                break QueueReq::Ok(reqs);
-            }
-            Err(mpsc::RecvError) => {
-                warn!("{} req-channel disconnected ...", prefix);
-                break QueueReq::Disconnected(reqs);
-            }
+    let req = match rx.recv() {
+        Ok(req) if reqs.len() < max => req,
+        Ok(req) => req,
+        Err(mpsc::RecvError) => {
+            warn!("{} req-channel disconnected ...", prefix);
+            return QueueReq::Disconnected(reqs);
         }
-    }
+    };
+    reqs.push(req);
+
+    let mut status = pending_requests(prefix, rx, max);
+    reqs.extend(status.take_values().into_iter());
+
+    QueueReq::Ok(reqs)
 }
