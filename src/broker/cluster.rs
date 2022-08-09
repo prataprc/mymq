@@ -1,4 +1,4 @@
-use log::{debug, info, trace};
+use log::{debug, error, info, trace};
 use mio::event::Events;
 use uuid::Uuid;
 
@@ -68,11 +68,9 @@ struct RunLoop {
     /// Rebalancing algorithm.
     rebalancer: rebalance::Rebalancer,
     /// Index of subscribed topicfilters across all the sessions, local to this node.
-    // TODO: Should we make this part of the ClusterState ?
     topic_filters: SubscribedTrie, // key=TopicFilter, val=(client_id, shard_id)
     /// Index of retained messages for each topic-name, across all the sessions, local
     /// to this node.
-    // TODO: should we make this part of the ClusterState
     retained_messages: RetainedTrie, // indexed by TopicName.
 
     /// Statistics
@@ -714,7 +712,9 @@ impl Cluster {
         );
 
         // Add session to the shard.
-        allow_panic!(&self, shard.add_session(AddSessionArgs { conn, pkt: connect }));
+        if let Err(err) = shard.add_session(AddSessionArgs { conn, pkt: connect }) {
+            error!("{} error adding session {}", self.prefix, err);
+        }
 
         Response::Ok
     }
