@@ -251,29 +251,33 @@ impl Cluster {
         cluster.prefix = cluster.prefix();
 
         {
-            let listener = Self::spawn_listener(SpawnListener {
+            let args = SpawnListener {
                 config: &self.config,
                 cluster: &cluster,
                 app_tx: &app_tx,
-            })?;
-            let active_shards = Self::spawn_active_shards(SpawnShards {
+            };
+            let listener = Self::spawn_listener(args)?;
+
+            let args = SpawnShards {
                 config: &self.config,
                 cluster: &cluster,
                 flusher_tx,
                 topic_filters: &topic_filters,
                 retained_messages: &retained_messages,
                 app_tx: &app_tx,
-            })?;
+            };
+            let active_shards = Self::spawn_active_shards(args)?;
 
             Self::set_shard_queues(&active_shards);
 
-            let ticker = Self::spawn_ticker(SpawnTicker {
+            let args = SpawnTicker {
                 config: &self.config,
                 cluster: &cluster,
                 // TODO: include replica-shards in ticker_shards
                 shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
                 app_tx: &app_tx,
-            })?;
+            };
+            let ticker = Self::spawn_ticker(args)?;
 
             match &cluster.inner {
                 Inner::Handle(_waker, thrd) => {
@@ -300,7 +304,7 @@ impl Cluster {
         };
         val.prefix = val.prefix();
 
-        debug!("{} cloned", self.prefix);
+        debug!("{} cloned", val.prefix);
         val
     }
 
@@ -465,7 +469,7 @@ impl Threadable for Cluster {
             _ => unreachable!(),
         };
 
-        info!("{}, thread exit ...", self.prefix);
+        info!("{} thread exit", self.prefix);
         self
     }
 }
@@ -478,7 +482,6 @@ impl Cluster {
         let exit = 'outer: loop {
             match iter.next() {
                 Some(event) => {
-                    trace!("{} poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
 
                     match event.token() {
@@ -499,7 +502,7 @@ impl Cluster {
             }
         };
 
-        debug!("{} polled and got {} events", self.prefix, count);
+        trace!("{} polled and got {} events", self.prefix, count);
         exit
     }
 
@@ -511,7 +514,7 @@ impl Cluster {
 
         let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
-        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
+        trace!("{} process {} requests closed:false", self.prefix, reqs.len());
 
         // TODO: review control-channel handling for all threads. Should we panic or
         // return error.
@@ -732,6 +735,8 @@ impl Cluster {
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
+
         Response::Ok
     }
 }

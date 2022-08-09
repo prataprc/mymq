@@ -65,6 +65,8 @@ struct RunLoop {
     n_events: usize,
     n_add_conns: usize,
     n_rem_conns: usize,
+    n_wpkts: usize,
+    n_wbytes: usize,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
@@ -79,12 +81,19 @@ pub struct FinState {
     pub n_events: usize,
     pub n_add_conns: usize,
     pub n_rem_conns: usize,
+    pub n_wpkts: usize,
+    pub n_wbytes: usize,
 }
 
 impl FinState {
     fn to_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
+            concat!(
+                "{{ ",
+                "{:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {},",
+                "{:?}: {}, {:?}: {}",
+                "}}"
+            ),
             "next_token",
             self.next_token.0,
             "n_conns",
@@ -96,7 +105,11 @@ impl FinState {
             "n_add_conns",
             self.n_add_conns,
             "n_rem_conns",
-            self.n_rem_conns
+            self.n_rem_conns,
+            "n_wpkts",
+            self.n_wpkts,
+            "n_wbytes",
+            self.n_wbytes,
         )
     }
 }
@@ -184,6 +197,8 @@ impl Miot {
                 n_events: 0,
                 n_add_conns: 0,
                 n_rem_conns: 0,
+                n_wpkts: 0,
+                n_wbytes: 0,
 
                 app_tx: app_tx.clone(),
             }),
@@ -419,6 +434,8 @@ impl Miot {
     }
 
     fn session_to_socket(&mut self) {
+        use crate::broker::socket::Stats as SockStats;
+
         let (shard, conns) = match &mut self.inner {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -427,21 +444,23 @@ impl Miot {
 
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?
+        let mut wstats = SockStats::default();
         for (client_id, socket) in conns.iter_mut() {
             let prefix = {
                 let remote_addr = socket.conn.peer_addr().unwrap();
                 format!("wconn:{}:{}", remote_addr, **client_id)
             };
             match socket.write_packets(&prefix, &self.config) {
-                (QueueStatus::Ok(_), write_stats) => {
-                    // TODO: should we wake the session here.
-                    ()
+                (QueueStatus::Ok(_), stats) => {
+                    wstats.update(&stats);
+                    () // TODO: should we wake the session here.
                 }
-                (QueueStatus::Block(_), write_stats) => {
-                    // TODO: should we wake the session here.
-                    ()
+                (QueueStatus::Block(_), stats) => {
+                    wstats.update(&stats);
+                    () // TODO: should we wake the session here.
                 }
-                (QueueStatus::Disconnected(_), write_stats) => {
+                (QueueStatus::Disconnected(_), stats) => {
+                    wstats.update(&stats);
                     error!("{} disconnected write_packets ...", prefix);
                     let err: Result<()> = err!(Disconnected, desc: "");
                     fail_queues.push((client_id.clone(), err.unwrap_err()));
@@ -455,6 +474,8 @@ impl Miot {
                 allow_panic!(&self, shard.flush_connection(socket, err));
             }
         }
+
+        self.incr_wstats(&wstats);
     }
 }
 
@@ -562,10 +583,13 @@ impl Miot {
             n_events: run_loop.n_events,
             n_add_conns: run_loop.n_add_conns,
             n_rem_conns: run_loop.n_rem_conns,
+            n_wpkts: run_loop.n_wpkts,
+            n_wbytes: run_loop.n_wbytes,
         };
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
 
         Response::Ok
     }
@@ -598,6 +622,16 @@ impl Miot {
         match &mut self.inner {
             Inner::Main(RunLoop { n_rem_conns, .. }) => *n_rem_conns += 1,
             inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_wstats(&mut self, wstats: &socket::Stats) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_wpkts, n_wbytes, .. }) => {
+                *n_wpkts += wstats.items;
+                *n_wbytes += wstats.bytes;
+            }
+            _ => unreachable!(),
         }
     }
 

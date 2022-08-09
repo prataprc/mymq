@@ -372,6 +372,7 @@ impl Listener {
         info!("{} stats {}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
         Response::Ok
     }
 }

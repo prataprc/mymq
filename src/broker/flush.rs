@@ -36,7 +36,7 @@ enum Inner {
 struct RunLoop {
     /// Statistics
     n_flush_conns: usize,
-    n_items: usize,
+    n_pkts: usize,
     n_bytes: usize,
 
     /// Back channel communicate with application.
@@ -47,7 +47,7 @@ pub struct FinState {
     /// Number of connections flushed downstream and disconnected.
     pub n_flush_conns: usize,
     /// Number of packets flushed in all connections.
-    pub n_items: usize,
+    pub n_pkts: usize,
     /// Number of bytes flushed in all connections.
     pub n_bytes: usize,
 }
@@ -58,8 +58,8 @@ impl FinState {
             concat!("{{ {:?}: {}, {:?}: {}, {:?}: {} }}"),
             "n_flush_conns",
             self.n_flush_conns,
-            "n_items",
-            self.n_items,
+            "n_pkts",
+            self.n_pkts,
             "n_bytes",
             self.n_bytes
         )
@@ -133,7 +133,7 @@ impl Flusher {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 n_flush_conns: 0,
-                n_items: 0,
+                n_pkts: 0,
                 n_bytes: 0,
                 app_tx,
             }),
@@ -167,7 +167,7 @@ impl Flusher {
         };
         flush.prefix = flush.prefix();
 
-        debug!("{} cloned", self.prefix);
+        debug!("{} cloned", flush.prefix);
         flush
     }
 }
@@ -348,13 +348,14 @@ impl Flusher {
 
         let fin_state = FinState {
             n_flush_conns: run_loop.n_flush_conns,
-            n_items: run_loop.n_items,
+            n_pkts: run_loop.n_pkts,
             n_bytes: run_loop.n_bytes,
         };
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
         Response::Ok
     }
 }
@@ -369,8 +370,8 @@ impl Flusher {
 
     fn incr_stats(&mut self, stats: &socket::Stats) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_items, n_bytes, .. }) => {
-                *n_items += stats.items;
+            Inner::Main(RunLoop { n_pkts, n_bytes, .. }) => {
+                *n_pkts += stats.items;
                 *n_bytes += stats.bytes;
             }
             _ => unreachable!(),

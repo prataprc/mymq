@@ -370,7 +370,7 @@ impl Shard {
         };
         shard.prefix = shard.prefix();
 
-        debug!("{} cloned", self.prefix);
+        debug!("{} cloned", shard.prefix);
         shard
     }
 
@@ -392,7 +392,7 @@ impl Shard {
         };
         shard.prefix = shard.prefix();
 
-        debug!("{} cloned", self.prefix);
+        debug!("{} cloned", shard.prefix);
         shard
     }
 }
@@ -1292,6 +1292,7 @@ impl Shard {
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
 
         Response::Ok
     }

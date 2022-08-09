@@ -17,23 +17,8 @@ pub struct Opt {
     #[structopt(long = "vv")]
     vv: bool,
 
-    #[structopt(long = "no-log")]
-    no_log: bool,
-
-    #[structopt(long = "error")]
-    error: bool,
-
-    #[structopt(long = "warn")]
-    warn: bool,
-
-    #[structopt(long = "info")]
-    info: bool,
-
-    #[structopt(long = "debug")]
-    debug: bool,
-
-    #[structopt(long = "trace")]
-    trace: bool,
+    #[structopt(long = "log-mod", default_value = "")]
+    log_mod: String,
 
     #[structopt(subcommand)]
     subcmd: SubCommand,
@@ -120,15 +105,21 @@ fn parse_env(_opts: &Opt, config: Config) -> Result<Config> {
     Ok(config)
 }
 
-use env_logger::{Builder, WriteStyle};
+use env_logger::{fmt::Target, Builder, WriteStyle};
 use log::Level;
 use std::io::Write;
 fn setup_logging(opts: &Opt) {
     let verbosity = opts.to_verbosity();
-    let level_filter = opts.to_log_filter();
+    let opts = opts.clone();
     Builder::from_default_env()
-        .filter_level(level_filter)
+        .parse_default_env()
+        .target(Target::Stdout)
         .format(move |f, r| {
+            let file = r.file().clone().unwrap();
+            if file.len() > 0 && !file.contains(&opts.log_mod) {
+                return Ok(());
+            }
+
             let target = r.target();
             match target {
                 "0" | "1" | "2" if target <= verbosity.as_str() => log_format(f, r),
@@ -187,23 +178,5 @@ impl Opt {
             "0"
         }
         .to_string()
-    }
-
-    fn to_log_filter(&self) -> log::LevelFilter {
-        if self.no_log {
-            log::LevelFilter::Off
-        } else if self.error {
-            log::LevelFilter::Error
-        } else if self.warn {
-            log::LevelFilter::Warn
-        } else if self.info {
-            log::LevelFilter::Info
-        } else if self.debug {
-            log::LevelFilter::Debug
-        } else if self.trace {
-            log::LevelFilter::Trace
-        } else {
-            log::LevelFilter::Info
-        }
     }
 }
