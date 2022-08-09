@@ -63,6 +63,7 @@ struct RunLoop {
     /// Statistics
     n_polls: usize,
     n_events: usize,
+    n_requests: usize,
     n_add_conns: usize,
     n_rem_conns: usize,
     n_wpkts: usize,
@@ -78,6 +79,7 @@ pub struct FinState {
     pub addrs: Vec<net::SocketAddr>,
     pub tokens: Vec<mio::Token>,
     pub n_polls: usize,
+    pub n_requests: usize,
     pub n_events: usize,
     pub n_add_conns: usize,
     pub n_rem_conns: usize,
@@ -195,6 +197,7 @@ impl Miot {
 
                 n_polls: 0,
                 n_events: 0,
+                n_requests: 0,
                 n_add_conns: 0,
                 n_rem_conns: 0,
                 n_wpkts: 0,
@@ -338,7 +341,6 @@ impl Miot {
             trace!("{} poll-event token:{}", self.prefix, event.token().0);
             count += 1;
         }
-        debug!("{} polled {} events", self.prefix, count);
 
         let exit = loop {
             // keep repeating until all control requests are drained.
@@ -367,7 +369,8 @@ impl Miot {
 
         let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
-        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
+
+        self.incr_n_requests(reqs.len());
 
         let mut closed = false;
         for req in reqs.into_iter() {
@@ -395,11 +398,10 @@ impl Miot {
 
 impl Miot {
     fn socket_to_session(&mut self) {
-        let (shard, conns) = match &mut self.inner {
-            Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
+        let conns = match &mut self.inner {
+            Inner::Main(RunLoop { conns, .. }) => conns,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let shard = shard.to_tx("miot-socket-to-session");
 
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
@@ -428,7 +430,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                allow_panic!(&self, shard.flush_connection(socket, err));
+                allow_panic!(&self, self.as_shard().flush_connection(socket, err));
             }
         }
     }
@@ -436,11 +438,10 @@ impl Miot {
     fn session_to_socket(&mut self) {
         use crate::broker::socket::Stats as SockStats;
 
-        let (shard, conns) = match &mut self.inner {
-            Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
+        let conns = match &mut self.inner {
+            Inner::Main(RunLoop { conns, .. }) => conns,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let shard = shard.to_tx("miot-session-to-socket");
 
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?
@@ -471,7 +472,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                allow_panic!(&self, shard.flush_connection(socket, err));
+                allow_panic!(&self, self.as_shard().flush_connection(socket, err));
             }
         }
 
@@ -581,6 +582,7 @@ impl Miot {
             tokens,
             n_polls: run_loop.n_polls,
             n_events: run_loop.n_events,
+            n_requests: run_loop.n_requests,
             n_add_conns: run_loop.n_add_conns,
             n_rem_conns: run_loop.n_rem_conns,
             n_wpkts: run_loop.n_wpkts,
@@ -607,6 +609,14 @@ impl Miot {
         match &mut self.inner {
             Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
             Inner::Close(stats) => stats.n_events += n,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_requests(&mut self, n: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += n,
+            Inner::Close(stats) => stats.n_requests += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
@@ -648,6 +658,13 @@ impl Miot {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn as_shard(&self) -> &Shard {
+        match &self.inner {
+            Inner::Main(RunLoop { shard, .. }) => shard,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

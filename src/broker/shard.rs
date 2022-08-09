@@ -1,7 +1,7 @@
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 use uuid::Uuid;
 
-use std::{cmp, collections::BTreeMap, mem, sync::Arc};
+use std::{cmp, collections::BTreeMap, fmt, mem, result, sync::Arc};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, socket};
@@ -56,6 +56,20 @@ pub enum Inner {
     MainReplica(ReplicaLoop),
     // Held by Cluster, replacing both Handle and Main.
     Close(FinState),
+}
+
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Shard::Inner::Init"),
+            Inner::Handle(_) => write!(f, "Shard::Inner::Handle"),
+            Inner::Tx(_, _) => write!(f, "Shard::Inner::Handle"),
+            Inner::MsgTx(_, _) => write!(f, "Shard::Inner::Handle"),
+            Inner::MainActive(_) => write!(f, "Shard::Inner::MainActive"),
+            Inner::MainReplica(_) => write!(f, "Shard::Inner::MainReplica"),
+            Inner::Close(_) => write!(f, "Shard::Inner::Close"),
+        }
+    }
 }
 
 pub struct Handle {
@@ -121,6 +135,10 @@ pub struct ActiveLoop {
     /// MVCC clone of Cluster::retained_messages
     retained_messages: RetainedTrie,
 
+    /// statistics
+    n_events: usize,
+    n_requests: usize,
+
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
@@ -142,6 +160,10 @@ pub struct ReplicaLoop {
     /// dropped after close_wait call, when the thread returns it will be empty.
     sessions: BTreeMap<ClientID, Session>,
 
+    /// statistics
+    n_events: usize,
+    n_requests: usize,
+
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
@@ -152,16 +174,22 @@ pub struct FinState {
     pub inp_seqno: InpSeqno,
     pub shard_back_log: BTreeMap<u32, usize>,
     pub ack_timestamps: Vec<Timestamp>,
+    pub n_events: usize,
+    pub n_requests: usize,
 }
 
 impl FinState {
     fn to_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
             "n_sessions",
             self.sessions.len(),
             "inp_seqno",
             self.inp_seqno,
+            "n_events",
+            self.n_events,
+            "n_requests",
+            self.n_requests,
         )
     }
 }
@@ -280,6 +308,9 @@ impl Shard {
                 topic_filters: args.topic_filters,
                 retained_messages: args.retained_messages,
 
+                n_events: 0,
+                n_requests: 0,
+
                 app_tx: app_tx.clone(),
             }),
         };
@@ -331,6 +362,10 @@ impl Shard {
                 flusher: args.flusher,
 
                 sessions: BTreeMap::default(),
+
+                n_events: 0,
+                n_requests: 0,
+
                 app_tx: app_tx.clone(),
             }),
         };
@@ -534,7 +569,7 @@ impl Shard {
             let mut status = self.out_messages(&msg_rx, &mut qos_acks);
             let qos_msgs = status.take_values(); // QoS-1 and QoS2 messages.
             if let QueueStatus::Disconnected(_) = status {
-                warn!("{:?} cascading shutdown via out_messages", self.prefix);
+                error!("{:?} cascading shutdown via out_messages", self.prefix);
                 break;
             }
 
@@ -567,7 +602,7 @@ impl Shard {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
-        info!("{} spawn ...", self.prefix);
+        info!("{} spawn config {}", self.prefix, self.to_config_json());
 
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -594,7 +629,7 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        info!("{} thread exit ...", self.prefix);
+        info!("{} thread exit", self.prefix);
         self
     }
 }
@@ -603,11 +638,10 @@ impl Shard {
     // (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
-        for event in events.iter() {
-            trace!("{} poll-event token:{}", self.prefix, event.token().0);
+        for _event in events.iter() {
             count += 1;
         }
-        debug!("{} polled {} events", self.prefix, count);
+        self.incr_n_events(count);
 
         loop {
             // keep repeating until all control requests are drained.
@@ -629,7 +663,8 @@ impl Shard {
 
         let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
-        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
+
+        self.incr_n_requests(reqs.len());
 
         let mut closed = false;
         for req in reqs.into_iter() {
@@ -732,7 +767,7 @@ impl Shard {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
                 QueueStatus::Disconnected(_) => {
                     // TODO: should this be logged at error-level
-                    warn!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
+                    error!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
                 }
             }
         }
@@ -805,7 +840,7 @@ impl Shard {
                         disconnecteds.push(client_id)
                     }
                 }
-                None => warn!("{} msg-rx, session {} is gone", self.prefix, *client_id),
+                None => error!("{} msg-rx, session {} is gone", self.prefix, *client_id),
             }
         }
 
@@ -1257,7 +1292,15 @@ impl Shard {
         Response::Ok
     }
 
-    fn handle_close(&mut self, _req: Request) -> Response {
+    fn handle_close(&mut self, req: Request) -> Response {
+        match &self.inner {
+            Inner::MainActive { .. } => self.handle_close_active(req),
+            Inner::MainReplica { .. } => self.handle_close_replica(req),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn handle_close_active(&mut self, _req: Request) -> Response {
         let mut active_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::MainActive(active_loop) => active_loop,
             _ => unreachable!(),
@@ -1287,9 +1330,48 @@ impl Shard {
             inp_seqno: active_loop.inp_seqno,
             shard_back_log: BTreeMap::default(), // TODO
             ack_timestamps: active_loop.ack_timestamps,
+            n_events: active_loop.n_events,
+            n_requests: active_loop.n_events,
         };
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
+
+        let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
+        self.prefix = self.prefix();
+
+        Response::Ok
+    }
+
+    fn handle_close_replica(&mut self, _req: Request) -> Response {
+        let replica_loop = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::MainReplica(replica_loop) => replica_loop,
+            _ => unreachable!(),
+        };
+
+        info!("{} closing shard", self.prefix);
+
+        mem::drop(replica_loop.poll);
+        mem::drop(replica_loop.waker);
+        mem::drop(replica_loop.cluster);
+        mem::drop(replica_loop.flusher);
+
+        let mut new_sessions = BTreeMap::default();
+        for (client_id, sess) in replica_loop.sessions.into_iter() {
+            new_sessions.insert(client_id, sess.close());
+        }
+
+        let fin_state = FinState {
+            miot: Miot::default(),
+            sessions: new_sessions,
+            inp_seqno: 0,
+            shard_back_log: BTreeMap::default(), // TODO
+            ack_timestamps: Vec::default(),
+            n_events: replica_loop.n_events,
+            n_requests: replica_loop.n_events,
+        };
+
+        info!("{} stats {}", self.prefix, fin_state.to_json());
+
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
 
@@ -1298,6 +1380,24 @@ impl Shard {
 }
 
 impl Shard {
+    fn incr_n_events(&mut self, count: usize) {
+        match &mut self.inner {
+            Inner::MainActive(ActiveLoop { n_events, .. }) => *n_events += count,
+            Inner::MainReplica(ReplicaLoop { n_events, .. }) => *n_events += count,
+            Inner::Close(fin_stats) => fin_stats.n_events += count,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_requests(&mut self, count: usize) {
+        match &mut self.inner {
+            Inner::MainActive(ActiveLoop { n_requests, .. }) => *n_requests += count,
+            Inner::MainReplica(ReplicaLoop { n_requests, .. }) => *n_requests += count,
+            Inner::Close(fin_stats) => fin_stats.n_requests += count,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
     pub fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",
