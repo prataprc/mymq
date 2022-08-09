@@ -404,9 +404,9 @@ pub struct AddConnectionArgs {
 
 // calls to interface with cluster-thread.
 impl Cluster {
-    pub(crate) fn wake(&self) {
+    pub(crate) fn wake(&self) -> Result<()> {
         match &self.inner {
-            Inner::Tx(waker, _) => allow_panic!(self, waker.wake()),
+            Inner::Tx(waker, _) => Ok(waker.wake()?),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

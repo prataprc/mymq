@@ -206,8 +206,14 @@ impl Threadable for Ticker {
 
             *ticker_count += 1;
 
-            cluster.wake();
-            shards.iter().for_each(|shard| shard.wake());
+            if let Err(err) = cluster.wake() {
+                error!("{} error waking cluster {}", self.prefix, err);
+            }
+            for shard in shards.iter() {
+                if let Err(err) = shard.wake() {
+                    error!("{} error waking shard {}", self.prefix, err);
+                }
+            }
         }
 
         let inner = mem::replace(&mut self.inner, Inner::Init);

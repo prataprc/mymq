@@ -416,10 +416,10 @@ pub struct AddSessionArgs {
 
 // calls to interface with shard-thread.
 impl Shard {
-    pub fn wake(&self) {
+    pub fn wake(&self) -> Result<()> {
         match &self.inner {
-            Inner::Handle(Handle { waker, .. }) => allow_panic!(self, waker.wake()),
-            Inner::Tx(waker, _) => allow_panic!(self, waker.wake()),
+            Inner::Handle(Handle { waker, .. }) => Ok(waker.wake()?),
+            Inner::Tx(waker, _) => Ok(waker.wake()?),
             _ => unreachable!(),
         }
     }
