@@ -105,7 +105,7 @@ impl Drop for Listener {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
@@ -328,7 +328,7 @@ impl Listener {
                     prefix: format!("<h:{}>", self.config.name),
                     conn: Some(conn),
                     config: self.config.clone(),
-                    cluster: cluster.to_tx(),
+                    cluster: cluster.to_tx("handshake"),
                 };
                 let _thrd = Thread::spawn_sync("handshake", 1, hs);
 

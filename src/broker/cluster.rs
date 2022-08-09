@@ -3,7 +3,7 @@ use mio::event::Events;
 use uuid::Uuid;
 
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, mpsc, Arc};
-use std::{collections::BTreeMap, net, path, time};
+use std::{collections::BTreeMap, fmt, net, path, result, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{rebalance, ticker};
@@ -37,6 +37,18 @@ enum Inner {
     Close(FinState),
 }
 
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Cluster::Inner::Init"),
+            Inner::Handle(_, _) => write!(f, "Cluster::Inner::Handle"),
+            Inner::Tx(_, _) => write!(f, "Cluster::Inner::Handle"),
+            Inner::Main(_) => write!(f, "Cluster::Inner::Main"),
+            Inner::Close(_) => write!(f, "Cluster::Inner::Close"),
+        }
+    }
+}
+
 struct RunLoop {
     // Consensus state.
     state: ClusterState,
@@ -63,6 +75,10 @@ struct RunLoop {
     // TODO: should we make this part of the ClusterState
     retained_messages: RetainedTrie, // indexed by TopicName.
 
+    /// Statistics
+    n_events: usize,
+    n_requests: usize,
+
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
@@ -82,11 +98,16 @@ pub struct FinState {
     pub retained_messages: RetainedTrie,
     pub retain_timer: Timer<Arc<Retain>>,
     pub retain_topics: BTreeMap<TopicName, Arc<Retain>>,
+    pub n_events: usize,
+    pub n_requests: usize,
 }
 
 impl FinState {
     fn to_json(&self) -> String {
-        format!(concat!("{{ }}"))
+        format!(
+            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            "n_events", self.n_events, "n_requests", self.n_requests,
+        )
     }
 }
 
@@ -110,7 +131,7 @@ impl Drop for Cluster {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
             Inner::Tx(_waker, _tx) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
@@ -213,7 +234,7 @@ impl Cluster {
         };
 
         let flusher = Flusher::from_config(&self.config)?.spawn(app_tx.clone())?;
-        let flusher_tx = flusher.to_tx();
+        let flusher_tx = flusher.to_tx("cluster-spawn");
 
         let topic_filters = SubscribedTrie::default();
         let retained_messages = RetainedTrie::default();
@@ -234,6 +255,9 @@ impl Cluster {
                 rebalancer,
                 topic_filters: topic_filters.clone(),
                 retained_messages: retained_messages.clone(),
+
+                n_events: 0,
+                n_requests: 0,
 
                 app_tx: app_tx.clone(),
             }),
@@ -274,7 +298,10 @@ impl Cluster {
                 config: &self.config,
                 cluster: &cluster,
                 // TODO: include replica-shards in ticker_shards
-                shards: active_shards.iter().map(|(_, shard)| shard.to_tx()).collect(),
+                shards: active_shards
+                    .iter()
+                    .map(|(_, shard)| shard.to_tx("ticker"))
+                    .collect(),
                 app_tx: &app_tx,
             };
             let ticker = Self::spawn_ticker(args)?;
@@ -283,34 +310,16 @@ impl Cluster {
                 Inner::Handle(_waker, thrd) => {
                     thrd.request(Request::Set { listener, ticker, active_shards })??;
                 }
-                _ => unreachable!(),
+                inner => unreachable!("{} {:?}", self.prefix, inner),
             }
         }
 
         Ok(cluster)
     }
 
-    pub(crate) fn to_tx(&self) -> Self {
-        let inner = match &self.inner {
-            Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(waker), thrd.to_tx()),
-            Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
-            _ => unreachable!(),
-        };
-        let mut val = Cluster {
-            name: self.config.name.clone(),
-            prefix: String::default(),
-            config: self.config.clone(),
-            inner,
-        };
-        val.prefix = val.prefix();
-
-        debug!("{} cloned", val.prefix);
-        val
-    }
-
     fn spawn_listener(args: SpawnListener) -> Result<Listener> {
         let listener = Listener::from_config(args.config)?;
-        listener.spawn(args.cluster.to_tx(), args.app_tx.clone())
+        listener.spawn(args.cluster.to_tx("listener"), args.app_tx.clone())
     }
 
     fn spawn_active_shards(args: SpawnShards) -> Result<BTreeMap<u32, Shard>> {
@@ -318,8 +327,8 @@ impl Cluster {
         for shard_id in 0..args.config.num_shards {
             let shard = {
                 let spawn_args = crate::broker::shard::SpawnArgs {
-                    cluster: args.cluster.to_tx(),
-                    flusher: args.flusher_tx.to_tx(),
+                    cluster: args.cluster.to_tx("shard"),
+                    flusher: args.flusher_tx.to_tx("shard"),
                     topic_filters: args.topic_filters.clone(),
                     retained_messages: args.retained_messages.clone(),
                 };
@@ -335,7 +344,7 @@ impl Cluster {
 
     fn spawn_ticker(args: SpawnTicker) -> Result<Ticker> {
         let ticker_args = ticker::SpawnArgs {
-            cluster: Box::new(args.cluster.to_tx()),
+            cluster: Box::new(args.cluster.to_tx("ticker")),
             shards: args.shards,
             app_tx: args.app_tx.clone(),
         };
@@ -347,6 +356,24 @@ impl Cluster {
             let iter = active_shards.iter().map(|(id, s)| (*id, s.to_msg_tx()));
             shard.set_shard_queues(BTreeMap::from_iter(iter));
         }
+    }
+
+    pub(crate) fn to_tx(&self, who: &str) -> Self {
+        let inner = match &self.inner {
+            Inner::Handle(waker, thrd) => Inner::Tx(Arc::clone(waker), thrd.to_tx()),
+            Inner::Tx(waker, tx) => Inner::Tx(Arc::clone(waker), tx.clone()),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+        let mut val = Cluster {
+            name: self.config.name.clone(),
+            prefix: String::default(),
+            config: self.config.clone(),
+            inner,
+        };
+        val.prefix = val.prefix();
+
+        debug!("{} cloned for {}", val.prefix, who);
+        val
     }
 }
 
@@ -380,7 +407,7 @@ impl Cluster {
     pub(crate) fn wake(&self) {
         match &self.inner {
             Inner::Tx(waker, _) => allow_panic!(self, waker.wake()),
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
@@ -390,7 +417,7 @@ impl Cluster {
                 let req = Request::AddConnection(args);
                 tx.request(req)??;
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         Ok(())
@@ -402,7 +429,7 @@ impl Cluster {
                 let req = Request::SetRetainTopic { publish };
                 tx.post(req)?;
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
 
         Ok(())
@@ -414,7 +441,7 @@ impl Cluster {
                 let req = Request::ResetRetainTopic { topic_name };
                 tx.post(req)?;
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
 
         Ok(())
@@ -431,7 +458,7 @@ impl Cluster {
                 thrd.request(Request::Close).ok();
                 thrd.close_wait()
             }
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
@@ -466,7 +493,7 @@ impl Threadable for Cluster {
         match &self.inner {
             Inner::Main(_) => self.handle_close(Request::Close, &mut rt),
             Inner::Close(_) => Response::Ok,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         info!("{} thread exit", self.prefix);
@@ -502,7 +529,8 @@ impl Cluster {
             }
         };
 
-        trace!("{} polled and got {} events", self.prefix, count);
+        self.incr_n_events(count);
+
         exit
     }
 
@@ -514,7 +542,8 @@ impl Cluster {
 
         let mut status = pending_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
-        trace!("{} process {} requests closed:false", self.prefix, reqs.len());
+
+        self.incr_n_requests(reqs.len());
 
         // TODO: review control-channel handling for all threads. Should we panic or
         // return error.
@@ -553,7 +582,7 @@ impl Cluster {
 
         let RunLoop { retained_messages, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         // gather all retained messages and cleanup the RetainedTrie and
@@ -579,7 +608,7 @@ impl Cluster {
     fn handle_set(&mut self, req: Request) -> Response {
         let run_loop = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         match req {
@@ -599,7 +628,7 @@ impl Cluster {
 
         let RunLoop { retained_messages, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         let publish = match req {
@@ -634,13 +663,13 @@ impl Cluster {
     fn handle_reset_retain_topic(&mut self, req: Request, rt: &mut Rt) {
         use crate::timer::TimeoutValue;
 
-        let topic_name = match req {
-            Request::ResetRetainTopic { topic_name } => topic_name,
-            _ => unreachable!(),
-        };
-
         let RunLoop { retained_messages, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let topic_name = match req {
+            Request::ResetRetainTopic { topic_name } => topic_name,
             _ => unreachable!(),
         };
 
@@ -656,16 +685,16 @@ impl Cluster {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use crate::broker::shard::AddSessionArgs;
 
+        let RunLoop { active_shards, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
         let AddConnectionArgs { conn, pkt: connect } = match req {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
         let remote_addr = conn.peer_addr().unwrap();
-
-        let RunLoop { active_shards, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            _ => unreachable!(),
-        };
 
         let client_id = connect.payload.client_id.clone();
         let shard_id =
@@ -696,10 +725,10 @@ impl Cluster {
         let mut run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
             Inner::Close(_) => return Response::Ok,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        info!("{} close cluster", self.prefix);
+        info!("{} closing cluster", self.prefix);
 
         mem::drop(run_loop.poll);
         mem::drop(run_loop.rebalancer);
@@ -731,6 +760,8 @@ impl Cluster {
             retained_messages: run_loop.retained_messages,
             retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
             retain_topics: mem::replace(&mut rt.retain_topics, BTreeMap::default()),
+            n_events: run_loop.n_events,
+            n_requests: run_loop.n_requests,
         };
 
         info!("{} stats {}", self.prefix, fin_state.to_json());
@@ -742,6 +773,21 @@ impl Cluster {
 }
 
 impl Cluster {
+    fn incr_n_events(&mut self, count: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_events, .. }) => *n_events += count,
+            Inner::Close(fin_stats) => fin_stats.n_events += count,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_requests(&mut self, count: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += count,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
     fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",
@@ -756,14 +802,14 @@ impl Cluster {
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
             Inner::Main(RunLoop { poll, .. }) => poll,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn as_app_tx(&self) -> &mpsc::SyncSender<String> {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,
-            _ => unreachable!(),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }

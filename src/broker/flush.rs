@@ -1,4 +1,4 @@
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 
 use std::{thread, time};
 
@@ -86,7 +86,7 @@ impl Drop for Flusher {
 
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_thrd) => debug!("{} drop ...", self.prefix),
             Inner::Tx(_tx) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
@@ -152,7 +152,7 @@ impl Flusher {
         Ok(flush)
     }
 
-    pub fn to_tx(&self) -> Self {
+    pub fn to_tx(&self, who: &str) -> Self {
         let inner = match &self.inner {
             Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
             Inner::Tx(tx) => Inner::Tx(tx.clone()),
@@ -167,7 +167,7 @@ impl Flusher {
         };
         flush.prefix = flush.prefix();
 
-        debug!("{} cloned", flush.prefix);
+        debug!("{} cloned for {}", flush.prefix, who);
         flush
     }
 }

@@ -133,7 +133,7 @@ impl Drop for Miot {
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_waker, _thrd) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
@@ -399,7 +399,7 @@ impl Miot {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let shard = shard.to_tx();
+        let shard = shard.to_tx("miot-socket-to-session");
 
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
@@ -440,7 +440,7 @@ impl Miot {
             Inner::Main(RunLoop { shard, conns, .. }) => (shard, conns),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let shard = shard.to_tx();
+        let shard = shard.to_tx("miot-session-to-socket");
 
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?

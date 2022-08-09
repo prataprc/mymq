@@ -192,7 +192,7 @@ impl Drop for Shard {
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_hndl) => debug!("{} drop ...", self.prefix),
             Inner::Tx(_waker, _tx) => debug!("{} drop ...", self.prefix),
             Inner::MsgTx(_waker, _tx) => debug!("{} drop ...", self.prefix),
@@ -301,7 +301,7 @@ impl Shard {
             let (config, miot_id) = (self.config.clone(), self.shard_id);
             let miot = {
                 let miot = Miot::from_config(config, miot_id)?;
-                miot.spawn(shard.to_tx(), app_tx.clone())?
+                miot.spawn(shard.to_tx("miot"), app_tx.clone())?
             };
             match &shard.inner {
                 Inner::Handle(Handle { thrd, .. }) => {
@@ -351,7 +351,7 @@ impl Shard {
         Ok(shard)
     }
 
-    pub fn to_tx(&self) -> Self {
+    pub fn to_tx(&self, who: &str) -> Self {
         let inner = match &self.inner {
             Inner::Handle(Handle { waker, thrd, .. }) => {
                 Inner::Tx(Arc::clone(waker), thrd.to_tx())
@@ -370,7 +370,7 @@ impl Shard {
         };
         shard.prefix = shard.prefix();
 
-        debug!("{} cloned", shard.prefix);
+        debug!("{} cloned for {}", shard.prefix, who);
         shard
     }
 
@@ -392,7 +392,6 @@ impl Shard {
         };
         shard.prefix = shard.prefix();
 
-        debug!("{} cloned", shard.prefix);
         shard
     }
 }

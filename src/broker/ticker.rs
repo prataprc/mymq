@@ -1,4 +1,4 @@
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 
 use std::{mem, sync::mpsc, thread, time};
 
@@ -56,9 +56,12 @@ pub struct FinState {
 
 impl FinState {
     fn to_json(&self) -> String {
+        let born = (time::UNIX_EPOCH.elapsed().unwrap() - self.born.elapsed()).as_secs();
+        let dead = (time::UNIX_EPOCH.elapsed().unwrap() - self.dead.elapsed()).as_secs();
+
         format!(
-            concat!("{{ {:?}: \"{:?}\", {:?}: {}, {:?}: \"{:?}\" }}"),
-            "born", self.born, "ticket_count", self.ticker_count, "dead", self.dead
+            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {} }}"),
+            "born", born, "ticket_count", self.ticker_count, "dead", dead
         )
     }
 }
@@ -81,7 +84,7 @@ impl Drop for Ticker {
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
-            Inner::Init => debug!("{} drop ...", self.prefix),
+            Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_thrd) => debug!("{} invalid drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
