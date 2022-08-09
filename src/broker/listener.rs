@@ -56,6 +56,7 @@ struct RunLoop {
     /// Statistics
     n_polls: usize,
     n_events: usize,
+    n_requests: usize,
     n_accepted: usize,
 
     /// Back channel communicate with application.
@@ -67,6 +68,8 @@ pub struct FinState {
     pub n_polls: usize,
     /// Number events received via mio-poll.
     pub n_events: usize,
+    /// Number of requests received from control-queue.
+    pub n_requests: usize,
     /// Total number of connections accepted.
     pub n_accepted: usize,
 }
@@ -74,11 +77,13 @@ pub struct FinState {
 impl FinState {
     fn to_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {} }}"),
+            concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
             "n_polls",
             self.n_polls,
             "n_events",
             self.n_events,
+            "n_requests",
+            self.n_requests,
             "n_accepted",
             self.n_accepted
         )
@@ -169,6 +174,7 @@ impl Listener {
 
                 n_polls: usize::default(),
                 n_events: usize::default(),
+                n_requests: usize::default(),
                 n_accepted: usize::default(),
 
                 app_tx,
@@ -254,7 +260,6 @@ impl Listener {
         let exit = 'outer: loop {
             match iter.next() {
                 Some(event) => {
-                    trace!("{}r poll-event token:{}", self.prefix, event.token().0);
                     count += 1;
 
                     match event.token() {
@@ -283,7 +288,6 @@ impl Listener {
 
         self.incr_n_events(count);
 
-        debug!("{}, polled and got {} events", self.prefix, count);
         exit
     }
 
@@ -294,7 +298,8 @@ impl Listener {
 
         let mut status = pending_requests(&self.prefix, rx, CONTROL_CHAN_SIZE);
         let reqs = status.take_values();
-        debug!("{} process {} requests closed:false", self.prefix, reqs.len());
+
+        self.incr_n_requests(reqs.len());
 
         let mut closed = false;
         for req in reqs.into_iter() {
@@ -322,6 +327,8 @@ impl Listener {
 
         match server.accept() {
             Ok((conn, addr)) => {
+                info!("{} incoming connection from {}", self.prefix, addr);
+
                 assert_eq!(conn.peer_addr().unwrap(), addr);
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
@@ -330,7 +337,8 @@ impl Listener {
                     config: self.config.clone(),
                     cluster: cluster.to_tx("handshake"),
                 };
-                let _thrd = Thread::spawn_sync("handshake", 1, hs);
+                let thrd = Thread::spawn_sync("handshake", 1, hs);
+                thrd.drop();
 
                 *n_accepted += 1;
                 QueueStatus::Ok(Vec::new())
@@ -366,6 +374,7 @@ impl Listener {
         let fin_state = FinState {
             n_polls: run_loop.n_polls,
             n_events: run_loop.n_events,
+            n_requests: run_loop.n_requests,
             n_accepted: run_loop.n_accepted,
         };
 
@@ -389,6 +398,14 @@ impl Listener {
         match &mut self.inner {
             Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
             Inner::Close(stats) => stats.n_events += n,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn incr_n_requests(&mut self, n: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += n,
+            Inner::Close(stats) => stats.n_requests += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

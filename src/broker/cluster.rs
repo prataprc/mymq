@@ -312,6 +312,8 @@ impl Cluster {
             }
         }
 
+        info!("{} listening on {}", self.prefix, self.config.port);
+
         Ok(cluster)
     }
 

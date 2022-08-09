@@ -233,6 +233,13 @@ where
             Err(err) => panic::resume_unwind(err),
         }
     }
+
+    /// If thread does not need to join back with its parent, then parent thread can
+    /// call drop() instead of close_wait().
+    pub fn drop(mut self) {
+        std::mem::drop(self.tx.take());
+        let _handle = self.handle.take().unwrap();
+    }
 }
 
 impl<T, Q, R> Thread<T, Q, R>

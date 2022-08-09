@@ -414,6 +414,7 @@ impl Client {
     }
 }
 
+#[allow(dead_code)]
 enum ClientIO {
     Blocking {
         sock: net::TcpStream,
