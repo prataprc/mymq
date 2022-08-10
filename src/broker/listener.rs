@@ -45,11 +45,11 @@ impl fmt::Debug for Inner {
 }
 
 struct RunLoop {
-    /// Mio poller for asynchronous handling, aggregate events from server and
+    /// Mio poller for asynchronous handling, aggregate events from listener and
     /// thread-waker.
     poll: mio::Poll,
-    /// MQTT server listening on `port`.
-    server: mio::net::TcpListener,
+    /// MQTT listener listening on `port`.
+    listener: mio::net::TcpListener,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
 
@@ -134,8 +134,8 @@ impl ToJson for Listener {
 impl Listener {
     /// Poll register token for waker event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
-    /// Poll register for server TcpStream.
-    pub const TOKEN_SERVER: mio::Token = mio::Token(2);
+    /// Poll register for listener TcpStream.
+    pub const TOKEN_LISTENER: mio::Token = mio::Token(2);
 
     /// Create a listener from configuration. Listener shall be in `Init` state. To start
     /// this listener thread call [Listener::spawn].
@@ -154,13 +154,14 @@ impl Listener {
     pub fn spawn(self, cluster: Cluster, app_tx: AppTx) -> Result<Listener> {
         use mio::{Interest, Waker};
 
-        let mut server = {
+        let mut listener = {
             let sock_addr: net::SocketAddr = self.server_address().parse().unwrap();
             mio::net::TcpListener::bind(sock_addr)?
         };
 
+        let interests = Interest::READABLE;
         let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
-        poll.registry().register(&mut server, Self::TOKEN_SERVER, Interest::READABLE)?;
+        poll.registry().register(&mut listener, Self::TOKEN_LISTENER, interests)?;
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
 
         let mut listener = Listener {
@@ -169,7 +170,7 @@ impl Listener {
             config: self.config.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
-                server: server,
+                listener,
                 cluster: Box::new(cluster),
 
                 n_polls: usize::default(),
@@ -272,7 +273,7 @@ impl Listener {
                                 (QueueStatus::Disconnected(_), _) => break 'outer true,
                             }
                         },
-                        Self::TOKEN_SERVER => loop {
+                        Self::TOKEN_LISTENER => loop {
                             match self.accept_conn() {
                                 QueueStatus::Ok(_) => (),
                                 QueueStatus::Block(_) => break,
@@ -320,12 +321,12 @@ impl Listener {
         use crate::broker::Handshake;
         use std::io;
 
-        let RunLoop { server, cluster, n_accepted, .. } = match &mut self.inner {
+        let RunLoop { listener, cluster, n_accepted, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        match server.accept() {
+        match listener.accept() {
             Ok((conn, addr)) => {
                 info!("{} incoming connection from {}", self.prefix, addr);
 
@@ -338,7 +339,7 @@ impl Listener {
                     cluster: cluster.to_tx("handshake"),
                 };
                 let thrd = Thread::spawn_sync("handshake", 1, hs);
-                thrd.drop();
+                thrd.drop(); // alternative to close_wait()
 
                 *n_accepted += 1;
                 QueueStatus::Ok(Vec::new())
@@ -367,7 +368,7 @@ impl Listener {
         info!("{} closing listener", self.prefix);
 
         mem::drop(run_loop.poll);
-        mem::drop(run_loop.server);
+        mem::drop(run_loop.listener);
         mem::drop(run_loop.cluster);
         mem::drop(run_loop.app_tx);
 
