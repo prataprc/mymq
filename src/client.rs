@@ -1,11 +1,13 @@
 //! Module implement MQTT Client.
 
+use log::trace;
+
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 #[cfg(windows)]
 use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
-use std::{error::Error, io, mem, net, time};
+use std::{io, mem, net, time};
 
 use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
 
@@ -88,13 +90,14 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
+        let mut client = self.into_client(remote);
+
         let (cio, connack) = {
-            let connect = self.to_connect();
+            let connect = client.to_connect(true /*clean_start*/);
             let blocking = true;
-            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
+            ClientIO::handshake(&client, connect, sock, blocking)?
         };
 
-        let mut client = self.into_client(remote);
         client.cio = cio;
         client.connack = connack;
 
@@ -116,59 +119,18 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
+        let mut client = self.into_client(remote);
+
         let (cio, connack) = {
-            let connect = self.to_connect();
+            let connect = client.to_connect(true /*clean_start*/);
             let blocking = false;
-            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
+            ClientIO::handshake(&client, connect, sock, blocking)?
         };
 
-        let mut client = self.into_client(remote);
         client.cio = cio;
         client.connack = connack;
 
         Ok(client)
-    }
-
-    fn to_connect(&self) -> v5::Connect {
-        let mut flags = vec![v5::ConnectFlags::CLEAN_START];
-        if self.is_will() {
-            flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.connopts.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
-                v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
-                v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
-                v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
-            });
-            match self.connopts.will_retain {
-                Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
-                Some(_) | None => (),
-            }
-        }
-        match &self.connect_payload.username {
-            Some(_) => flags.push(v5::ConnectFlags::USERNAME),
-            None => (),
-        }
-        match &self.connect_payload.password {
-            Some(_) => flags.push(v5::ConnectFlags::PASSWORD),
-            None => (),
-        }
-
-        let mut connect = v5::Connect {
-            protocol_name: "MQTT".to_string(),
-            protocol_version: self.protocol_version,
-            flags: v5::ConnectFlags::new(&flags),
-            keep_alive: self.connopts.keep_alive,
-            properties: self.connect_properties.clone(),
-            payload: self.connect_payload.clone(),
-        };
-        connect.normalize();
-
-        connect
-    }
-
-    fn is_will(&self) -> bool {
-        self.connect_payload.will_topic.is_some()
-            && self.connect_payload.will_properties.is_some()
-            && self.connect_payload.will_payload.is_some()
     }
 
     fn into_client(self, remote: net::SocketAddr) -> Client {
@@ -220,6 +182,9 @@ pub struct Client {
 
 /// Client initialization and setup
 impl Client {
+    const DEF_WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(3600);
+    const DEF_READ_TIMEOUT: time::Duration = time::Duration::from_secs(3600);
+
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
     /// else this call might panic. Returns a clone of underlying socket with read-only
     /// permission. After calling this method, `self` becomes a write-only instance.
@@ -270,9 +235,9 @@ impl Client {
         }
 
         let (cio, connack) = {
-            let connect = self.to_connect();
+            let connect = self.to_connect(false /*clean_start*/);
             let blocking = self.cio.is_blocking();
-            ClientIO::handshake(self.max_packet_size, connect, sock, blocking)?
+            ClientIO::handshake(&self, connect, sock, blocking)?
         };
         self.cio = cio;
         self.connack = connack;
@@ -280,8 +245,12 @@ impl Client {
         Ok(self)
     }
 
-    fn to_connect(&self) -> v5::Connect {
+    fn to_connect(&self, clean_start: bool) -> v5::Connect {
         let mut flags = vec![];
+
+        if clean_start {
+            flags.push(v5::ConnectFlags::CLEAN_START)
+        }
         if self.is_will() {
             flags.push(v5::ConnectFlags::WILL_FLAG);
             flags.push(match self.connopts.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
@@ -303,7 +272,7 @@ impl Client {
             None => (),
         }
 
-        let mut pkt = v5::Connect {
+        let mut connect = v5::Connect {
             protocol_name: "MQTT".to_string(),
             protocol_version: self.protocol_version,
             flags: v5::ConnectFlags::new(&flags),
@@ -311,9 +280,9 @@ impl Client {
             properties: self.connect_properties.clone(),
             payload: self.connect_payload.clone(),
         };
-        pkt.normalize();
+        connect.normalize();
 
-        pkt
+        connect
     }
 
     fn is_will(&self) -> bool {
@@ -447,21 +416,21 @@ enum ClientIO {
 
 impl ClientIO {
     fn handshake(
-        max_packet_size: u32,
+        client: &Client,
         connect: v5::Connect,
         mut sock: net::TcpStream,
         blocking: bool,
     ) -> io::Result<(ClientIO, v5::ConnAck)> {
-        let max_packet_size = connect.max_packet_size(max_packet_size);
+        let max_packet_size = connect.max_packet_size(client.max_packet_size);
 
         let mut pktr = MQTTRead::new(max_packet_size);
         let mut pktw = MQTTWrite::new(&[], max_packet_size);
 
-        pktw = write_pkt(pktw, &mut sock, v5::Packet::Connect(connect))?;
+        write_packet(client, &mut sock, &mut pktw, v5::Packet::Connect(connect))?;
 
-        let (val, connack) = match read_pkt(pktr, &mut sock)? {
-            (pktr, v5::Packet::ConnAck(connack)) => (pktr, connack),
-            (_, pkt) => {
+        let (val, connack) = match read_packet(client, &mut sock, &mut pktr)? {
+            v5::Packet::ConnAck(connack) => (pktr, connack),
+            pkt => {
                 let msg = format!("unexpected in handshake {:?}", pkt.to_packet_type());
                 Err(io::Error::new(io::ErrorKind::InvalidData, msg))?
             }
@@ -597,65 +566,153 @@ impl ClientIO {
     }
 }
 
-fn write_pkt<W>(
-    mut pktw: MQTTWrite,
-    sock: &mut W,
-    pkt: v5::Packet,
-) -> io::Result<MQTTWrite>
-where
-    W: io::Write,
-{
-    let blob = pkt
-        .encode()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+impl ClientIO {
+    fn read_packet(&mut self, c: &Client) -> io::Result<v5::Packet> {
+        match self {
+            ClientIO::Blocking { sock, pktr, .. } => read_packet(c, sock, pktr),
+            ClientIO::NoBlock { sock, pktr, .. } => read_packet(c, sock, pktr),
+            ClientIO::BlockRd { sock, pktr, .. } => read_packet(c, sock, pktr),
+            ClientIO::NoBlockRd { sock, pktr, .. } => read_packet(c, sock, pktr),
+            _ => unreachable!(),
+        }
+    }
 
-    pktw = pktw.reset(blob.as_ref());
-
-    loop {
-        pktw = match pktw.write(sock) {
-            Ok((pktw, false)) => break Ok(pktw),
-            Ok((pktw, _would_block)) => pktw,
-            Err(err) => match err.source() {
-                Some(source) => match source.downcast_ref::<io::Error>() {
-                    Some(err) => break Err(err.kind().into()),
-                    None => break Err(io::ErrorKind::Other.into()),
-                },
-                None => break Err(io::ErrorKind::Other.into()),
-            },
+    fn write_packet(&mut self, c: &Client, pkt: v5::Packet) -> io::Result<()> {
+        match self {
+            ClientIO::Blocking { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
+            ClientIO::NoBlock { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
+            ClientIO::BlockWt { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
+            ClientIO::NoBlockWt { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
+            _ => unreachable!(),
         }
     }
 }
 
-fn read_pkt<R>(mut pktr: MQTTRead, sock: &mut R) -> io::Result<(MQTTRead, v5::Packet)>
+fn read_packet<R>(c: &Client, sock: &mut R, pktr: &mut MQTTRead) -> io::Result<v5::Packet>
 where
     R: io::Read,
 {
-    pktr = pktr.reset();
+    use crate::MQTTRead::{Fin, Header, Init, Remain};
 
-    let res: io::Result<MQTTRead> = loop {
-        pktr = match pktr.read(sock) {
-            Ok((pktr, false)) => break Ok(pktr),
-            Ok((pktr, _would_block)) => pktr,
-            Err(err) => match err.source() {
-                Some(source) => match source.downcast_ref::<io::Error>() {
-                    Some(err) => break Err(err.kind().into()),
-                    None => break Err(io::ErrorKind::Other.into()),
-                },
-                None => break Err(io::ErrorKind::Other.into()),
-            },
-        }
+    let mut timeout = RwTimeout::default();
+
+    let mut pr = mem::replace(pktr, MQTTRead::default());
+    let read_timeout = c.read_timeout.unwrap_or(Client::DEF_READ_TIMEOUT);
+
+    let res = loop {
+        let (val, _would_block) = match pr.read(sock) {
+            Ok(tuple) => tuple,
+            Err(err) => Err(io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?,
+        };
+        pr = val;
+
+        match &pr {
+            Init { .. } | Header { .. } | Remain { .. } if !timeout.read_elapsed() => {
+                trace!("read retrying");
+                timeout.set_read_timeout(true, read_timeout);
+            }
+            Init { .. } | Header { .. } | Remain { .. } => {
+                timeout.set_read_timeout(false, read_timeout);
+                let s = format!("disconnect, pkt-read timesout {:?}", timeout);
+                break Err(io::Error::new(io::ErrorKind::TimedOut, s));
+            }
+            Fin { .. } => {
+                let pkt = match pr.parse() {
+                    Ok(pkt) => pkt,
+                    Err(err) => {
+                        Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
+                    }
+                };
+                pr = pr.reset();
+                break Ok(pkt);
+            }
+            MQTTRead::None => unreachable!(),
+        };
     };
 
-    pktr = res?;
+    let _pr_none = mem::replace(pktr, pr);
+    res
+}
 
-    match pktr.parse() {
-        Ok(pkt) => Ok((pktr, pkt)),
-        Err(err) => match err.source() {
-            Some(source) => match source.downcast_ref::<io::Error>() {
-                Some(err) => Err(err.kind().into()),
-                None => Err(io::ErrorKind::Other.into()),
-            },
-            None => Err(io::ErrorKind::Other.into()),
-        },
+fn write_packet<W>(
+    client: &Client,
+    sock: &mut W,
+    pktw: &mut MQTTWrite,
+    pkt: v5::Packet,
+) -> io::Result<()>
+where
+    W: io::Write,
+{
+    use crate::MQTTWrite::{Fin, Init, Remain};
+
+    let mut timeout = RwTimeout::default();
+
+    let mut pw = mem::replace(pktw, MQTTWrite::default());
+    let write_timeout = client.write_timeout.unwrap_or(Client::DEF_WRITE_TIMEOUT);
+
+    let blob = pkt
+        .encode()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    pw = pw.reset(blob.as_ref());
+
+    pw = loop {
+        let (val, _would_block) = pw
+            .write(sock)
+            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
+        pw = val;
+
+        match &pw {
+            Init { .. } | Remain { .. } if timeout.write_elapsed() => {
+                trace!("write retrying");
+                timeout.set_write_timeout(true, write_timeout);
+            }
+            Init { .. } | Remain { .. } => {
+                timeout.set_write_timeout(false, write_timeout);
+                let s = format!("packet write fail after {:?}", timeout);
+                break Err(io::Error::new(io::ErrorKind::TimedOut, s));
+            }
+            Fin { .. } => break Ok(pw),
+            MQTTWrite::None => unreachable!(),
+        };
+    }?;
+
+    let _pw_none = mem::replace(pktw, pw);
+    Ok(())
+}
+
+#[derive(Default, Debug)]
+struct RwTimeout {
+    timeout: Option<time::Instant>,
+}
+
+impl RwTimeout {
+    fn read_elapsed(&self) -> bool {
+        match &self.timeout {
+            Some(timeout) if timeout > &time::Instant::now() => true,
+            Some(_) | None => false,
+        }
+    }
+
+    fn set_read_timeout(&mut self, retry: bool, timeout: time::Duration) {
+        if retry && self.timeout.is_none() {
+            self.timeout = Some(time::Instant::now() + timeout);
+        } else if retry == false {
+            self.timeout = None;
+        }
+    }
+
+    fn write_elapsed(&self) -> bool {
+        match &self.timeout {
+            Some(timeout) if timeout > &time::Instant::now() => true,
+            Some(_) | None => false,
+        }
+    }
+
+    fn set_write_timeout(&mut self, retry: bool, timeout: time::Duration) {
+        if retry && self.timeout.is_none() {
+            self.timeout = Some(time::Instant::now() + timeout);
+        } else if retry == false {
+            self.timeout = None;
+        }
     }
 }

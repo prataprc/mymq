@@ -1197,14 +1197,15 @@ impl Shard {
         {
             let packet = session.success_ack(&connect, self);
             let msgs = vec![Message::new_conn_ack(packet)];
-            session.as_mut_out_acks().extend(msgs.into_iter())
-        }
-        match session.out_acks_flush() {
-            QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
-                error!("{} fail to send CONNACK in add_session", self.prefix);
-                return Response::Ok;
+            session.as_mut_out_acks().extend(msgs.into_iter());
+
+            match session.out_acks_flush() {
+                QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
+                    error!("{} fail to send CONNACK in add_session", self.prefix);
+                    return Response::Ok;
+                }
+                QueueStatus::Ok(_) => (),
             }
-            QueueStatus::Ok(_) => (),
         }
 
         // add_connection further down shall wake miot-thread.
@@ -1212,6 +1213,7 @@ impl Shard {
             Inner::MainActive(active_loop) => active_loop,
             _ => unreachable!(),
         };
+
         // nuke existing session, if already present for this client_id
         if let Some(_) = sessions.get(&client_id) {
             if let Some(mut session) = sessions.remove(&client_id) {

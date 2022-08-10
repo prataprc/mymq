@@ -151,7 +151,7 @@ fn log_format(f: &mut Formatter, r: &log::Record<'_>) -> io::Result<()> {
     writeln!(
         f,
         "{} [{:5}] [{:>13}] {}",
-        chrono::Local::now().format("%Y-%m-%dT%H:%M:%.3f%Z"),
+        chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%Z"),
         level_style.value(r.level()),
         loc,
         r.args()

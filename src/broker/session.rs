@@ -1,7 +1,6 @@
 use log::{debug, error, trace};
 
-use std::collections::BTreeMap;
-use std::{cmp, mem, net};
+use std::{cmp, collections::BTreeMap, fmt, mem, net, result};
 
 use crate::broker::{Config, SubscribedTrie};
 use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus, Shard};
@@ -97,7 +96,16 @@ enum SessionState {
     },
     #[allow(dead_code)]
     Cold,
-    None,
+}
+
+impl fmt::Debug for SessionState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            SessionState::Active { .. } => write!(f, "SessionState::Active"),
+            SessionState::Replica { .. } => write!(f, "SessionState::Replica"),
+            SessionState::Cold { .. } => write!(f, "SessionState::Cold"),
+        }
+    }
 }
 
 impl SessionState {
@@ -111,16 +119,16 @@ impl SessionState {
                     _ => (),
                 }
             }
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         }
     }
 
-    fn out_qos0(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let (prefix, config, qos0_back_log) = match self {
-            SessionState::Active { prefix, config, qos0_back_log, .. } => {
-                (prefix, config, qos0_back_log)
+    fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+        let (prefix, config, miot_tx, qos0_back_log) = match self {
+            SessionState::Active { prefix, config, miot_tx, qos0_back_log, .. } => {
+                (prefix, config, miot_tx, qos0_back_log)
             }
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         let m = qos0_back_log.len();
@@ -137,32 +145,34 @@ impl SessionState {
             let msg = msg.into_packet(None);
             qos0_back_log.push(msg)
         }
-
         let back_log = mem::replace(qos0_back_log, vec![]);
-        let mut status = sess.flush_to_miot(back_log);
+
+        let mut status = flush_to_miot(prefix, miot_tx, back_log);
         let _empty = mem::replace(qos0_back_log, status.take_values());
         status
     }
 
-    fn out_qos(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueMsg {
+    fn out_qos(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         match self {
-            SessionState::Active { .. } => self.out_qos_active(sess, msgs),
-            SessionState::Replica { .. } => self.out_qos_replica(sess, msgs),
-            _ => unreachable!(),
+            SessionState::Active { .. } => self.out_qos_active(msgs),
+            SessionState::Replica { .. } => self.out_qos_replica(msgs),
+            ss => unreachable!("{:?}", ss),
         }
     }
 
-    fn out_qos_active(&mut self, sess: &Session, msgs: Vec<Message>) -> QueueMsg {
-        let (prefix, config, qos12_unacks, next_packet_id, back_log) = match self {
+    fn out_qos_active(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        let (prefix, config, miot_tx, qos12_unacks, next_packet_id, back_log) = match self
+        {
             SessionState::Active {
                 prefix,
                 config,
+                miot_tx,
                 qos12_unacks,
                 next_packet_id,
                 back_log,
                 ..
-            } => (prefix, config, qos12_unacks, next_packet_id, back_log),
-            _ => unreachable!(),
+            } => (prefix, config, miot_tx, qos12_unacks, next_packet_id, back_log),
+            ss => unreachable!("{:?}", ss),
         };
 
         let m = back_log.len();
@@ -199,7 +209,7 @@ impl SessionState {
             qos12_unacks.insert(msg.to_packet_id(), msg);
         }
 
-        let mut status = sess.flush_to_miot(msgs);
+        let mut status = flush_to_miot(prefix, miot_tx, msgs);
 
         // re-insert, cleanup for remaining messages.
         for msg in status.take_values().into_iter() {
@@ -211,10 +221,10 @@ impl SessionState {
         status
     }
 
-    fn out_qos_replica(&mut self, _sess: &Session, msgs: Vec<Message>) -> QueueMsg {
+    fn out_qos_replica(&mut self, msgs: Vec<Message>) -> QueueMsg {
         let back_log = match self {
             SessionState::Active { back_log, .. } => back_log,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         for msg in msgs.into_iter() {
@@ -230,7 +240,7 @@ impl SessionState {
     fn out_acks_extend(&mut self, msgs: Vec<Message>) {
         let out_acks = match self {
             SessionState::Active { out_acks, .. } => out_acks,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         out_acks.extend(msgs.into_iter());
@@ -239,16 +249,18 @@ impl SessionState {
     fn out_acks_publish(&mut self, packet_id: PacketID) {
         let out_acks = match self {
             SessionState::Active { out_acks, .. } => out_acks,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         out_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
     }
 
-    fn out_acks_flush(&mut self, sess: &Session) -> QueueStatus<Message> {
-        let (inp_qos12, out_acks) = match self {
-            SessionState::Active { inp_qos12, out_acks, .. } => (inp_qos12, out_acks),
-            _ => unreachable!(),
+    fn out_acks_flush(&mut self) -> QueueStatus<Message> {
+        let (prefix, miot_tx, inp_qos12, out_acks) = match self {
+            SessionState::Active { prefix, miot_tx, inp_qos12, out_acks, .. } => {
+                (prefix, miot_tx, inp_qos12, out_acks)
+            }
+            ss => unreachable!("{:?}", ss),
         };
 
         for ack in out_acks.iter() {
@@ -265,11 +277,14 @@ impl SessionState {
                     },
                     _ => (),
                 },
-                _ => unreachable!(),
+                msg => unreachable!("{:?}", msg),
             }
         }
 
-        let mut status = sess.flush_to_miot(mem::replace(out_acks, Vec::default()));
+        let mut status = {
+            let acks = mem::replace(out_acks, Vec::default());
+            flush_to_miot(prefix, miot_tx, acks)
+        };
         let _empty = mem::replace(out_acks, status.take_values());
         status
     }
@@ -282,7 +297,7 @@ impl SessionState {
                     back_log.remove(&out_seqno);
                 }
             }
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         }
     }
 }
@@ -293,7 +308,7 @@ impl SessionState {
             SessionState::Active { prefix, config, topic_aliases, .. } => {
                 (prefix, config, topic_aliases)
             }
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         let (topic_name, topic_alias) = (publ.as_topic_name(), publ.topic_alias());
@@ -351,7 +366,7 @@ impl SessionState {
             SessionState::Active { config, prefix, inp_qos12, .. } => {
                 (config, prefix, inp_qos12)
             }
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         let ignore_dup = config.mqtt_ignore_duplicate;
@@ -375,7 +390,7 @@ impl SessionState {
     fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
         let (prefix, inp_qos12) = match self {
             SessionState::Active { prefix, inp_qos12, .. } => (prefix, inp_qos12),
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         };
 
         match publish.qos {
@@ -398,21 +413,21 @@ impl SessionState {
     fn as_subscriptions(&self) -> &BTreeMap<TopicFilter, v5::Subscription> {
         match self {
             SessionState::Active { subscriptions, .. } => subscriptions,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         }
     }
 
     fn as_mut_subscriptions(&mut self) -> &mut BTreeMap<TopicFilter, v5::Subscription> {
         match self {
             SessionState::Active { subscriptions, .. } => subscriptions,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         }
     }
 
     fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
         match self {
             SessionState::Active { out_acks, .. } => out_acks,
-            _ => unreachable!(),
+            ss => unreachable!("{:?}", ss),
         }
     }
 }
@@ -512,7 +527,7 @@ impl Session {
             SessionState::Active { session_rx, keep_alive, .. } => {
                 (session_rx, keep_alive)
             }
-            _ => unreachable!(),
+            ss => unreachable!("{} {:?}", self.prefix, ss),
         };
         let mut down_status = session_rx.try_recvs(&self.prefix);
 
@@ -766,27 +781,16 @@ impl Session {
 
     // Handle PUBLISH QoS-0
     pub fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let mut state = mem::replace(&mut self.state, SessionState::None);
-        let status = state.out_qos0(self, msgs);
-        let _none = mem::replace(&mut self.state, state);
-
-        status
+        self.state.out_qos0(msgs)
     }
 
     // Handle PUBLISH QoS-1 and QoS-2
     pub fn out_qos(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let mut state = mem::replace(&mut self.state, SessionState::None);
-        let status = state.out_qos(self, msgs);
-        let _none = mem::replace(&mut self.state, state);
-
-        status
+        self.state.out_qos(msgs)
     }
 
     pub fn out_acks_flush(&mut self) -> QueueStatus<v5::Packet> {
-        let mut state = mem::replace(&mut self.state, SessionState::None);
-        let status = state.out_acks_flush(self);
-        let _none = mem::replace(&mut self.state, state);
-
+        let status = self.state.out_acks_flush();
         status.map(vec![])
     }
 
@@ -796,24 +800,6 @@ impl Session {
 
     pub fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
         self.state.commit_acks(out_seqnos)
-    }
-
-    fn flush_to_miot(&self, mut msgs: Vec<Message>) -> QueueStatus<Message> {
-        // when dropped miot thread woken up.
-        let mut miot_tx = match &self.state {
-            SessionState::Active { miot_tx, .. } => miot_tx.clone(),
-            _ => unreachable!(),
-        };
-
-        let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
-        let mut status = miot_tx.try_sends(&self.prefix, pkts);
-        let pkts = status.take_values();
-
-        let m = msgs.len();
-        let n = pkts.len();
-        msgs.drain(..(m - n));
-
-        status.map(msgs)
     }
 }
 
@@ -837,7 +823,7 @@ impl Session {
     pub fn as_connect(&self) -> &v5::Connect {
         match &self.state {
             SessionState::Active { connect, .. } => connect,
-            _ => unreachable!(),
+            ss => unreachable!("{} {:?}", self.prefix, ss),
         }
     }
 
@@ -850,7 +836,19 @@ impl Session {
     fn to_keep_alive(&self) -> Option<u16> {
         match &self.state {
             SessionState::Active { keep_alive, .. } => keep_alive.keep_alive(),
-            _ => unreachable!(),
+            ss => unreachable!("{} {:?}", self.prefix, ss),
         }
     }
+}
+
+fn flush_to_miot(prefix: &str, miot_tx: &mut PktTx, mut msgs: Vec<Message>) -> QueueMsg {
+    let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
+    let mut status = miot_tx.try_sends(&prefix, pkts);
+    let pkts = status.take_values();
+
+    let m = msgs.len();
+    let n = pkts.len();
+    msgs.drain(..(m - n));
+
+    status.map(msgs)
 }

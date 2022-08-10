@@ -3,9 +3,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use log::{error, warn};
 
 use std::sync::{mpsc, Arc};
-
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 #[allow(unused_imports)]
 use crate::broker::Shard;
@@ -93,7 +91,7 @@ impl MsgRx {
 }
 
 /// Message is a unit of communication between shards hosted on the same node.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum Message {
     // session boundary
     /// Acknowledgement packets to remote client, connected to this session.
@@ -130,6 +128,18 @@ pub enum Message {
         shard_id: u32,        // shard sending the acknowledgement
         last_acked: InpSeqno, // from publishing-shard.
     },
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
+            Message::Packet { .. } => write!(f, "Message::Packet"),
+            Message::Index { .. } => write!(f, "Message::Index"),
+            Message::Routed { .. } => write!(f, "Message::Routed"),
+            Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
+        }
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

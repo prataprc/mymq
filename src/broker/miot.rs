@@ -488,7 +488,9 @@ impl Miot {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
-        info!("{} adding connection {:?} ...", self.prefix, args.conn.peer_addr());
+        let raddr = args.conn.peer_addr().unwrap();
+
+        info!("{} adding connection {} ...", self.prefix, raddr);
 
         let max_packet_size = self.config.mqtt_max_packet_size;
         let (poll, conns, token) = match &mut self.inner {

@@ -123,6 +123,7 @@ macro_rules! log_error {
         use log::error;
 
         error!("{}: {}", $e.kind, $e.description);
+
         match &$e.cause {
             Some(cause) => error!("cause:{}", cause.to_string()),
             None => (),
@@ -131,11 +132,14 @@ macro_rules! log_error {
         #[cfg(feature = "backtrace")]
         use std::backtrace::BacktraceStatus;
         #[cfg(feature = "backtrace")]
-        match $e.backtrace.status() {
-            BacktraceStatus::Unsupported => error!("[BACKTRACE Unsupported]"),
-            BacktraceStatus::Disabled => error!("[BACKTRACE Disabled]"),
-            BacktraceStatus::Captured => {
-                $e.backtrace.frames().iter().for_each(|f| error!("{:?}", f))
+        match ($e.backtrace.status(), $e.kind()) {
+            (BacktraceStatus::Unsupported, _) => error!("[BACKTRACE Unsupported]"),
+            (BacktraceStatus::Disabled, _) => error!("[BACKTRACE Disabled]"),
+            (BacktraceStatus::Captured, ErrorKind::Disconnected) => (),
+            (BacktraceStatus::Captured, _) => {
+                for f in $e.backtrace.frames().iter() {
+                    println!("{:?}", f)
+                }
             }
             _ => todo!(),
         }

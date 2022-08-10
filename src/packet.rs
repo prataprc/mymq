@@ -1,13 +1,11 @@
 use log::error;
-use std::{io, thread, time};
+use std::{fmt, io, result, thread, time};
 
 use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement a state machine to asynchronously read from socket using [mio].
-#[derive(Debug)]
 pub enum MQTTRead {
-    None,
     Init {
         data: Vec<u8>,
         max_size: usize,
@@ -29,11 +27,24 @@ pub enum MQTTRead {
         fh: v5::FixedHeader,
         max_size: usize,
     },
+    None,
 }
 
 impl Default for MQTTRead {
     fn default() -> MQTTRead {
         MQTTRead::None
+    }
+}
+
+impl fmt::Debug for MQTTRead {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            MQTTRead::Init { .. } => write!(f, "MQTTRead::Init"),
+            MQTTRead::Header { .. } => write!(f, "MQTTRead::Init"),
+            MQTTRead::Remain { .. } => write!(f, "MQTTRead::Remain"),
+            MQTTRead::Fin { .. } => write!(f, "MQTTRead::Fin"),
+            MQTTRead::None => write!(f, "MQTTRead::None"),
+        }
     }
 }
 
@@ -60,7 +71,7 @@ impl MQTTRead {
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc: "MQTTRead::Init"),
+                Ok(0) => err!(Disconnected, desc: "MQTTRead::Init, empty read"),
                 Ok(n) => {
                     // println!("MQTTRead::Init datal:{} n:{}", data.len(), n);
                     data.extend_from_slice(&scratch[..n]);
@@ -102,7 +113,7 @@ impl MQTTRead {
                 Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Init"),
             },
             Header { byte1, mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header, empty read"),
                 Ok(n) => {
                     // println!("MQTTRead::Header data:{}", data.len());
                     data.extend_from_slice(&scratch[..n]);
@@ -144,7 +155,7 @@ impl MQTTRead {
             Remain { mut data, start, fh, max_size } => {
                 // println!("MQTTRead::Remain::read data:{} start:{}", data.len(), start);
                 match stream.read(&mut data[start..]) {
-                    Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain"),
+                    Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain, empty read"),
                     Ok(n) if (start + n) == data.len() => {
                         let rem = Vec::new();
                         Ok((MQTTRead::Fin { data, rem, fh, max_size }, false))
@@ -253,6 +264,7 @@ impl MQTTRead {
                 data.extend(rem.into_iter());
                 MQTTRead::Init { data, max_size }
             }
+            val @ MQTTRead::Init { .. } => val,
             _ => unreachable!(),
         }
     }
@@ -286,9 +298,7 @@ impl MQTTRead {
 }
 
 /// Type implement a state machine to asynchronously write to socket using [mio].
-#[derive(Debug)]
 pub enum MQTTWrite {
-    None,
     Init {
         data: Vec<u8>,
         max_size: usize,
@@ -302,11 +312,23 @@ pub enum MQTTWrite {
         data: Vec<u8>,
         max_size: usize,
     },
+    None,
 }
 
 impl Default for MQTTWrite {
     fn default() -> MQTTWrite {
         MQTTWrite::None
+    }
+}
+
+impl fmt::Debug for MQTTWrite {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            MQTTWrite::Init { .. } => write!(f, "MQTTWrite::Init"),
+            MQTTWrite::Remain { .. } => write!(f, "MQTTWrite::Remain"),
+            MQTTWrite::Fin { .. } => write!(f, "MQTTWrite::Fin"),
+            MQTTWrite::None => write!(f, "MQTTWrite::None"),
+        }
     }
 }
 
@@ -332,7 +354,7 @@ impl MQTTWrite {
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Init { data, max_size } => match stream.write(&data) {
-                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Init"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Init, empty write"),
                 Ok(n) if n == data.len() => {
                     Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
@@ -352,7 +374,7 @@ impl MQTTWrite {
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Remain { data, start, max_size } => match stream.write(&data[start..]) {
-                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Remain"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Remain, empty write"),
                 Ok(n) if (start + n) == data.len() => {
                     Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
@@ -370,7 +392,7 @@ impl MQTTWrite {
                 Ok(_) => unreachable!(),
             },
             Fin { data, max_size } => Ok((MQTTWrite::Fin { data, max_size }, false)),
-            MQTTWrite::None => unreachable!(),
+            val @ MQTTWrite::None => unreachable!("{:?}", val),
         }
     }
 

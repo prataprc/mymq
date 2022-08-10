@@ -55,11 +55,10 @@ impl Threadable for Handshake {
 
         info!("{} spawn thread config {}", prefix, self.to_config_json());
         info!(
-            "{} new connection {:?}<-{:?} at {:?}",
+            "{} new connection {:?}<-{:?}",
             prefix,
             conn.local_addr().unwrap(),
             conn.peer_addr().unwrap(),
-            now
         );
 
         let (code, connack, connect) = loop {
