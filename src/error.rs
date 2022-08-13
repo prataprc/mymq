@@ -116,6 +116,51 @@ macro_rules! err {
     }};
 }
 
+#[macro_export]
+macro_rules! nerr {
+    ($v:ident, code: $code:ident, $($args:expr),+) => {{
+        let kind = ErrorKind::$v;
+        let description = format!($($args),+);
+        let e = Error {
+            kind,
+            description,
+            code: Some(ReasonCode::$code),
+            loc: format!("{}:{}", file!(), line!()),
+            ..Error::default()
+        };
+
+        log_error!(e);
+        Err(e)
+    }};
+    ($v:ident, try: $res:expr, $($args:expr),+) => {{
+        match $res {
+            Ok(val) => Ok(val),
+            Err(err) => {
+                let e = Error {
+                    kind: ErrorKind::$v,
+                    description: format!($($args),+),
+                    cause: Some(Box::new(err)),
+                    loc: format!("{}:{}", file!(), line!()),
+                    ..Error::default()
+                };
+                log_error!(e);
+                Err(e)
+            }
+        }
+    }};
+    ($v:ident, desc: $($args:expr),+) => {{
+        let kind = ErrorKind::$v;
+        let description = format!($($args),+);
+        let e = Error {
+            kind,
+            description,
+            loc: format!("{}:{}", file!(), line!()),
+            ..Error::default()
+        };
+        Err(e)
+    }};
+}
+
 /// Macro to log error. Suggest using the [err] macro.
 #[cfg_attr(any(feature = "fuzzy", test), macro_export)]
 macro_rules! log_error {

@@ -398,7 +398,7 @@ pub enum Response {
 }
 
 pub struct AddConnectionArgs {
-    pub conn: mio::net::TcpStream,
+    pub sock: mio::net::TcpStream,
     pub pkt: v5::Connect,
 }
 
@@ -690,11 +690,11 @@ impl Cluster {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let AddConnectionArgs { conn, pkt: connect } = match req {
+        let AddConnectionArgs { sock, pkt: connect } = match req {
             Request::AddConnection(args) => args,
             _ => unreachable!(),
         };
-        let remote_addr = conn.peer_addr().unwrap();
+        let raddr = sock.peer_addr().unwrap();
 
         let client_id = connect.payload.client_id.clone();
         let shard_id =
@@ -708,13 +708,10 @@ impl Cluster {
                 todo!()
             }
         };
-        info!(
-            "{} new connection {:?} mapped to shard {}",
-            self.prefix, remote_addr, shard_id
-        );
+        info!("{} new connection {:?} mapped to shard {}", self.prefix, raddr, shard_id);
 
         // Add session to the shard.
-        if let Err(err) = shard.add_session(AddSessionArgs { conn, pkt: connect }) {
+        if let Err(err) = shard.add_session(AddSessionArgs { sock, pkt: connect }) {
             error!("{} error adding session {}", self.prefix, err);
         }
 

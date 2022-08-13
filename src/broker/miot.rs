@@ -412,16 +412,15 @@ impl Miot {
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
-                    let err: Result<()> = err!(Disconnected, desc: "{} socketrx", prefix);
-                    fail_queues.push((client_id.clone(), err.unwrap_err()));
+                    fail_queues.push((client_id.clone(), None));
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
                     error!("{} error in read_packets : {}", prefix, err);
-                    fail_queues.push((client_id.clone(), err));
+                    fail_queues.push((client_id.clone(), Some(err)));
                 }
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                     error!("{} error in read_packets : {}", prefix, err);
-                    fail_queues.push((client_id.clone(), err));
+                    fail_queues.push((client_id.clone(), Some(err)));
                 }
                 Err(err) => unreachable!("{} unexpected err {}", self.prefix, err),
             }
@@ -462,9 +461,7 @@ impl Miot {
                 }
                 (QueueStatus::Disconnected(_), stats) => {
                     wstats.update(&stats);
-                    error!("{} disconnected write_packets ...", prefix);
-                    let err: Result<()> = err!(Disconnected, desc: "");
-                    fail_queues.push((client_id.clone(), err.unwrap_err()));
+                    fail_queues.push((client_id.clone(), None))
                 }
             }
         }

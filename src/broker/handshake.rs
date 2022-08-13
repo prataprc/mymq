@@ -1,6 +1,6 @@
 use log::{error, info};
 
-use std::{io, thread, time};
+use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, Config, SLEEP_10MS};
@@ -15,7 +15,8 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 /// completed, connection is handed over to the [Cluster].
 pub struct Handshake {
     pub prefix: String,
-    pub conn: Option<mio::net::TcpStream>,
+    pub sock: Option<mio::net::TcpStream>,
+    pub raddr: net::SocketAddr,
     pub config: Config,
     pub cluster: Cluster,
 }
@@ -44,7 +45,7 @@ impl Threadable for Handshake {
         use crate::broker::cluster::AddConnectionArgs;
 
         let mut packetr = MQTTRead::new(self.config.mqtt_max_packet_size);
-        let mut conn = self.conn.take().unwrap();
+        let mut sock = self.sock.take().unwrap();
         let timeout = {
             let now = time::Instant::now();
             let connect_timeout = self.config.sock_mqtt_connect_timeout;
@@ -55,12 +56,12 @@ impl Threadable for Handshake {
         info!(
             "{} new connection {:?}<-{:?}",
             self.prefix,
-            conn.local_addr().unwrap(),
-            conn.peer_addr().unwrap(),
+            sock.local_addr().unwrap(),
+            sock.peer_addr().unwrap(),
         );
 
         let (code, connack, connect) = loop {
-            packetr = match packetr.read(&mut conn) {
+            packetr = match packetr.read(&mut sock) {
                 Ok((val, _would_block)) => val,
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
                     error!("{}, fail read, error {}", self.prefix, err);
@@ -115,15 +116,18 @@ impl Threadable for Handshake {
         if connack {
             // if error, connect-ack shall be sent right here and ignored.
             let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
-            self.send_connack(code, &mut conn).ok();
+            self.send_connack(code, &mut sock).ok();
         } else if let Some(connect) = connect {
-            let args = AddConnectionArgs { conn, pkt: connect };
-            err!(
+            info!("{} {} handing over to cluster ...", self.prefix, self.raddr);
+            let args = AddConnectionArgs { sock, pkt: connect };
+            let res = err!(
                 IPCFail,
                 try: self.cluster.add_connection(args),
                 "cluster.add_connection"
-            )
-            .ok();
+            );
+            if let Err(err) = res {
+                info!("{} {} hand over failed {}", self.prefix, self.raddr, err);
+            }
         } else {
             unreachable!()
         }
@@ -133,7 +137,7 @@ impl Threadable for Handshake {
 }
 
 impl Handshake {
-    fn send_connack<W>(&self, code: v5::ConnackReasonCode, conn: &mut W) -> Result<()>
+    fn send_connack<W>(&self, code: v5::ConnackReasonCode, sock: &mut W) -> Result<()>
     where
         W: io::Write,
     {
@@ -149,7 +153,7 @@ impl Handshake {
         let cack = v5::ConnAck::from_reason_code(code);
         let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
         loop {
-            let (val, would_block) = match packetw.write(conn) {
+            let (val, would_block) = match packetw.write(sock) {
                 Ok(args) => args,
                 Err(err) => {
                     error!("{} problem writing connack packet {}", self.prefix, err);
@@ -167,6 +171,7 @@ impl Handshake {
                     self.prefix, time::Instant::now()
                 );
             } else {
+                info!("{} connection NACK for {}", self.prefix, self.raddr);
                 break Ok(());
             }
         }

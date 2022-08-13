@@ -20,6 +20,8 @@ type OutSeqnos = Vec<OutSeqno>;
 pub struct Session {
     /// Client's ClientID that created this session.
     client_id: ClientID,
+    /// Remote address,
+    raddr: net::SocketAddr,
     /// Shard hosting this session.
     shard_id: u32,
     /// Remote socket address.
@@ -435,7 +437,7 @@ impl SessionState {
 pub struct SessionStats;
 
 pub struct SessionArgs {
-    pub addr: net::SocketAddr,
+    pub raddr: net::SocketAddr,
     pub client_id: ClientID,
     pub shard_id: u32,
     pub miot_tx: PktTx,
@@ -444,9 +446,10 @@ pub struct SessionArgs {
 
 impl Session {
     pub fn start_active(args: SessionArgs, config: Config, pkt: &v5::Connect) -> Session {
-        let prefix = format!("session:{}", args.addr);
+        let prefix = format!("session:{}", args.raddr);
         Session {
             client_id: args.client_id,
+            raddr: args.raddr,
             shard_id: args.shard_id,
             prefix: prefix.clone(),
             config: config.clone(),
@@ -454,7 +457,7 @@ impl Session {
             state: SessionState::Active {
                 prefix: prefix.clone(),
                 config: config.clone(),
-                keep_alive: KeepAlive::new(args.addr, &pkt, &config),
+                keep_alive: KeepAlive::new(args.raddr, &pkt, &config),
                 connect: pkt.clone(),
                 miot_tx: args.miot_tx,
                 session_rx: args.session_rx,
@@ -812,6 +815,11 @@ impl Session {
     #[inline]
     pub fn as_config(&self) -> &Config {
         &self.config
+    }
+
+    #[inline]
+    pub fn as_raddr(&self) -> &net::SocketAddr {
+        &self.raddr
     }
 
     #[inline]

@@ -327,14 +327,16 @@ impl Listener {
         };
 
         match listener.accept() {
-            Ok((conn, addr)) => {
+            Ok((sock, addr)) => {
                 info!("{} incoming connection from {}", self.prefix, addr);
+                let raddr = sock.peer_addr().unwrap();
 
-                assert_eq!(conn.peer_addr().unwrap(), addr);
+                assert_eq!(raddr, addr);
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
                     prefix: format!("<h:{}>", self.config.name),
-                    conn: Some(conn),
+                    sock: Some(sock),
+                    raddr,
                     config: self.config.clone(),
                     cluster: cluster.to_tx("handshake"),
                 };

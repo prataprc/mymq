@@ -435,7 +435,7 @@ pub enum Request {
     SetMiot(Miot, MsgRx),
     SetShardQueues(BTreeMap<u32, Shard>),
     AddSession(AddSessionArgs),
-    FlushConnection { socket: Socket, err: Error },
+    FlushConnection { socket: Socket, err: Option<Error> },
     SendMessages { msgs: Vec<Message> },
     Close,
 }
@@ -445,7 +445,7 @@ pub enum Response {
 }
 
 pub struct AddSessionArgs {
-    pub conn: mio::net::TcpStream,
+    pub sock: mio::net::TcpStream,
     pub pkt: v5::Connect,
 }
 
@@ -481,7 +481,7 @@ impl Shard {
         }
     }
 
-    pub fn flush_connection(&self, socket: Socket, err: Error) -> Result<()> {
+    pub fn flush_connection(&self, socket: Socket, err: Option<Error>) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 let req = Request::FlushConnection { socket, err };
@@ -559,7 +559,7 @@ impl Shard {
                 _exit => (),
             };
 
-            // This is where we do routing for all packets received from all session/conn
+            // This is where we do routing for all packets received from all session/sock
             // owned by this shard.
             let ack_out_seqnos = self.route_packets();
 
@@ -738,7 +738,7 @@ impl Shard {
 
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
-                let req = Request::FlushConnection { socket, err };
+                let req = Request::FlushConnection { socket, err: Some(err) };
                 self.handle_flush_connection(req);
             }
         }
@@ -854,7 +854,7 @@ impl Shard {
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.unwrap_err() };
+                let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
             }
         }
@@ -926,7 +926,7 @@ impl Shard {
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.unwrap_err() };
+                let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
             }
         }
@@ -1024,7 +1024,7 @@ impl Shard {
             if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
             {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.unwrap_err() };
+                let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
             }
         }
@@ -1160,12 +1160,12 @@ impl Shard {
     fn handle_add_session(&mut self, req: Request) -> Response {
         use crate::broker::{miot::AddConnectionArgs, session::SessionArgs};
 
-        let AddSessionArgs { conn, pkt } = match req {
+        let AddSessionArgs { sock, pkt } = match req {
             Request::AddSession(args) => args,
             _ => unreachable!(),
         };
         let connect = pkt;
-        let remote_addr = conn.peer_addr().unwrap();
+        let raddr = sock.peer_addr().unwrap();
         let size = self.config.mqtt_pkt_batch_size as usize;
 
         let client_id = ClientID::from_connect(&connect.payload.client_id);
@@ -1183,7 +1183,7 @@ impl Shard {
             let (miot_tx, downstream) =
                 { socket::pkt_channel(self.shard_id, size, self.as_miot().to_waker()) };
             let args = SessionArgs {
-                addr: remote_addr,
+                raddr,
                 client_id: client_id.clone(),
                 shard_id: self.shard_id,
                 miot_tx,
@@ -1201,10 +1201,12 @@ impl Shard {
 
             match session.out_acks_flush() {
                 QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
-                    error!("{} fail to send CONNACK in add_session", self.prefix);
+                    error!("{} fail to send CONNACK to {}", self.prefix, raddr);
                     return Response::Ok;
                 }
-                QueueStatus::Ok(_) => (),
+                QueueStatus::Ok(_) => {
+                    info!("{} sending CONNACK to {}", self.prefix, raddr);
+                }
             }
         }
 
@@ -1215,25 +1217,32 @@ impl Shard {
         };
 
         // nuke existing session, if already present for this client_id
-        if let Some(_) = sessions.get(&client_id) {
-            if let Some(mut session) = sessions.remove(&client_id) {
-                // TODO: should we remove topic_filters or SessionTakenOver ?
-                session.remove_topic_filters(topic_filters);
-                session.close();
-            };
+        if let Some(mut session) = sessions.remove(&client_id) {
+            info!(
+                "{} session take over from {} to {} closing",
+                self.prefix,
+                session.as_raddr(),
+                raddr
+            );
+
+            // TODO: should we remove topic_filters or SessionTakenOver ?
+            session.remove_topic_filters(topic_filters);
+            session.close();
+
             if let Some(socket) = allow_panic!(self, miot.remove_connection(&client_id)) {
+                mem::drop(sessions);
+                mem::drop(miot);
+                mem::drop(topic_filters);
+
                 let err: Result<()> = err!(
                     SessionTakenOver,
                     code: SessionTakenOver,
                     "{} client {}",
                     self.prefix,
-                    remote_addr
+                    sock.peer_addr().unwrap()
                 );
-                let arg = Request::FlushConnection { socket, err: err.unwrap_err() };
 
-                mem::drop(sessions);
-                mem::drop(miot);
-                mem::drop(topic_filters);
+                let arg = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(arg);
             }
         }
@@ -1248,7 +1257,7 @@ impl Shard {
             let def = Config::DEF_MQTT_MAX_PACKET_SIZE;
             let args = AddConnectionArgs {
                 client_id,
-                conn,
+                conn: sock,
                 upstream,
                 downstream,
                 max_packet_size: session.as_connect().max_packet_size(def),
@@ -1257,6 +1266,7 @@ impl Shard {
         }
 
         sessions.insert(client_id.clone(), session);
+        info!("{} adding new session {} to shard", self.prefix, raddr);
 
         Response::Ok
     }
@@ -1288,7 +1298,7 @@ impl Shard {
             Inner::MainActive(active_loop) => active_loop,
             _ => unreachable!(),
         };
-        let args = FlushConnectionArgs { socket, err: Some(err) };
+        let args = FlushConnectionArgs { socket, err: err };
         allow_panic!(&self, flusher.flush_connection(args));
 
         Response::Ok
@@ -1410,7 +1420,7 @@ impl Shard {
             Inner::MainReplica(_) => "replica",
             Inner::Close(_) => "close",
         };
-        format!("<s:{}:{}>", self.name, state)
+        format!("<s:{}:{}:{}>", self.name, self.shard_id, state)
     }
 
     pub fn as_mut_poll(&mut self) -> &mut mio::Poll {
