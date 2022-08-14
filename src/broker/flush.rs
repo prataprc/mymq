@@ -195,6 +195,10 @@ impl Flusher {
                 socket: args.socket,
                 err: args.err,
             })??,
+            Inner::Tx(tx) => tx.request(Request::FlushConnection {
+                socket: args.socket,
+                err: args.err,
+            })??,
             _ => unreachable!(),
         };
 
@@ -223,12 +227,12 @@ impl Threadable for Flusher {
         use crate::broker::{thread::get_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
-        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
 
         'outer: loop {
             let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
             let reqs = status.take_values();
-            debug!("{} process {} requests closed:false", self.prefix, reqs.len());
+            debug!("{} n:{} requests processed", self.prefix, reqs.len());
 
             for req in reqs.into_iter() {
                 match req {
@@ -283,7 +287,11 @@ impl Flusher {
             _ => unreachable!(),
         };
         let raddr = socket.conn.peer_addr().unwrap();
-        info!("{} flush connection for {:?} {}", self.prefix, raddr, *socket.client_id);
+
+        info!(
+            "{} raddr:{} client_id:{} flushing connection",
+            self.prefix, raddr, *socket.client_id
+        );
 
         let timeout = now + time::Duration::from_secs(flush_timeout as u64);
         let mut stats = SockStats::default();
@@ -294,7 +302,10 @@ impl Flusher {
             let sock_stats = match socket.flush_packets(&self.prefix, &self.config) {
                 (QueueStatus::Ok(_), sock_stats) => sock_stats,
                 (QueueStatus::Block(_), sock_stats) if time::Instant::now() > timeout => {
-                    error!("{} give up flush_packets after {:?}", self.prefix, timeout);
+                    error!(
+                        "{} timeout:{:?} give up flushing packets",
+                        self.prefix, timeout
+                    );
                     break sock_stats;
                 }
                 (QueueStatus::Block(_), sock_stats) => {
@@ -328,7 +339,8 @@ impl Flusher {
         if let Ok(()) =
             send_disconnect(&self.prefix, code, &mut socket.conn, timeout, max_size)
         {
-            info!("{} flushed {} and disconnected", self.prefix, stats.to_json())
+            info!("{} raddr:{} DISCONNECT", self.prefix, raddr);
+            info!("{} conn_stats:{}", self.prefix, stats.to_json());
         }
 
         Response::FlushStats(stats)
@@ -352,7 +364,7 @@ impl Flusher {
             n_bytes: run_loop.n_bytes,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();

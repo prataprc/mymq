@@ -228,7 +228,7 @@ impl Threadable for Listener {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
 
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -328,7 +328,7 @@ impl Listener {
 
         match listener.accept() {
             Ok((sock, addr)) => {
-                info!("{} incoming connection from {}", self.prefix, addr);
+                info!("{} raddr:{} incoming CONNECT", self.prefix, addr);
                 let raddr = sock.peer_addr().unwrap();
 
                 assert_eq!(raddr, addr);
@@ -350,7 +350,7 @@ impl Listener {
                 QueueStatus::Block(Vec::new())
             }
             Err(err) => {
-                error!("{} connection accept error, {}", self.prefix, err);
+                error!("{} connection accept err:{}", self.prefix, err);
                 QueueStatus::Disconnected(Vec::new())
             }
         }
@@ -381,7 +381,7 @@ impl Listener {
             n_accepted: run_loop.n_accepted,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();

@@ -51,24 +51,26 @@ impl Threadable for Handshake {
             let connect_timeout = self.config.sock_mqtt_connect_timeout;
             now + time::Duration::from_secs(connect_timeout as u64)
         };
+        let raddr = sock.peer_addr().unwrap();
 
-        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
         info!(
-            "{} new connection {:?}<-{:?}",
+            "{} raddr:{} new connection {:?}<-{:?}",
             self.prefix,
+            raddr,
             sock.local_addr().unwrap(),
-            sock.peer_addr().unwrap(),
+            raddr,
         );
 
         let (code, connack, connect) = loop {
             packetr = match packetr.read(&mut sock) {
                 Ok((val, _would_block)) => val,
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                    error!("{}, fail read, error {}", self.prefix, err);
+                    error!("{}, fail read, err:{}", self.prefix, err);
                     break (err.code(), true, None);
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                    error!("{}, fail read, error {}", self.prefix, err);
+                    error!("{}, fail read, err:{}", self.prefix, err);
                     break (err.code(), true, None);
                 }
                 Err(err) => unreachable!("unexpected error {}", err),
@@ -87,27 +89,31 @@ impl Threadable for Handshake {
                     Ok(v5::Packet::Connect(connect)) => match connect.validate() {
                         Ok(()) => break (ReasonCode::Success, false, Some(connect)),
                         Err(err) => {
-                            error!("{}, invalid connect {}", self.prefix, err);
+                            error!("{}, invalid connect err:{}", self.prefix, err);
                             break (err.code(), true, None);
                         }
                     },
                     Ok(pkt) => {
                         let pt = pkt.to_packet_type();
-                        error!("{}, unexpect {:?} on new connection", self.prefix, pt);
+                        error!("{} packet:{:?} unexpect in connection", self.prefix, pt);
                         break (ReasonCode::ProtocolError, true, None);
                     }
                     Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                        error!("{}, fail parse, error {}", self.prefix, err);
+                        error!("{} fail parse, err:{}", self.prefix, err);
                         break (err.code(), true, None);
                     }
                     Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                        error!("{}, fail parse, error {}", self.prefix, err);
+                        error!("{} fail parse, err:{}", self.prefix, err);
                         break (err.code(), true, None);
                     }
                     Err(err) => unreachable!("unexpected error {}", err),
                 },
                 _ => {
-                    error!("{}, fail after {:?}", self.prefix, time::Instant::now());
+                    error!(
+                        "{} timeout:{:?} fail handshake",
+                        self.prefix,
+                        time::Instant::now()
+                    );
                     break (ReasonCode::UnspecifiedError, true, None);
                 }
             };
@@ -118,7 +124,7 @@ impl Threadable for Handshake {
             let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
             self.send_connack(code, &mut sock).ok();
         } else if let Some(connect) = connect {
-            info!("{} {} handing over to cluster ...", self.prefix, self.raddr);
+            info!("{} raddr:{} handing over to cluster ...", self.prefix, self.raddr);
             let args = AddConnectionArgs { sock, pkt: connect };
             let res = err!(
                 IPCFail,
@@ -126,7 +132,10 @@ impl Threadable for Handshake {
                 "cluster.add_connection"
             );
             if let Err(err) = res {
-                info!("{} {} hand over failed {}", self.prefix, self.raddr, err);
+                info!(
+                    "{} raddr:{} hand over failed err:{}",
+                    self.prefix, self.raddr, err
+                );
             }
         } else {
             unreachable!()
@@ -156,7 +165,7 @@ impl Handshake {
             let (val, would_block) = match packetw.write(sock) {
                 Ok(args) => args,
                 Err(err) => {
-                    error!("{} problem writing connack packet {}", self.prefix, err);
+                    error!("{} problem writing connack packet err:{}", self.prefix, err);
                     break Err(err);
                 }
             };
@@ -171,7 +180,7 @@ impl Handshake {
                     self.prefix, time::Instant::now()
                 );
             } else {
-                info!("{} connection NACK for {}", self.prefix, self.raddr);
+                info!("{} raddr:{} connection NACK", self.prefix, self.raddr);
                 break Ok(());
             }
         }

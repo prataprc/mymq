@@ -1,3 +1,5 @@
+use log::info;
+
 use std::{fmt, io, result, thread, time};
 
 use crate::{v5, Packetize, VarU32};
@@ -70,7 +72,17 @@ impl MQTTRead {
         let mut scratch = [0_u8; 5];
         match self {
             Init { mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => nerr!(Disconnected, desc: "MQTTRead::Init, empty read"),
+                Ok(0) => {
+                    let s = format!("MQTTRead::Init, empty read");
+                    let e = Error {
+                        kind: ErrorKind::Disconnected,
+                        description: s.clone(),
+                        loc: format!("{}:{}", file!(), line!()),
+                        ..Error::default()
+                    };
+                    info!("MQTTRead::Init, empty read");
+                    Err(e)
+                }
                 Ok(n) => {
                     // println!("MQTTRead::Init datal:{} n:{}", data.len(), n);
                     data.extend_from_slice(&scratch[..n]);
@@ -109,10 +121,10 @@ impl MQTTRead {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTRead::Init { data, max_size }, true))
                 }
-                Err(err) => nerr!(Disconnected, try: Err(err), "MQTTRead::Init"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Init"),
             },
             Header { byte1, mut data, max_size } => match stream.read(&mut scratch) {
-                Ok(0) => nerr!(Disconnected, desc:  "MQTTRead::Header, empty read"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTRead::Header, empty read"),
                 Ok(n) => {
                     // println!("MQTTRead::Header data:{}", data.len());
                     data.extend_from_slice(&scratch[..n]);
@@ -149,12 +161,12 @@ impl MQTTRead {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTRead::Header { byte1, data, max_size }, true))
                 }
-                Err(err) => nerr!(Disconnected, try: Err(err), "MQTTRead::Header"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Header"),
             },
             Remain { mut data, start, fh, max_size } => {
                 // println!("MQTTRead::Remain::read data:{} start:{}", data.len(), start);
                 match stream.read(&mut data[start..]) {
-                    Ok(0) => nerr!(Disconnected, desc:  "MQTTRead::Remain, empty read"),
+                    Ok(0) => err!(Disconnected, desc:  "MQTTRead::Remain, empty read"),
                     Ok(n) if (start + n) == data.len() => {
                         let rem = Vec::new();
                         Ok((MQTTRead::Fin { data, rem, fh, max_size }, false))
@@ -169,7 +181,7 @@ impl MQTTRead {
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         Ok((MQTTRead::Remain { data, start, fh, max_size }, true))
                     }
-                    Err(err) => nerr!(Disconnected, try: Err(err), "MQTTRead::Remain"),
+                    Err(err) => err!(Disconnected, try: Err(err), "MQTTRead::Remain"),
                     Ok(_) => unreachable!(),
                 }
             }
@@ -250,7 +262,7 @@ impl MQTTRead {
         };
 
         if n != m {
-            nerr!(MalformedPacket, code: MalformedPacket, "MQTTRead::Fin {}!={}", n, m)
+            err!(MalformedPacket, code: MalformedPacket, "MQTTRead::Fin {}!={}", n, m)
         } else {
             Ok(pkt)
         }
@@ -353,7 +365,7 @@ impl MQTTWrite {
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Init { data, max_size } => match stream.write(&data) {
-                Ok(0) => nerr!(Disconnected, desc:  "MQTTWrite::Init, empty write"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Init, empty write"),
                 Ok(n) if n == data.len() => {
                     Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
@@ -366,14 +378,14 @@ impl MQTTWrite {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTWrite::Remain { data, start: 0, max_size }, true))
                 }
-                Err(err) => nerr!(Disconnected, try: Err(err), "MQTTWrite::Init"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTWrite::Init"),
                 Ok(_) => unreachable!(),
             },
             Remain { data, start, max_size } if data[start..].len() == 0 => {
                 Ok((MQTTWrite::Fin { data, max_size }, false))
             }
             Remain { data, start, max_size } => match stream.write(&data[start..]) {
-                Ok(0) => nerr!(Disconnected, desc:  "MQTTWrite::Remain, empty write"),
+                Ok(0) => err!(Disconnected, desc:  "MQTTWrite::Remain, empty write"),
                 Ok(n) if (start + n) == data.len() => {
                     Ok((MQTTWrite::Fin { data, max_size }, false))
                 }
@@ -387,7 +399,7 @@ impl MQTTWrite {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     Ok((MQTTWrite::Remain { data, start, max_size }, true))
                 }
-                Err(err) => nerr!(Disconnected, try: Err(err), "MQTTWrite::Remain"),
+                Err(err) => err!(Disconnected, try: Err(err), "MQTTWrite::Remain"),
                 Ok(_) => unreachable!(),
             },
             Fin { data, max_size } => Ok((MQTTWrite::Fin { data, max_size }, false)),
@@ -436,7 +448,7 @@ where
         if would_block && timeout < time::Instant::now() {
             thread::sleep(SLEEP_10MS);
         } else if would_block {
-            break nerr!(
+            break err!(
                 Disconnected,
                 desc: "{} failed writing disconnect after {:?}",
                 prefix, time::Instant::now()
@@ -449,7 +461,7 @@ where
 
 fn check_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
     if pkt_len > max_size {
-        nerr!(
+        err!(
             MalformedPacket,
             code: PacketTooLarge,
             "MQTTRead::read packet_len:{}",

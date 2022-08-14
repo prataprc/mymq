@@ -207,11 +207,11 @@ impl Threadable for Ticker {
             *ticker_count += 1;
 
             if let Err(err) = cluster.wake() {
-                error!("{} error waking cluster {}", self.prefix, err);
+                error!("{} waking cluster err:{}", self.prefix, err);
             }
             for shard in shards.iter() {
                 if let Err(err) = shard.wake() {
-                    error!("{} error waking shard {}", self.prefix, err);
+                    error!("{} waking shard err:{}", self.prefix, err);
                 }
             }
         }
@@ -223,7 +223,7 @@ impl Threadable for Ticker {
         };
 
         let fin_state = FinState { born, ticker_count, dead: time::Instant::now() };
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();

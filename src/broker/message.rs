@@ -27,7 +27,10 @@ impl Drop for MsgTx {
             match self.waker.wake() {
                 Ok(()) => (),
                 Err(err) => {
-                    error!("shard-{} waking the receiving shard: {}", self.shard_id, err)
+                    error!(
+                        "shard-{} waking the receiving shard err:{}",
+                        self.shard_id, err
+                    )
                 }
             }
         }

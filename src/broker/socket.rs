@@ -24,9 +24,7 @@ impl Drop for PktTx {
         if self.count > 0 {
             match self.waker.wake() {
                 Ok(()) => (),
-                Err(err) => {
-                    error!("shard/miot-{} waking the miot: {}", self.miot_id, err)
-                }
+                Err(err) => error!("waking shard/miot-{} err:{}", self.miot_id, err),
             }
         }
     }
@@ -64,7 +62,7 @@ pub struct PktRx {
 }
 
 impl PktRx {
-    pub fn try_recvs(&self, prefix: &str) -> QueueStatus<v5::Packet> {
+    pub fn try_recvs(&self, _prefix: &str) -> QueueStatus<v5::Packet> {
         let mut pkts = Vec::with_capacity(self.pkt_batch_size);
         loop {
             match self.rx.try_recv() {
@@ -75,7 +73,6 @@ impl PktRx {
                 }
                 Err(mpsc::TryRecvError::Empty) => break QueueStatus::Block(pkts),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    warn!("{} senders disconnected ...", prefix);
                     break QueueStatus::Disconnected(pkts);
                 }
             }
@@ -211,7 +208,7 @@ impl Socket {
                 QueueStatus::Block(Vec::new())
             }
             Init { .. } | Header { .. } | Remain { .. } => {
-                error!("{} disconnect, pkt-read timesout {:?}", prefix, self.rd.timeout);
+                error!("{} rd_timeout:{:?} disconnecting", prefix, self.rd.timeout);
                 self.set_read_timeout(false, config.sock_mqtt_read_timeout as u64);
                 QueueStatus::Disconnected(Vec::new())
             }
@@ -294,7 +291,7 @@ impl Socket {
                     Ok(blob) => blob,
                     Err(err) => {
                         let pt = packet.to_packet_type();
-                        error!("{} skipping packet {:?} : {}", prefix, pt, err);
+                        error!("{} packet:{:?} skipping err:{}", prefix, pt, err);
                         continue;
                     }
                 };
@@ -332,7 +329,7 @@ impl Socket {
                 }
                 Init { .. } | Remain { .. } => {
                     self.set_write_timeout(false, config.sock_mqtt_write_timeout as u64);
-                    error!("{} packet write fail after {:?}", prefix, self.wt.timeout);
+                    error!("{} wt_timeout:{:?} disconnecting..", prefix, self.wt.timeout);
                     (QueueStatus::Disconnected(Vec::new()), pw)
                 }
                 Fin { .. } => {

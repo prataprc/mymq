@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::{fmt, mem, net, result, sync::Arc, time};
@@ -306,7 +306,7 @@ impl Threadable for Miot {
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn config {}", self.prefix, self.to_config_json());
+        info!("{} spawn config:{}", self.prefix, self.to_config_json());
 
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -338,7 +338,7 @@ impl Miot {
     fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
         let mut count = 0;
         for event in events.iter() {
-            trace!("{} poll-event token:{}", self.prefix, event.token().0);
+            trace!("{} token:{} poll-event", self.prefix, event.token().0);
             count += 1;
         }
 
@@ -406,8 +406,8 @@ impl Miot {
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
             let prefix = {
-                let remote_addr = socket.conn.peer_addr().unwrap();
-                format!("rconn:{}:{}", remote_addr, **client_id)
+                let raddr = socket.conn.peer_addr().unwrap();
+                format!("rconn:{}:{}", raddr, **client_id)
             };
             match socket.read_packets(&prefix, &self.config) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
@@ -415,11 +415,11 @@ impl Miot {
                     fail_queues.push((client_id.clone(), None));
                 }
                 Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                    error!("{} error in read_packets : {}", prefix, err);
+                    error!("{} error in read_packets err:{}", prefix, err);
                     fail_queues.push((client_id.clone(), Some(err)));
                 }
                 Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                    error!("{} error in read_packets : {}", prefix, err);
+                    error!("{} error in read_packets err:{}", prefix, err);
                     fail_queues.push((client_id.clone(), Some(err)));
                 }
                 Err(err) => unreachable!("{} unexpected err {}", self.prefix, err),
@@ -447,8 +447,8 @@ impl Miot {
         let mut wstats = SockStats::default();
         for (client_id, socket) in conns.iter_mut() {
             let prefix = {
-                let remote_addr = socket.conn.peer_addr().unwrap();
-                format!("wconn:{}:{}", remote_addr, **client_id)
+                let raddr = socket.conn.peer_addr().unwrap();
+                format!("wconn:{}:{}", raddr, **client_id)
             };
             match socket.write_packets(&prefix, &self.config) {
                 (QueueStatus::Ok(_), stats) => {
@@ -487,7 +487,7 @@ impl Miot {
         };
         let raddr = args.conn.peer_addr().unwrap();
 
-        info!("{} adding connection {} ...", self.prefix, raddr);
+        info!("{} raddr:{} adding connection ...", self.prefix, raddr);
 
         let max_packet_size = self.config.mqtt_max_packet_size;
         let (poll, conns, token) = match &mut self.inner {
@@ -538,12 +538,18 @@ impl Miot {
 
         let res = match conns.remove(&client_id) {
             Some(mut socket) => {
-                let remote_addr = socket.conn.peer_addr();
-                info!("{} removing connection {:?} ...", self.prefix, remote_addr);
+                let raddr = socket.conn.peer_addr().unwrap();
+                info!("{} raddr:{} removing connection ...", self.prefix, raddr);
                 allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
                 Response::Removed(socket)
             }
-            None => Response::Ok,
+            None => {
+                warn!(
+                    "{} client_id:{} connection for not found ...",
+                    self.prefix, *client_id
+                );
+                Response::Ok
+            }
         };
 
         self.incr_n_rem_conns();
@@ -568,7 +574,7 @@ impl Miot {
 
         for (cid, sock) in conns.into_iter() {
             let raddr = sock.conn.peer_addr().unwrap();
-            info!("{} closing socket {:?} client-id:{:?}", self.prefix, raddr, *cid);
+            info!("{} raddr:{} client_id:{} closing socket", self.prefix, raddr, *cid);
             client_ids.push(sock.client_id);
             addrs.push(raddr);
             tokens.push(sock.token);
@@ -588,7 +594,7 @@ impl Miot {
             n_wbytes: run_loop.n_wbytes,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
 

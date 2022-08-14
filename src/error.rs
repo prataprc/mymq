@@ -117,47 +117,12 @@ macro_rules! err {
 }
 
 #[macro_export]
-macro_rules! nerr {
+macro_rules! dbg {
     ($v:ident, code: $code:ident, $($args:expr),+) => {{
-        let kind = ErrorKind::$v;
-        let description = format!($($args),+);
-        let e = Error {
-            kind,
-            description,
-            code: Some(ReasonCode::$code),
-            loc: format!("{}:{}", file!(), line!()),
-            ..Error::default()
-        };
-
-        log_error!(e);
-        Err(e)
-    }};
-    ($v:ident, try: $res:expr, $($args:expr),+) => {{
-        match $res {
-            Ok(val) => Ok(val),
-            Err(err) => {
-                let e = Error {
-                    kind: ErrorKind::$v,
-                    description: format!($($args),+),
-                    cause: Some(Box::new(err)),
-                    loc: format!("{}:{}", file!(), line!()),
-                    ..Error::default()
-                };
-                log_error!(e);
-                Err(e)
-            }
-        }
+        log::debug!("{}: {}", ErrorKind::$v, format!($($args),+));
     }};
     ($v:ident, desc: $($args:expr),+) => {{
-        let kind = ErrorKind::$v;
-        let description = format!($($args),+);
-        let e = Error {
-            kind,
-            description,
-            loc: format!("{}:{}", file!(), line!()),
-            ..Error::default()
-        };
-        Err(e)
+        log::debug!("{}: {}", ErrorKind::$v, format!($($args),+));
     }};
 }
 
@@ -165,12 +130,10 @@ macro_rules! nerr {
 #[cfg_attr(any(feature = "fuzzy", test), macro_export)]
 macro_rules! log_error {
     ($e:ident) => {{
-        use log::error;
-
-        error!("{}: {}", $e.kind, $e.description);
+        log::error!("{}: {}", $e.kind, $e.description);
 
         match &$e.cause {
-            Some(cause) => error!("cause:{}", cause.to_string()),
+            Some(cause) => log::error!("cause:{}", cause.to_string()),
             None => (),
         }
 
@@ -178,8 +141,8 @@ macro_rules! log_error {
         use std::backtrace::BacktraceStatus;
         #[cfg(feature = "backtrace")]
         match ($e.backtrace.status(), $e.kind()) {
-            (BacktraceStatus::Unsupported, _) => error!("[BACKTRACE Unsupported]"),
-            (BacktraceStatus::Disabled, _) => error!("[BACKTRACE Disabled]"),
+            (BacktraceStatus::Unsupported, _) => log::error!("[BACKTRACE Unsupported]"),
+            (BacktraceStatus::Disabled, _) => log::error!("[BACKTRACE Disabled]"),
             (BacktraceStatus::Captured, ErrorKind::Disconnected) => (),
             (BacktraceStatus::Captured, _) => {
                 for f in $e.backtrace.frames().iter() {
@@ -198,13 +161,11 @@ macro_rules! log_error {
 #[cfg(feature = "broker")]
 macro_rules! allow_panic {
     ($self:expr, $($args:expr),+) => {{
-        use log::error;
-
         match $($args),+ {
             Ok(val) => val,
             Err(err) => {
                 $self.as_app_tx().send("panic".to_string()).ok();
-                error!("{}, now we are going to panic", $self.prefix);
+                log::error!("{}, now we are going to panic", $self.prefix);
                 panic!("{}", err);
             }
         }

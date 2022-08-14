@@ -312,7 +312,7 @@ impl Cluster {
             }
         }
 
-        info!("{} listening on {}", self.prefix, self.config.port);
+        info!("{} port:{} listening ... ", self.prefix, self.config.port);
 
         Ok(cluster)
     }
@@ -470,7 +470,7 @@ impl Threadable for Cluster {
     fn main_loop(mut self, rx: Rx<Self::Req, Self::Resp>) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn thread config {}", self.prefix, self.to_config_json());
+        info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
 
         let mut rt = Rt {
             retain_timer: Timer::default(),
@@ -708,11 +708,14 @@ impl Cluster {
                 todo!()
             }
         };
-        info!("{} new connection {:?} mapped to shard {}", self.prefix, raddr, shard_id);
+        info!(
+            "{} raddr:{} shard_id:{} new connection mapped",
+            self.prefix, raddr, shard_id
+        );
 
         // Add session to the shard.
         if let Err(err) = shard.add_session(AddSessionArgs { sock, pkt: connect }) {
-            error!("{} error adding session {}", self.prefix, err);
+            error!("{} error adding session err:{}", self.prefix, err);
         }
 
         Response::Ok
@@ -763,7 +766,7 @@ impl Cluster {
             n_requests: run_loop.n_requests,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
 

@@ -532,7 +532,7 @@ impl Shard {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
-        info!("{} spawn config {}", self.prefix, self.to_config_json());
+        info!("{} spawn config:{}", self.prefix, self.to_config_json());
 
         // this a work around to wire up all the threads without using unsafe.
         let req = allow_panic!(self, rx.recv());
@@ -602,7 +602,7 @@ impl Shard {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
-        info!("{} spawn config {}", self.prefix, self.to_config_json());
+        info!("{} spawn config:{}", self.prefix, self.to_config_json());
 
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -713,6 +713,10 @@ impl Shard {
                 Ok((QueueStatus::Ok(_), out_seqnos)) => out_seqnos,
                 Ok((QueueStatus::Block(_), out_seqnos)) => out_seqnos,
                 Ok((QueueStatus::Disconnected(_), out_seqnos)) => {
+                    info!(
+                        "{} raddr:{} disconnected connection",
+                        self.prefix, session.raddr
+                    );
                     let err: Result<()> = err!(Disconnected, desc: "{}", self.prefix);
                     failed_sessions.push((client_id.clone(), err.unwrap_err()));
                     out_seqnos
@@ -767,7 +771,10 @@ impl Shard {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
                 QueueStatus::Disconnected(_) => {
                     // TODO: should this be logged at error-level
-                    error!("{} shard-msg-rx {} has closed", self.prefix, shard_id);
+                    error!(
+                        "{} shard_id:{} shard-msg-rx has closed",
+                        self.prefix, shard_id
+                    );
                 }
             }
         }
@@ -840,7 +847,10 @@ impl Shard {
                         disconnecteds.push(client_id)
                     }
                 }
-                None => error!("{} msg-rx, session {} is gone", self.prefix, *client_id),
+                None => error!(
+                    "{} client_id:{} msg-rx session is gone",
+                    self.prefix, *client_id
+                ),
             }
         }
 
@@ -1201,11 +1211,11 @@ impl Shard {
 
             match session.out_acks_flush() {
                 QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
-                    error!("{} fail to send CONNACK to {}", self.prefix, raddr);
+                    error!("{} raddr:{} fail to send CONNACK", self.prefix, raddr);
                     return Response::Ok;
                 }
                 QueueStatus::Ok(_) => {
-                    info!("{} sending CONNACK to {}", self.prefix, raddr);
+                    info!("{} raddr:{} send CONNACK", self.prefix, raddr);
                 }
             }
         }
@@ -1219,10 +1229,8 @@ impl Shard {
         // nuke existing session, if already present for this client_id
         if let Some(mut session) = sessions.remove(&client_id) {
             info!(
-                "{} session take over from {} to {} closing",
-                self.prefix,
-                session.as_raddr(),
-                raddr
+                "{} old_raddr:{} new_raddr:{} session take over",
+                self.prefix, session.raddr, raddr
             );
 
             // TODO: should we remove topic_filters or SessionTakenOver ?
@@ -1266,7 +1274,7 @@ impl Shard {
         }
 
         sessions.insert(client_id.clone(), session);
-        info!("{} adding new session {} to shard", self.prefix, raddr);
+        info!("{} raddr:{} adding new session to shard", self.prefix, raddr);
 
         Response::Ok
     }
@@ -1346,7 +1354,7 @@ impl Shard {
             n_requests: active_loop.n_events,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
@@ -1382,7 +1390,7 @@ impl Shard {
             n_requests: replica_loop.n_events,
         };
 
-        info!("{} stats {}", self.prefix, fin_state.to_json());
+        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();

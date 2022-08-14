@@ -19,11 +19,11 @@ type OutSeqnos = Vec<OutSeqno>;
 /// Sessions are hosted within the shards and shards are hosted within the nodes.
 pub struct Session {
     /// Client's ClientID that created this session.
-    client_id: ClientID,
+    pub client_id: ClientID,
     /// Remote address,
-    raddr: net::SocketAddr,
+    pub raddr: net::SocketAddr,
     /// Shard hosting this session.
-    shard_id: u32,
+    pub shard_id: u32,
     /// Remote socket address.
     prefix: String,
     /// Broker Configuration.
@@ -334,7 +334,10 @@ impl SessionState {
             Some(alias) if topic_name.len() > 0 => {
                 match topic_aliases.insert(alias, topic_name.clone()) {
                     Some(old) => debug!(
-                        "{} for topic-alias {} replacing {:?} with {:?}",
+                        concat!(
+                            "{} topic_alias:{} old_topic:{:?} new_topic:{:?}",
+                            "replacing ... "
+                        ),
                         prefix, alias, old, topic_name
                     ),
                     None => (),
@@ -376,7 +379,7 @@ impl SessionState {
             v5::QoS::AtMostOnce => false,
             v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
                 if ignore_dup {
-                    trace!("{} Duplicate publish recvd {}", prefix, publish);
+                    trace!("{} publish:{} duplicate publish recvd", prefix, publish);
                     false
                 } else {
                     true
@@ -738,7 +741,12 @@ impl Session {
 
         for (id, (subscr, ids)) in subscrs.into_iter() {
             if subscr.no_local && id == self.client_id {
-                trace!("{} skipping {:?} in {:?} no_local", self.prefix, topic_name, id);
+                trace!(
+                    "{} topic:{:?} client_id:{:?} skipping as no_local",
+                    self.prefix,
+                    topic_name,
+                    id
+                );
                 continue;
             }
 
@@ -815,16 +823,6 @@ impl Session {
     #[inline]
     pub fn as_config(&self) -> &Config {
         &self.config
-    }
-
-    #[inline]
-    pub fn as_raddr(&self) -> &net::SocketAddr {
-        &self.raddr
-    }
-
-    #[inline]
-    pub fn as_client_id(&self) -> &ClientID {
-        &self.client_id
     }
 
     #[inline]
