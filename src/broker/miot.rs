@@ -61,13 +61,7 @@ struct RunLoop {
     conns: BTreeMap<ClientID, Socket>,
 
     /// Statistics
-    n_polls: usize,
-    n_events: usize,
-    n_requests: usize,
-    n_add_conns: usize,
-    n_rem_conns: usize,
-    n_wpkts: usize,
-    n_wbytes: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
@@ -78,9 +72,14 @@ pub struct FinState {
     pub client_ids: Vec<ClientID>,
     pub addrs: Vec<net::SocketAddr>,
     pub tokens: Vec<mio::Token>,
+    pub stats: Stats,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
     pub n_polls: usize,
-    pub n_requests: usize,
     pub n_events: usize,
+    pub n_requests: usize,
     pub n_add_conns: usize,
     pub n_rem_conns: usize,
     pub n_wpkts: usize,
@@ -101,17 +100,17 @@ impl FinState {
             "n_conns",
             self.client_ids.len(),
             "n_polls",
-            self.n_polls,
+            self.stats.n_polls,
             "n_events",
-            self.n_events,
+            self.stats.n_events,
             "n_add_conns",
-            self.n_add_conns,
+            self.stats.n_add_conns,
             "n_rem_conns",
-            self.n_rem_conns,
+            self.stats.n_rem_conns,
             "n_wpkts",
-            self.n_wpkts,
+            self.stats.n_wpkts,
             "n_wbytes",
-            self.n_wbytes,
+            self.stats.n_wbytes,
         )
     }
 }
@@ -195,13 +194,7 @@ impl Miot {
                 next_token: Self::FIRST_TOKEN,
                 conns: BTreeMap::default(),
 
-                n_polls: 0,
-                n_events: 0,
-                n_requests: 0,
-                n_add_conns: 0,
-                n_rem_conns: 0,
-                n_wpkts: 0,
-                n_wbytes: 0,
+                stats: Stats::default(),
 
                 app_tx: app_tx.clone(),
             }),
@@ -487,9 +480,6 @@ impl Miot {
         };
         let raddr = args.conn.peer_addr().unwrap();
 
-        info!("{} raddr:{} adding connection ...", self.prefix, raddr);
-
-        let max_packet_size = self.config.mqtt_max_packet_size;
         let (poll, conns, token) = match &mut self.inner {
             Inner::Main(RunLoop { poll, conns, next_token, .. }) => {
                 let token = *next_token;
@@ -499,6 +489,9 @@ impl Miot {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
+        info!("{} raddr:{} adding connection ...", self.prefix, raddr);
+
+        let max_packet_size = self.config.mqtt_max_packet_size;
         let (session_tx, miot_rx) = (args.upstream, args.downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
@@ -585,13 +578,7 @@ impl Miot {
             client_ids,
             addrs,
             tokens,
-            n_polls: run_loop.n_polls,
-            n_events: run_loop.n_events,
-            n_requests: run_loop.n_requests,
-            n_add_conns: run_loop.n_add_conns,
-            n_rem_conns: run_loop.n_rem_conns,
-            n_wpkts: run_loop.n_wpkts,
-            n_wbytes: run_loop.n_wbytes,
+            stats: run_loop.stats,
         };
 
         info!("{} stats:{}", self.prefix, fin_state.to_json());
@@ -605,46 +592,46 @@ impl Miot {
 impl Miot {
     fn incr_n_polls(&mut self) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_polls, .. }) => *n_polls += 1,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_polls += 1,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_events(&mut self, n: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
-            Inner::Close(stats) => stats.n_events += n,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_events += n,
+            Inner::Close(finstats) => finstats.stats.n_events += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_requests(&mut self, n: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += n,
-            Inner::Close(stats) => stats.n_requests += n,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_requests += n,
+            Inner::Close(finstate) => finstate.stats.n_requests += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_add_conns(&mut self) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_add_conns, .. }) => *n_add_conns += 1,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_add_conns += 1,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_rem_conns(&mut self) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_rem_conns, .. }) => *n_rem_conns += 1,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_rem_conns += 1,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_wstats(&mut self, wstats: &socket::Stats) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_wpkts, n_wbytes, .. }) => {
-                *n_wpkts += wstats.items;
-                *n_wbytes += wstats.bytes;
+            Inner::Main(RunLoop { stats, .. }) => {
+                stats.n_wpkts += wstats.items;
+                stats.n_wbytes += wstats.bytes;
             }
             _ => unreachable!(),
         }

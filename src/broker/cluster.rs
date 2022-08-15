@@ -74,8 +74,7 @@ struct RunLoop {
     retained_messages: RetainedTrie, // indexed by TopicName.
 
     /// Statistics
-    n_events: usize,
-    n_requests: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
@@ -96,15 +95,20 @@ pub struct FinState {
     pub retained_messages: RetainedTrie,
     pub retain_timer: Timer<Arc<Retain>>,
     pub retain_topics: BTreeMap<TopicName, Arc<Retain>>,
-    pub n_events: usize,
-    pub n_requests: usize,
+    pub stats: Stats,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
+    n_events: usize,
+    n_requests: usize,
 }
 
 impl FinState {
     fn to_json(&self) -> String {
         format!(
             concat!("{{ {:?}: {}, {:?}: {} }}"),
-            "n_events", self.n_events, "n_requests", self.n_requests,
+            "n_events", self.stats.n_events, "n_requests", self.stats.n_requests,
         )
     }
 }
@@ -254,8 +258,7 @@ impl Cluster {
                 topic_filters: topic_filters.clone(),
                 retained_messages: retained_messages.clone(),
 
-                n_events: 0,
-                n_requests: 0,
+                stats: Stats::default(),
 
                 app_tx: app_tx.clone(),
             }),
@@ -762,8 +765,7 @@ impl Cluster {
             retained_messages: run_loop.retained_messages,
             retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
             retain_topics: mem::replace(&mut rt.retain_topics, BTreeMap::default()),
-            n_events: run_loop.n_events,
-            n_requests: run_loop.n_requests,
+            stats: run_loop.stats,
         };
 
         info!("{} stats:{}", self.prefix, fin_state.to_json());
@@ -777,15 +779,15 @@ impl Cluster {
 impl Cluster {
     fn incr_n_events(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_events, .. }) => *n_events += count,
-            Inner::Close(fin_stats) => fin_stats.n_events += count,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_events += count,
+            Inner::Close(finstate) => finstate.stats.n_events += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_requests(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += count,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_requests += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

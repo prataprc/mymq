@@ -136,8 +136,7 @@ pub struct ActiveLoop {
     retained_messages: RetainedTrie,
 
     /// statistics
-    n_events: usize,
-    n_requests: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
@@ -161,8 +160,7 @@ pub struct ReplicaLoop {
     sessions: BTreeMap<ClientID, Session>,
 
     /// statistics
-    n_events: usize,
-    n_requests: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
@@ -174,6 +172,11 @@ pub struct FinState {
     pub inp_seqno: InpSeqno,
     pub shard_back_log: BTreeMap<u32, usize>,
     pub ack_timestamps: Vec<Timestamp>,
+    pub stats: Stats,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
     pub n_events: usize,
     pub n_requests: usize,
 }
@@ -187,9 +190,9 @@ impl FinState {
             "inp_seqno",
             self.inp_seqno,
             "n_events",
-            self.n_events,
+            self.stats.n_events,
             "n_requests",
-            self.n_requests,
+            self.stats.n_requests,
         )
     }
 }
@@ -308,8 +311,7 @@ impl Shard {
                 topic_filters: args.topic_filters,
                 retained_messages: args.retained_messages,
 
-                n_events: 0,
-                n_requests: 0,
+                stats: Stats::default(),
 
                 app_tx: app_tx.clone(),
             }),
@@ -363,8 +365,7 @@ impl Shard {
 
                 sessions: BTreeMap::default(),
 
-                n_events: 0,
-                n_requests: 0,
+                stats: Stats::default(),
 
                 app_tx: app_tx.clone(),
             }),
@@ -740,8 +741,8 @@ impl Shard {
         for (client_id, err) in failed_sessions {
             let miot = self.as_mut_miot();
 
-            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
-            {
+            let res = allow_panic!(&self, miot.remove_connection(&client_id));
+            if let Some(socket) = res {
                 let req = Request::FlushConnection { socket, err: Some(err) };
                 self.handle_flush_connection(req);
             }
@@ -861,8 +862,8 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
-            {
+            let res = allow_panic!(&self, miot.remove_connection(&client_id));
+            if let Some(socket) = res {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
                 let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
@@ -933,8 +934,8 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
-            {
+            let res = allow_panic!(&self, miot.remove_connection(&client_id));
+            if let Some(socket) = res {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
                 let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
@@ -1031,8 +1032,8 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            if let Some(socket) = allow_panic!(&self, miot.remove_connection(&client_id))
-            {
+            let res = allow_panic!(&self, miot.remove_connection(&client_id));
+            if let Some(socket) = res {
                 let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
                 let req = Request::FlushConnection { socket, err: err.err() };
                 self.handle_flush_connection(req);
@@ -1350,10 +1351,8 @@ impl Shard {
             inp_seqno: active_loop.inp_seqno,
             shard_back_log: BTreeMap::default(), // TODO
             ack_timestamps: active_loop.ack_timestamps,
-            n_events: active_loop.n_events,
-            n_requests: active_loop.n_events,
+            stats: active_loop.stats,
         };
-
         info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
@@ -1386,8 +1385,7 @@ impl Shard {
             inp_seqno: 0,
             shard_back_log: BTreeMap::default(), // TODO
             ack_timestamps: Vec::default(),
-            n_events: replica_loop.n_events,
-            n_requests: replica_loop.n_events,
+            stats: Stats::default(),
         };
 
         info!("{} stats:{}", self.prefix, fin_state.to_json());
@@ -1402,18 +1400,18 @@ impl Shard {
 impl Shard {
     fn incr_n_events(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { n_events, .. }) => *n_events += count,
-            Inner::MainReplica(ReplicaLoop { n_events, .. }) => *n_events += count,
-            Inner::Close(fin_stats) => fin_stats.n_events += count,
+            Inner::MainActive(ActiveLoop { stats, .. }) => stats.n_events += count,
+            Inner::MainReplica(ReplicaLoop { stats, .. }) => stats.n_events += count,
+            Inner::Close(finstate) => finstate.stats.n_events += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_requests(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { n_requests, .. }) => *n_requests += count,
-            Inner::MainReplica(ReplicaLoop { n_requests, .. }) => *n_requests += count,
-            Inner::Close(fin_stats) => fin_stats.n_requests += count,
+            Inner::MainActive(ActiveLoop { stats, .. }) => stats.n_requests += count,
+            Inner::MainReplica(ReplicaLoop { stats, .. }) => stats.n_requests += count,
+            Inner::Close(finstate) => finstate.stats.n_requests += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

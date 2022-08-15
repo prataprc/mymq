@@ -54,16 +54,18 @@ struct RunLoop {
     cluster: Box<Cluster>,
 
     /// Statistics
-    n_polls: usize,
-    n_events: usize,
-    n_requests: usize,
-    n_accepted: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
 pub struct FinState {
+    stats: Stats,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
     /// Number of times poll was woken up.
     pub n_polls: usize,
     /// Number events received via mio-poll.
@@ -79,13 +81,13 @@ impl FinState {
         format!(
             concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
             "n_polls",
-            self.n_polls,
+            self.stats.n_polls,
             "n_events",
-            self.n_events,
+            self.stats.n_events,
             "n_requests",
-            self.n_requests,
+            self.stats.n_requests,
             "n_accepted",
-            self.n_accepted
+            self.stats.n_accepted
         )
     }
 }
@@ -173,10 +175,7 @@ impl Listener {
                 listener,
                 cluster: Box::new(cluster),
 
-                n_polls: usize::default(),
-                n_events: usize::default(),
-                n_requests: usize::default(),
-                n_accepted: usize::default(),
+                stats: Stats::default(),
 
                 app_tx,
             }),
@@ -321,7 +320,7 @@ impl Listener {
         use crate::broker::Handshake;
         use std::io;
 
-        let RunLoop { listener, cluster, n_accepted, .. } = match &mut self.inner {
+        let RunLoop { listener, cluster, stats, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -343,7 +342,7 @@ impl Listener {
                 let thrd = Thread::spawn_sync("handshake", 1, hs);
                 thrd.drop(); // alternative to close_wait()
 
-                *n_accepted += 1;
+                stats.n_accepted += 1;
                 QueueStatus::Ok(Vec::new())
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -374,13 +373,7 @@ impl Listener {
         mem::drop(run_loop.cluster);
         mem::drop(run_loop.app_tx);
 
-        let fin_state = FinState {
-            n_polls: run_loop.n_polls,
-            n_events: run_loop.n_events,
-            n_requests: run_loop.n_requests,
-            n_accepted: run_loop.n_accepted,
-        };
-
+        let fin_state = FinState { stats: run_loop.stats };
         info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
@@ -392,23 +385,23 @@ impl Listener {
 impl Listener {
     fn incr_n_polls(&mut self) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_polls, .. }) => *n_polls += 1,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_polls += 1,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_events(&mut self, n: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_events, .. }) => *n_events += n,
-            Inner::Close(stats) => stats.n_events += n,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_events += n,
+            Inner::Close(finstate) => finstate.stats.n_events += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn incr_n_requests(&mut self, n: usize) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_requests, .. }) => *n_requests += n,
-            Inner::Close(stats) => stats.n_requests += n,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_requests += n,
+            Inner::Close(finstate) => finstate.stats.n_requests += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

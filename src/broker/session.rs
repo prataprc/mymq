@@ -83,6 +83,25 @@ enum SessionState {
         back_log: BTreeMap<OutSeqno, Message>,
     },
     #[allow(dead_code)]
+    Reconnect {
+        // MQTT topic-aliases if enabled. ZERO is not allowed.
+        topic_aliases: BTreeMap<u16, TopicName>,
+        // List of topic-filters subscribed by this client, when ever
+        // SUBSCRIBE/UNSUBSCRIBE messages are committed here, [Cluster::topic_filters]
+        // will also be updated.
+        subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
+
+        // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
+        inp_qos12: Vec<PacketID>,
+
+        // This value is incremented for every out-going PUBLISH(qos>0).
+        // If index.len() > `receive_maximum`, don't increment this value.
+        next_packet_id: PacketID,
+        /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
+        /// every outgoing publish packet.
+        out_seqno: OutSeqno,
+    },
+    #[allow(dead_code)]
     Replica {
         prefix: String,
         config: Config,
@@ -96,16 +115,14 @@ enum SessionState {
         /// `qos12_unacks` and after they go through the consensus loop.
         back_log: BTreeMap<OutSeqno, Message>,
     },
-    #[allow(dead_code)]
-    Cold,
 }
 
 impl fmt::Debug for SessionState {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             SessionState::Active { .. } => write!(f, "SessionState::Active"),
+            SessionState::Reconnect { .. } => write!(f, "SessionState::Reconnect"),
             SessionState::Replica { .. } => write!(f, "SessionState::Replica"),
-            SessionState::Cold { .. } => write!(f, "SessionState::Cold"),
         }
     }
 }

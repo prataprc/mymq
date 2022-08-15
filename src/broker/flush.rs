@@ -35,15 +35,18 @@ enum Inner {
 
 struct RunLoop {
     /// Statistics
-    n_flush_conns: usize,
-    n_pkts: usize,
-    n_bytes: usize,
+    stats: Stats,
 
     /// Back channel communicate with application.
     app_tx: AppTx,
 }
 
 pub struct FinState {
+    stats: Stats,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
     /// Number of connections flushed downstream and disconnected.
     pub n_flush_conns: usize,
     /// Number of packets flushed in all connections.
@@ -57,11 +60,11 @@ impl FinState {
         format!(
             concat!("{{ {:?}: {}, {:?}: {}, {:?}: {} }}"),
             "n_flush_conns",
-            self.n_flush_conns,
+            self.stats.n_flush_conns,
             "n_pkts",
-            self.n_pkts,
+            self.stats.n_pkts,
             "n_bytes",
-            self.n_bytes
+            self.stats.n_bytes
         )
     }
 }
@@ -131,12 +134,7 @@ impl Flusher {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop {
-                n_flush_conns: 0,
-                n_pkts: 0,
-                n_bytes: 0,
-                app_tx,
-            }),
+            inner: Inner::Main(RunLoop { stats: Stats::default(), app_tx }),
         };
         flush.prefix = flush.prefix();
         let thrd = Thread::spawn(&self.prefix, flush);
@@ -358,12 +356,7 @@ impl Flusher {
 
         mem::drop(run_loop.app_tx);
 
-        let fin_state = FinState {
-            n_flush_conns: run_loop.n_flush_conns,
-            n_pkts: run_loop.n_pkts,
-            n_bytes: run_loop.n_bytes,
-        };
-
+        let fin_state = FinState { stats: run_loop.stats };
         info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
@@ -375,16 +368,16 @@ impl Flusher {
 impl Flusher {
     fn incr_n_flush_conns(&mut self) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_flush_conns, .. }) => *n_flush_conns += 1,
+            Inner::Main(RunLoop { stats, .. }) => stats.n_flush_conns += 1,
             _ => unreachable!(),
         }
     }
 
-    fn incr_stats(&mut self, stats: &socket::Stats) {
+    fn incr_stats(&mut self, sstats: &socket::Stats) {
         match &mut self.inner {
-            Inner::Main(RunLoop { n_pkts, n_bytes, .. }) => {
-                *n_pkts += stats.items;
-                *n_bytes += stats.bytes;
+            Inner::Main(RunLoop { stats, .. }) => {
+                stats.n_pkts += sstats.items;
+                stats.n_bytes += sstats.bytes;
             }
             _ => unreachable!(),
         }
