@@ -236,8 +236,7 @@ impl Client {
 
         let (cio, connack) = {
             let connect = self.to_connect(false /*clean_start*/);
-            let blocking = self.cio.is_blocking();
-            ClientIO::handshake(&self, connect, sock, blocking)?
+            ClientIO::handshake(&self, connect, sock, self.cio.is_blocking())?
         };
         self.cio = cio;
         self.connack = connack;
@@ -292,7 +291,7 @@ impl Client {
     }
 }
 
-/// Read information
+/// Keep alive and ping-pong.
 impl Client {
     /// Return the server recommended keep_alive or configured keep_alive, in seconds.
     /// If returned keep_alive is non-ZERO, application shall make sure that there
@@ -307,6 +306,42 @@ impl Client {
         }
     }
 
+    /// Return the duration since last server communication.
+    pub fn elapsed(&self) -> time::Duration {
+        self.last_rcvd.elapsed()
+    }
+
+    /// Return whether, if keep_alive non-ZERO, client's communication has exceeded 1.5
+    /// times the configured `keep_alive`.
+    pub fn expired(&self) -> bool {
+        if self.connopts.keep_alive == 0 {
+            false
+        } else {
+            let keep_alive = u64::from(self.connopts.keep_alive);
+            let micros = time::Duration::from_secs(keep_alive).as_micros() as f64;
+            ((micros * 1.5) as u128) < self.last_sent.elapsed().as_micros()
+        }
+    }
+
+    /// Send a PingReq to server.
+    pub fn ping(&mut self) -> io::Result<()> {
+        self.last_sent = time::Instant::now();
+        let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+
+        cio.write_packet(self, v5::Packet::PingReq)?;
+
+        match cio.read_packet(self)? {
+            v5::Packet::PingResp => Ok(()),
+            pkt => {
+                let msg = format!("expected PingResp, got {:?}", pkt.to_packet_type());
+                Err(io::Error::new(io::ErrorKind::InvalidData, msg))
+            }
+        }
+    }
+}
+
+/// Maintanence methods
+impl Client {
     /// Returns the socket address of the local half of this TCP connection.
     pub fn local_addr(&self) -> io::Result<net::SocketAddr> {
         self.cio.local_addr()
@@ -335,32 +370,6 @@ impl Client {
     /// Gets the value of the IP_TTL option for this socket.
     pub fn ttl(&self) -> io::Result<u32> {
         self.cio.ttl()
-    }
-
-    /// Return the duration since last server communication.
-    pub fn elapsed(&self) -> time::Duration {
-        self.last_rcvd.elapsed()
-    }
-
-    /// Return whether, if keep_alive non-ZERO, client's communication has exceeded 1.5
-    /// times the configured `keep_alive`.
-    pub fn expired(&self) -> bool {
-        if self.connopts.keep_alive == 0 {
-            false
-        } else {
-            let keep_alive = u64::from(self.connopts.keep_alive);
-            let micros = time::Duration::from_secs(keep_alive).as_micros() as f64;
-            ((micros * 1.5) as u128) < self.last_sent.elapsed().as_micros()
-        }
-    }
-}
-
-/// Client communication methods.
-impl Client {
-    /// Send a PingReq to server.
-    pub fn ping(&mut self) -> io::Result<()> {
-        self.last_sent = time::Instant::now();
-        todo!()
     }
 }
 
