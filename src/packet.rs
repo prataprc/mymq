@@ -1,6 +1,8 @@
 use log::info;
 
-use std::{fmt, io, result, thread, time};
+#[allow(unused_imports)]
+use std::time;
+use std::{fmt, io, result};
 
 use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -420,6 +422,7 @@ impl MQTTWrite {
     }
 }
 
+#[cfg(feature = "broker")]
 pub fn send_disconnect<W>(
     prefix: &str,
     code: v5::DisconnReasonCode,
@@ -430,8 +433,9 @@ pub fn send_disconnect<W>(
 where
     W: io::Write,
 {
-    use crate::broker::SLEEP_10MS;
+    use crate::SLEEP_10MS;
     use log::error;
+    use std::thread;
 
     let dc = v5::Disconnect::new(code, None);
     let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);

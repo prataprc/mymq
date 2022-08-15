@@ -3,9 +3,9 @@ use log::{debug, error, info, trace, warn};
 use std::{thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{socket, AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
+use crate::broker::{socket, AppTx, Config, QueueStatus, Socket};
 
-use crate::{v5, ToJson};
+use crate::{v5, ToJson, SLEEP_10MS};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;

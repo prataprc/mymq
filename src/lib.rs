@@ -12,7 +12,7 @@
 //!
 //! _*backtrace*_, is library feature that captures backtrace at the point where error
 //! is detected by this libarary. Additionally if `logging` is enabled backtace is
-//! logged as per the configured log-backedn.
+//! logged as per the configured log-backend.
 //!
 //! _*fuzzy*_, is used only by the test infrastructure. Typical application won't have
 //! a need for this. Enabling this will provide `arbitrary::Arbitrary` implementation
@@ -44,6 +44,9 @@
 #![feature(error_iter)]
 #![feature(map_first_last)]
 #![feature(result_flattening)]
+
+/// Used by threads to sleep wait for an event to accur..
+pub const SLEEP_10MS: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;

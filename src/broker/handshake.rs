@@ -3,9 +3,9 @@ use log::{error, info};
 use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
-use crate::broker::{Cluster, Config, SLEEP_10MS};
+use crate::broker::{Cluster, Config};
 
-use crate::{v5, MQTTRead, Packetize, ToJson};
+use crate::{v5, MQTTRead, Packetize, ToJson, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type handles incoming connection.

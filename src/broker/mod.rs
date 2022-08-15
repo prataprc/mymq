@@ -1,9 +1,6 @@
 //! Broker implementation.
 
-use std::{mem, net, path, sync::mpsc, time};
-
-/// Used by threads to sleep wait for an event to accur..
-pub const SLEEP_10MS: time::Duration = time::Duration::from_millis(10);
+use std::{mem, net, path, sync::mpsc};
 
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
