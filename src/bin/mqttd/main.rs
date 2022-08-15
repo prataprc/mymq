@@ -3,8 +3,8 @@ use structopt::StructOpt;
 
 use std::{io, path, sync::mpsc};
 
-use mqtr::broker::Config;
-use mqtr::Result;
+use mymq::broker::Config;
+use mymq::Result;
 
 #[derive(Clone, StructOpt)]
 pub struct Opt {
@@ -39,7 +39,7 @@ pub enum SubCommand {
 }
 
 fn main() {
-    use mqtr::broker::Cluster;
+    use mymq::broker::Cluster;
 
     let opts = parse_cmd_line();
 
