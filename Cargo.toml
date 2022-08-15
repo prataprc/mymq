@@ -7,10 +7,6 @@ edition = "2021"
 name = "mqttd"
 required-features = ["mqttd"]
 
-[[bin]]
-name = "play"
-required-features = ["play"]
-
 [dependencies]
 # TODO: split the dependency between "broker" and "client" features.
 log = "0.4.17"
@@ -40,4 +36,3 @@ broker = ["client"]
 fuzzy = ["arbitrary"]
 
 mqttd = ["structopt", "env_logger", "chrono", "ctrlc"]
-play = ["structopt", "env_logger"]

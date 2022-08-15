@@ -3,7 +3,6 @@
   * Both "broker" and "client"
   * Only "client", this will reduce the library foot-print and make for fast-compilation.
 * Binary-mqttd, cleanup and document in lib.rs
-* Binary-play, cleanup and document in lib.rs
 * Cleanup src/broker/chash.rs,src/broker/crc.rs
 * Create a script to calculate the bare-minimum `rustc` version required.
 * Create a script to list unstable features required by this crate and depended crates.
