@@ -29,6 +29,7 @@ impl Default for ConnectOptions {
 
 /// ClientBuilder to create a customized [Client].
 pub struct ClientBuilder {
+    pub protocol_version: MqttProtocol,
     /// Provide unique client identifier, if missing, will be sent empty in CONNECT.
     pub client_id: Option<ClientID>,
     /// Socket settings for blocking io, refer [net::TcpStream::connect_timeout]
@@ -47,8 +48,6 @@ pub struct ClientBuilder {
     pub connopts: ConnectOptions,
     pub connect_properties: Option<v5::ConnectProperties>,
     pub connect_payload: v5::ConnectPayload,
-
-    protocol_version: MqttProtocol,
 }
 
 impl Default for ClientBuilder {
@@ -182,9 +181,6 @@ pub struct Client {
 
 /// Client initialization and setup
 impl Client {
-    const DEF_WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(3600);
-    const DEF_READ_TIMEOUT: time::Duration = time::Duration::from_secs(3600);
-
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
     /// else this call might panic. Returns a clone of underlying socket with read-only
     /// permission. After calling this method, `self` becomes a write-only instance.
@@ -291,6 +287,39 @@ impl Client {
     }
 }
 
+/// Maintanence methods
+impl Client {
+    /// Returns the socket address of the local half of this TCP connection.
+    pub fn local_addr(&self) -> io::Result<net::SocketAddr> {
+        self.cio.local_addr()
+    }
+
+    /// Returns the socket address of the remote peer of this TCP connection.
+    pub fn peer_addr(&self) -> io::Result<net::SocketAddr> {
+        self.cio.peer_addr()
+    }
+
+    /// Gets the value of the TCP_NODELAY option on this socket.
+    pub fn nodelay(&self) -> io::Result<bool> {
+        self.cio.nodelay()
+    }
+
+    /// Returns the read timeout of this socket.
+    pub fn read_timeout(&self) -> io::Result<Option<time::Duration>> {
+        self.cio.read_timeout()
+    }
+
+    /// Returns the write timeout of this socket.
+    pub fn write_timeout(&self) -> io::Result<Option<time::Duration>> {
+        self.cio.write_timeout()
+    }
+
+    /// Gets the value of the IP_TTL option for this socket.
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.cio.ttl()
+    }
+}
+
 /// Keep alive and ping-pong.
 impl Client {
     /// Return the server recommended keep_alive or configured keep_alive, in seconds.
@@ -336,40 +365,22 @@ impl Client {
                 let msg = format!("expected PingResp, got {:?}", pkt.to_packet_type());
                 Err(io::Error::new(io::ErrorKind::InvalidData, msg))
             }
-        }
+        }?;
+
+        let _none = mem::replace(&mut self.cio, cio);
+
+        Ok(())
     }
 }
 
-/// Maintanence methods
+/// IO methods
 impl Client {
-    /// Returns the socket address of the local half of this TCP connection.
-    pub fn local_addr(&self) -> io::Result<net::SocketAddr> {
-        self.cio.local_addr()
-    }
-
-    /// Returns the socket address of the remote peer of this TCP connection.
-    pub fn peer_addr(&self) -> io::Result<net::SocketAddr> {
-        self.cio.peer_addr()
-    }
-
-    /// Gets the value of the TCP_NODELAY option on this socket.
-    pub fn nodelay(&self) -> io::Result<bool> {
-        self.cio.nodelay()
-    }
-
-    /// Returns the read timeout of this socket.
-    pub fn read_timeout(&self) -> io::Result<Option<time::Duration>> {
-        self.cio.read_timeout()
-    }
-
-    /// Returns the write timeout of this socket.
-    pub fn write_timeout(&self) -> io::Result<Option<time::Duration>> {
-        self.cio.write_timeout()
-    }
-
-    /// Gets the value of the IP_TTL option for this socket.
-    pub fn ttl(&self) -> io::Result<u32> {
-        self.cio.ttl()
+    #[cfg(feature = "fuzzy")]
+    pub fn read_packet(&mut self) -> io::Result<v5::Packet> {
+        let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+        let packet = cio.read_packet(self)?;
+        let _none = mem::replace(&mut self.cio, cio);
+        Ok(packet)
     }
 }
 
@@ -542,10 +553,10 @@ impl ClientIO {
 
     fn write_timeout(&self) -> io::Result<Option<time::Duration>> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.read_timeout(),
+            ClientIO::Blocking { sock, .. } => sock.write_timeout(),
             ClientIO::NoBlock { .. } => Ok(None),
-            ClientIO::BlockRd { sock, .. } => sock.read_timeout(),
-            ClientIO::BlockWt { sock, .. } => sock.read_timeout(),
+            ClientIO::BlockRd { sock, .. } => sock.write_timeout(),
+            ClientIO::BlockWt { sock, .. } => sock.write_timeout(),
             ClientIO::NoBlockRd { .. } => Ok(None),
             ClientIO::NoBlockWt { .. } => Ok(None),
             ClientIO::None => unreachable!(),
@@ -576,37 +587,45 @@ impl ClientIO {
 }
 
 impl ClientIO {
-    fn read_packet(&mut self, c: &Client) -> io::Result<v5::Packet> {
+    fn read_packet(&mut self, client: &Client) -> io::Result<v5::Packet> {
         match self {
-            ClientIO::Blocking { sock, pktr, .. } => read_packet(c, sock, pktr),
-            ClientIO::NoBlock { sock, pktr, .. } => read_packet(c, sock, pktr),
-            ClientIO::BlockRd { sock, pktr, .. } => read_packet(c, sock, pktr),
-            ClientIO::NoBlockRd { sock, pktr, .. } => read_packet(c, sock, pktr),
+            ClientIO::Blocking { sock, pktr, .. } => read_packet(client, sock, pktr),
+            ClientIO::NoBlock { sock, pktr, .. } => read_packet(client, sock, pktr),
+            ClientIO::BlockRd { sock, pktr, .. } => read_packet(client, sock, pktr),
+            ClientIO::NoBlockRd { sock, pktr, .. } => read_packet(client, sock, pktr),
             _ => unreachable!(),
         }
     }
 
-    fn write_packet(&mut self, c: &Client, pkt: v5::Packet) -> io::Result<()> {
+    fn write_packet(&mut self, client: &Client, pkt: v5::Packet) -> io::Result<()> {
         match self {
-            ClientIO::Blocking { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
-            ClientIO::NoBlock { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
-            ClientIO::BlockWt { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
-            ClientIO::NoBlockWt { sock, pktw, .. } => write_packet(c, sock, pktw, pkt),
+            ClientIO::Blocking { sock, pktw, .. } => {
+                write_packet(client, sock, pktw, pkt)
+            }
+            ClientIO::NoBlock { sock, pktw, .. } => write_packet(client, sock, pktw, pkt),
+            ClientIO::BlockWt { sock, pktw, .. } => write_packet(client, sock, pktw, pkt),
+            ClientIO::NoBlockWt { sock, pktw, .. } => {
+                write_packet(client, sock, pktw, pkt)
+            }
             _ => unreachable!(),
         }
     }
 }
 
-fn read_packet<R>(c: &Client, sock: &mut R, pktr: &mut MQTTRead) -> io::Result<v5::Packet>
+fn read_packet<R>(
+    client: &Client,
+    sock: &mut R,
+    pktr: &mut MQTTRead,
+) -> io::Result<v5::Packet>
 where
     R: io::Read,
 {
     use crate::MQTTRead::{Fin, Header, Init, Remain};
 
     let mut timeout = RwTimeout::default();
+    timeout.set_read_timeout(client.read_timeout);
 
     let mut pr = mem::replace(pktr, MQTTRead::default());
-    let read_timeout = c.read_timeout.unwrap_or(Client::DEF_READ_TIMEOUT);
 
     let res = loop {
         let (val, _would_block) = match pr.read(sock) {
@@ -618,10 +637,8 @@ where
         match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !timeout.read_elapsed() => {
                 trace!("read retrying");
-                timeout.set_read_timeout(true, read_timeout);
             }
             Init { .. } | Header { .. } | Remain { .. } => {
-                timeout.set_read_timeout(false, read_timeout);
                 let s = format!("disconnect, pkt-read timesout {:?}", timeout);
                 break Err(io::Error::new(io::ErrorKind::TimedOut, s));
             }
@@ -639,7 +656,7 @@ where
         };
     };
 
-    let _pr_none = mem::replace(pktr, pr);
+    let _none = mem::replace(pktr, pr);
     res
 }
 
@@ -655,9 +672,9 @@ where
     use crate::MQTTWrite::{Fin, Init, Remain};
 
     let mut timeout = RwTimeout::default();
+    timeout.set_write_timeout(client.write_timeout);
 
     let mut pw = mem::replace(pktw, MQTTWrite::default());
-    let write_timeout = client.write_timeout.unwrap_or(Client::DEF_WRITE_TIMEOUT);
 
     let blob = pkt
         .encode()
@@ -673,10 +690,8 @@ where
         match &pw {
             Init { .. } | Remain { .. } if timeout.write_elapsed() => {
                 trace!("write retrying");
-                timeout.set_write_timeout(true, write_timeout);
             }
             Init { .. } | Remain { .. } => {
-                timeout.set_write_timeout(false, write_timeout);
                 let s = format!("packet write fail after {:?}", timeout);
                 break Err(io::Error::new(io::ErrorKind::TimedOut, s));
             }
@@ -691,37 +706,34 @@ where
 
 #[derive(Default, Debug)]
 struct RwTimeout {
-    timeout: Option<time::Instant>,
+    deadline: Option<time::Instant>,
 }
 
 impl RwTimeout {
     fn read_elapsed(&self) -> bool {
-        match &self.timeout {
-            Some(timeout) if timeout > &time::Instant::now() => true,
+        match &self.deadline {
+            Some(deadline) if &time::Instant::now() > deadline => true,
             Some(_) | None => false,
         }
     }
 
-    fn set_read_timeout(&mut self, retry: bool, timeout: time::Duration) {
-        if retry && self.timeout.is_none() {
-            self.timeout = Some(time::Instant::now() + timeout);
-        } else if retry == false {
-            self.timeout = None;
+    fn set_read_timeout(&mut self, timeout: Option<time::Duration>) {
+        if let Some(timeout) = timeout {
+            let now = time::Instant::now();
+            self.deadline = Some(now.checked_add(timeout).unwrap());
         }
     }
 
     fn write_elapsed(&self) -> bool {
-        match &self.timeout {
-            Some(timeout) if timeout > &time::Instant::now() => true,
+        match &self.deadline {
+            Some(deadline) if &time::Instant::now() > deadline => true,
             Some(_) | None => false,
         }
     }
 
-    fn set_write_timeout(&mut self, retry: bool, timeout: time::Duration) {
-        if retry && self.timeout.is_none() {
-            self.timeout = Some(time::Instant::now() + timeout);
-        } else if retry == false {
-            self.timeout = None;
+    fn set_write_timeout(&mut self, timeout: Option<time::Duration>) {
+        if let Some(timeout) = timeout {
+            self.deadline = Some(time::Instant::now() + timeout);
         }
     }
 }

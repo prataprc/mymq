@@ -10,7 +10,7 @@
   * Log version and SHA1.
   * Log system resources like CPU, Memory (Total, Free), Net-Interfaces,
     Disks (Count, Total, Free).
-* Review .ok() .unwrap() `allow_panic!()`, panic!() and unreachable!() calls.
+* Review .ok() .unwrap() `app_fatal!()`, panic!() and unreachable!() calls.
 * Review assert macro calls.
 * Review `as` type-casting for numbers.
 * Review code for `#[allow(dead_code)]`.

@@ -232,7 +232,11 @@ impl Threadable for Listener {
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+            if let Err(err) = self.as_mut_poll().poll(&mut events, timeout) {
+                self.as_app_tx().send("exit".to_string()).ok();
+                error!("{} thread error exit {} ", self.prefix, err);
+                break;
+            }
             self.incr_n_polls();
 
             match self.mio_events(&rx, &events) {

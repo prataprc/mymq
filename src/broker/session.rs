@@ -593,6 +593,7 @@ impl Session {
         for pkt in pkts.into_iter() {
             match pkt {
                 v5::Packet::PingReq => {
+                    trace!("{} received PingReq", self.prefix);
                     out_acks.push(Message::new_ping_resp());
                 }
                 v5::Packet::Publish(publ) => {

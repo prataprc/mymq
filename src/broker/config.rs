@@ -72,16 +72,16 @@ pub struct Config {
     /// Read timeout on MQTT socket, in seconds. For every new packet this timeout
     /// will kick in, and within the timeout period if a new packet is not completely
     /// read, connection will be closed.
-    /// * **Default**: [Config::DEF_SOCK_MQTT_READ_TIMEOUT]
+    /// * **Default**: None,
     /// * **Mutable**: No
-    pub sock_mqtt_read_timeout: u32,
+    pub sock_mqtt_read_timeout: Option<u32>,
 
     /// Write timeout on MQTT socket, in seconds. For every new packet this timeout
     /// will kick in, and within the timeout period if a new packet is not completely
     /// written, connection will be closed.
-    /// * **Default**: [Config::DEF_SOCK_MQTT_WRITE_TIMEOUT]
+    /// * **Default**: None,
     /// * **Mutable**: No
-    pub sock_mqtt_write_timeout: u32,
+    pub sock_mqtt_write_timeout: Option<u32>,
 
     /// Flush timeout on MQTT socket, in seconds. If broker decides to shutdown a
     /// connection, because it is broken/half-broken or Malformed packets or due to
@@ -170,8 +170,8 @@ impl Default for Config {
             port: Self::DEF_MQTT_PORT,
             nodes: vec![node],
             sock_mqtt_connect_timeout: Self::DEF_SOCK_MQTT_CONNECT_TIMEOUT,
-            sock_mqtt_read_timeout: Self::DEF_SOCK_MQTT_READ_TIMEOUT,
-            sock_mqtt_write_timeout: Self::DEF_SOCK_MQTT_WRITE_TIMEOUT,
+            sock_mqtt_read_timeout: None,
+            sock_mqtt_write_timeout: None,
             sock_mqtt_flush_timeout: Self::DEF_SOCK_MQTT_FLUSH_TIMEOUT,
             mqtt_max_packet_size: Self::DEF_MQTT_MAX_PACKET_SIZE,
             mqtt_pkt_batch_size: Self::DEF_MQTT_PKT_BATCH_SIZE,
@@ -205,13 +205,13 @@ impl TryFrom<toml::Value> for Config {
                     as_integer().map(|n| n.to_string())
                 );
                 config_field!(
-                    t,
+                    opt: t,
                     sock_mqtt_read_timeout,
                     def,
                     as_integer().map(|n| n.to_string())
                 );
                 config_field!(
-                    t,
+                    opt: t,
                     sock_mqtt_write_timeout,
                     def,
                     as_integer().map(|n| n.to_string())
@@ -304,10 +304,6 @@ impl Config {
     pub const DEF_MAX_NODES: u32 = 1;
     /// Refer to [Config::sock_mqtt_connect_timeout]
     pub const DEF_SOCK_MQTT_CONNECT_TIMEOUT: u32 = 5; // in seconds.
-    /// Refer to [Config::sock_mqtt_read_timeout]
-    pub const DEF_SOCK_MQTT_READ_TIMEOUT: u32 = 5; // in seconds.
-    /// Refer to [Config::sock_mqtt_write_timeout]
-    pub const DEF_SOCK_MQTT_WRITE_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::sock_mqtt_flush_timeout]
     pub const DEF_SOCK_MQTT_FLUSH_TIMEOUT: u32 = 10; // in seconds.
     /// Refer to [Config::mqtt_max_packet_size]

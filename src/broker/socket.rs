@@ -108,7 +108,8 @@ pub struct Socket {
 
 pub struct Source {
     pub pr: MQTTRead,
-    pub timeout: Option<time::SystemTime>,
+    pub timeout: time::Duration,
+    pub deadline: Option<time::SystemTime>,
     pub session_tx: PktTx,
     // All incoming MQTT packets on this socket first land here.
     pub packets: VecDeque<v5::Packet>,
@@ -116,7 +117,8 @@ pub struct Source {
 
 pub struct Sink {
     pub pw: MQTTWrite,
-    pub timeout: Option<time::SystemTime>,
+    pub timeout: time::Duration,
+    pub deadline: Option<time::SystemTime>,
     pub miot_rx: PktRx,
     // All out-going MQTT packets on this socket first land here.
     pub packets: VecDeque<v5::Packet>,
@@ -125,35 +127,39 @@ pub struct Sink {
 impl Socket {
     pub fn read_elapsed(&self) -> bool {
         let now = time::SystemTime::now();
-        match &self.rd.timeout {
-            Some(timeout) if &now > timeout => true,
+        match &self.rd.deadline {
+            Some(deadline) if &now > deadline => true,
             Some(_) | None => false,
         }
     }
 
-    pub fn set_read_timeout(&mut self, retry: bool, timeout: u64) {
-        if retry && self.rd.timeout.is_none() {
-            let timeout = time::SystemTime::now() + time::Duration::from_secs(timeout);
-            self.rd.timeout = Some(timeout);
-        } else if retry == false {
-            self.rd.timeout = None;
+    pub fn set_read_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+        if let Some(timeout) = timeout {
+            if retry && self.rd.deadline.is_none() {
+                let now = time::SystemTime::now();
+                self.rd.deadline = Some(now + time::Duration::from_secs(timeout as u64));
+            } else if retry == false {
+                self.rd.deadline = None;
+            }
         }
     }
 
     pub fn write_elapsed(&self) -> bool {
         let now = time::SystemTime::now();
-        match &self.wt.timeout {
-            Some(timeout) if &now > timeout => true,
+        match &self.wt.deadline {
+            Some(deadline) if &now > deadline => true,
             Some(_) | None => false,
         }
     }
 
-    pub fn set_write_timeout(&mut self, retry: bool, timeout: u64) {
-        if retry && self.wt.timeout.is_none() {
-            let timeout = time::SystemTime::now() + time::Duration::from_secs(timeout);
-            self.wt.timeout = Some(timeout);
-        } else if retry == false {
-            self.wt.timeout = None;
+    pub fn set_write_timeout(&mut self, retry: bool, timeout: Option<u32>) {
+        if let Some(timeout) = timeout {
+            if retry && self.wt.deadline.is_none() {
+                let now = time::SystemTime::now();
+                self.wt.deadline = Some(now + time::Duration::from_secs(timeout as u64));
+            } else if retry == false {
+                self.wt.deadline = None;
+            }
         }
     }
 }
@@ -204,16 +210,16 @@ impl Socket {
         let status = match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !self.read_elapsed() => {
                 trace!("{} read retrying", prefix);
-                self.set_read_timeout(true, config.sock_mqtt_read_timeout as u64);
+                self.set_read_timeout(true, config.sock_mqtt_read_timeout);
                 QueueStatus::Block(Vec::new())
             }
             Init { .. } | Header { .. } | Remain { .. } => {
                 error!("{} rd_timeout:{:?} disconnecting", prefix, self.rd.timeout);
-                self.set_read_timeout(false, config.sock_mqtt_read_timeout as u64);
+                self.set_read_timeout(false, config.sock_mqtt_read_timeout);
                 QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
-                self.set_read_timeout(false, config.sock_mqtt_read_timeout as u64);
+                self.set_read_timeout(false, config.sock_mqtt_read_timeout);
                 let pkt = pr.parse()?;
                 pr = pr.reset();
                 QueueStatus::Ok(vec![pkt])
@@ -324,16 +330,16 @@ impl Socket {
             Ok((pw, _would_block)) => match &pw {
                 Init { .. } | Remain { .. } if !self.write_elapsed() => {
                     trace!("{} write retrying", prefix);
-                    self.set_write_timeout(true, config.sock_mqtt_write_timeout as u64);
+                    self.set_write_timeout(true, config.sock_mqtt_write_timeout);
                     (QueueStatus::Block(Vec::new()), pw)
                 }
                 Init { .. } | Remain { .. } => {
-                    self.set_write_timeout(false, config.sock_mqtt_write_timeout as u64);
+                    self.set_write_timeout(false, config.sock_mqtt_write_timeout);
                     error!("{} wt_timeout:{:?} disconnecting..", prefix, self.wt.timeout);
                     (QueueStatus::Disconnected(Vec::new()), pw)
                 }
                 Fin { .. } => {
-                    self.set_write_timeout(false, config.sock_mqtt_write_timeout as u64);
+                    self.set_write_timeout(false, config.sock_mqtt_write_timeout);
                     (QueueStatus::Ok(Vec::new()), pw)
                 }
                 MQTTWrite::None => unreachable!(),

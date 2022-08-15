@@ -464,7 +464,7 @@ impl Shard {
         match &self.inner {
             Inner::Handle(Handle { thrd, .. }) => {
                 let req = Request::SetShardQueues(shards);
-                allow_panic!(self, thrd.request(req).flatten());
+                app_fatal!(self, thrd.request(req).flatten());
             }
             _ => unreachable!(),
         }
@@ -536,15 +536,14 @@ impl Shard {
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
 
         // this a work around to wire up all the threads without using unsafe.
-        let req = allow_panic!(self, rx.recv());
-        let msg_rx = match req {
+        let msg_rx = match rx.recv().unwrap() {
             (Request::SetMiot(miot, msg_rx), Some(tx)) => {
                 let active_loop = match &mut self.inner {
                     Inner::MainActive(active_loop) => active_loop,
                     _ => unreachable!(),
                 };
                 active_loop.miot = miot;
-                allow_panic!(&self, tx.send(Ok(Response::Ok)));
+                app_fatal!(&self, tx.send(Ok(Response::Ok)));
                 msg_rx
             }
             _ => unreachable!(),
@@ -553,7 +552,11 @@ impl Shard {
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+            if let Err(err) = self.as_mut_poll().poll(&mut events, timeout) {
+                self.as_app_tx().send("exit".to_string()).ok();
+                error!("{} thread error exit {} ", self.prefix, err);
+                break;
+            }
 
             match self.mio_events(&rx, &events) {
                 true => break,
@@ -608,7 +611,11 @@ impl Shard {
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+            if let Err(err) = self.as_mut_poll().poll(&mut events, timeout) {
+                self.as_app_tx().send("exit".to_string()).ok();
+                error!("{} thread error exit {} ", self.prefix, err);
+                break;
+            }
 
             match self.mio_events(&rx, &events) {
                 true => break,
@@ -741,10 +748,21 @@ impl Shard {
         for (client_id, err) in failed_sessions {
             let miot = self.as_mut_miot();
 
-            let res = allow_panic!(&self, miot.remove_connection(&client_id));
-            if let Some(socket) = res {
-                let req = Request::FlushConnection { socket, err: Some(err) };
-                self.handle_flush_connection(req);
+            match miot.remove_connection(&client_id) {
+                Ok(Some(socket)) => {
+                    let req = Request::FlushConnection { socket, err: Some(err) };
+                    self.handle_flush_connection(req);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
             }
         }
 
@@ -862,11 +880,22 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            let res = allow_panic!(&self, miot.remove_connection(&client_id));
-            if let Some(socket) = res {
-                let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.err() };
-                self.handle_flush_connection(req);
+            match miot.remove_connection(&client_id) {
+                Ok(Some(socket)) => {
+                    let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
+                    let req = Request::FlushConnection { socket, err: err.err() };
+                    self.handle_flush_connection(req);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
             }
         }
     }
@@ -934,11 +963,22 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            let res = allow_panic!(&self, miot.remove_connection(&client_id));
-            if let Some(socket) = res {
-                let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.err() };
-                self.handle_flush_connection(req);
+            match miot.remove_connection(&client_id) {
+                Ok(Some(socket)) => {
+                    let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
+                    let req = Request::FlushConnection { socket, err: err.err() };
+                    self.handle_flush_connection(req);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
             }
         }
     }
@@ -1032,11 +1072,22 @@ impl Shard {
                 _ => unreachable!(),
             };
 
-            let res = allow_panic!(&self, miot.remove_connection(&client_id));
-            if let Some(socket) = res {
-                let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
-                let req = Request::FlushConnection { socket, err: err.err() };
-                self.handle_flush_connection(req);
+            match miot.remove_connection(&client_id) {
+                Ok(Some(socket)) => {
+                    let err: Result<()> = err!(SlowClient, code: UnspecifiedError, "");
+                    let req = Request::FlushConnection { socket, err: err.err() };
+                    self.handle_flush_connection(req);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
             }
         }
     }
@@ -1238,29 +1289,37 @@ impl Shard {
             session.remove_topic_filters(topic_filters);
             session.close();
 
-            if let Some(socket) = allow_panic!(self, miot.remove_connection(&client_id)) {
-                mem::drop(sessions);
-                mem::drop(miot);
-                mem::drop(topic_filters);
+            match miot.remove_connection(&client_id) {
+                Ok(Some(socket)) => {
+                    mem::drop(sessions);
+                    mem::drop(miot);
+                    mem::drop(topic_filters);
 
-                let err: Result<()> = err!(
-                    SessionTakenOver,
-                    code: SessionTakenOver,
-                    "{} client {}",
-                    self.prefix,
-                    sock.peer_addr().unwrap()
-                );
+                    let err: Result<()> = err!(
+                        SessionTakenOver,
+                        code: SessionTakenOver,
+                        "{} client {}",
+                        self.prefix,
+                        sock.peer_addr().unwrap()
+                    );
 
-                let arg = Request::FlushConnection { socket, err: err.err() };
-                self.handle_flush_connection(arg);
+                    let arg = Request::FlushConnection { socket, err: err.err() };
+                    self.handle_flush_connection(arg);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
             }
         }
 
         // add_connection further down shall wake miot-thread.
-        let ActiveLoop { sessions, miot, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            _ => unreachable!(),
-        };
         {
             let client_id = client_id.clone();
             let def = Config::DEF_MQTT_MAX_PACKET_SIZE;
@@ -1271,9 +1330,13 @@ impl Shard {
                 downstream,
                 max_packet_size: session.as_connect().max_packet_size(def),
             };
-            allow_panic!(&self, miot.add_connection(args));
+            app_fatal!(&self, self.as_miot().add_connection(args));
         }
 
+        let ActiveLoop { sessions, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            _ => unreachable!(),
+        };
         sessions.insert(client_id.clone(), session);
         info!("{} raddr:{} adding new session to shard", self.prefix, raddr);
 
@@ -1308,7 +1371,7 @@ impl Shard {
             _ => unreachable!(),
         };
         let args = FlushConnectionArgs { socket, err: err };
-        allow_panic!(&self, flusher.flush_connection(args));
+        app_fatal!(&self, flusher.flush_connection(args));
 
         Response::Ok
     }

@@ -159,14 +159,13 @@ macro_rules! log_error {
 /// Before that, log the error, send "panic" message to application's back channel and
 /// then panic. `self` is the context type in which panic happens.
 #[cfg(feature = "broker")]
-macro_rules! allow_panic {
+macro_rules! app_fatal {
     ($self:expr, $($args:expr),+) => {{
         match $($args),+ {
-            Ok(val) => val,
+            Ok(_) => (),
             Err(err) => {
-                $self.as_app_tx().send("panic".to_string()).ok();
-                log::error!("{}, now we are going to panic", $self.prefix);
-                panic!("{}", err);
+                $self.as_app_tx().send("fatal".to_string()).ok();
+                log::error!("{} fatal error {} ", $self.prefix, err);
             }
         }
     }};

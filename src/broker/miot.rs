@@ -246,7 +246,7 @@ pub struct AddConnectionArgs {
 impl Miot {
     pub fn wake(&self) {
         match &self.inner {
-            Inner::Handle(waker, _thrd) => allow_panic!(self, waker.wake()),
+            Inner::Handle(waker, _thrd) => app_fatal!(self, waker.wake()),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
@@ -304,7 +304,11 @@ impl Threadable for Miot {
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
-            allow_panic!(&self, self.as_mut_poll().poll(&mut events, timeout));
+            if let Err(err) = self.as_mut_poll().poll(&mut events, timeout) {
+                self.as_app_tx().send("exit".to_string()).ok();
+                error!("{} thread error exit {} ", self.prefix, err);
+                break;
+            }
 
             self.incr_n_polls();
 
@@ -422,7 +426,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                allow_panic!(&self, self.as_shard().flush_connection(socket, err));
+                app_fatal!(&self, self.as_shard().flush_connection(socket, err));
             }
         }
     }
@@ -462,7 +466,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                allow_panic!(&self, self.as_shard().flush_connection(socket, err));
+                app_fatal!(&self, self.as_shard().flush_connection(socket, err));
             }
         }
 
@@ -480,37 +484,38 @@ impl Miot {
         };
         let raddr = args.conn.peer_addr().unwrap();
 
-        let (poll, conns, token) = match &mut self.inner {
-            Inner::Main(RunLoop { poll, conns, next_token, .. }) => {
-                let token = *next_token;
-                *next_token = mio::Token(next_token.0 + 1);
-                (poll, conns, token)
-            }
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
         info!("{} raddr:{} adding connection ...", self.prefix, raddr);
 
         let max_packet_size = self.config.mqtt_max_packet_size;
         let (session_tx, miot_rx) = (args.upstream, args.downstream);
 
         let interests = Interest::READABLE | Interest::WRITABLE;
-        allow_panic!(self, poll.registry().register(&mut args.conn, token, interests));
+        let token = self.next_token();
+        app_fatal!(
+            self,
+            self.as_mut_poll().registry().register(&mut args.conn, token, interests)
+        );
 
         let rd = socket::Source {
             pr: MQTTRead::new(max_packet_size),
-            timeout: None,
+            timeout: time::Duration::default(),
+            deadline: None,
             session_tx,
             packets: VecDeque::default(),
         };
         let wt = socket::Sink {
             pw: MQTTWrite::new(&[], args.max_packet_size),
-            timeout: None,
+            timeout: time::Duration::default(),
+            deadline: None,
             miot_rx,
             packets: VecDeque::default(),
         };
         let (client_id, conn) = (args.client_id.clone(), args.conn);
         let socket = socket::Socket { client_id, conn, token, rd, wt };
+        let conns = match &mut self.inner {
+            Inner::Main(RunLoop { conns, .. }) => conns,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
         conns.insert(args.client_id, socket);
 
         self.incr_n_add_conns();
@@ -533,7 +538,7 @@ impl Miot {
             Some(mut socket) => {
                 let raddr = socket.conn.peer_addr().unwrap();
                 info!("{} raddr:{} removing connection ...", self.prefix, raddr);
-                allow_panic!(&self, poll.registry().deregister(&mut socket.conn));
+                app_fatal!(&self, poll.registry().deregister(&mut socket.conn));
                 Response::Removed(socket)
             }
             None => {
@@ -634,6 +639,17 @@ impl Miot {
                 stats.n_wbytes += wstats.bytes;
             }
             _ => unreachable!(),
+        }
+    }
+
+    fn next_token(&mut self) -> mio::Token {
+        match &mut self.inner {
+            Inner::Main(RunLoop { next_token, .. }) => {
+                let token = *next_token;
+                *next_token = mio::Token(next_token.0 + 1);
+                token
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
