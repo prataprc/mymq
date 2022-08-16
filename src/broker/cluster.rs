@@ -189,7 +189,7 @@ impl Cluster {
 
     /// Create a cluster from configuration. Returned Cluster shall be in `Init` state.
     /// To start the cluster call [Cluster::spawn].
-    pub fn from_config(config: Config) -> Result<Cluster> {
+    pub fn from_config(config: &Config) -> Result<Cluster> {
         // validate
         if config.num_shards == 0 {
             err!(InvalidInput, desc: "num_shards can't be ZERO")?;
@@ -204,7 +204,7 @@ impl Cluster {
         let mut val = Cluster {
             name: config.name.clone(),
             prefix: String::default(),
-            config,
+            config: config.clone(),
             inner: Inner::Init,
         };
         val.prefix = val.prefix();

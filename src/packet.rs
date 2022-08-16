@@ -59,6 +59,16 @@ impl MQTTRead {
         }
     }
 
+    pub fn to_max_packet_size(&self) -> u32 {
+        match self {
+            MQTTRead::Init { max_size, .. } => *max_size as u32,
+            MQTTRead::Header { max_size, .. } => *max_size as u32,
+            MQTTRead::Remain { max_size, .. } => *max_size as u32,
+            MQTTRead::Fin { max_size, .. } => *max_size as u32,
+            MQTTRead::None => unreachable!(),
+        }
+    }
+
     // return (self,would_block)
     // Disconnected, and implies a bad connection.
     // MalformedPacket, implies a DISCONNECT and socket close
@@ -350,6 +360,15 @@ impl MQTTWrite {
         let mut data = Vec::with_capacity(max_size as usize);
         data.extend_from_slice(buf);
         MQTTWrite::Init { data, max_size: max_size as usize }
+    }
+
+    pub fn to_max_packet_size(&self) -> u32 {
+        match self {
+            MQTTWrite::Init { max_size, .. } => *max_size as u32,
+            MQTTWrite::Remain { max_size, .. } => *max_size as u32,
+            MQTTWrite::Fin { max_size, .. } => *max_size as u32,
+            MQTTWrite::None => unreachable!(),
+        }
     }
 
     // return (self,would_block)

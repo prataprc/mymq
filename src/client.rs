@@ -7,8 +7,9 @@ use std::os::unix::io::{FromRawFd, IntoRawFd};
 #[cfg(windows)]
 use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
-use std::{io, mem, net, time};
+use std::{collections::VecDeque, fmt, io, mem, net, result, time};
 
+use crate::ErrorKind;
 use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
 
 pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
@@ -151,6 +152,8 @@ impl ClientBuilder {
 
             last_sent: time::Instant::now(),
             last_rcvd: time::Instant::now(),
+
+            in_packets: VecDeque::default(),
             cio: ClientIO::None,
         }
     }
@@ -176,16 +179,19 @@ pub struct Client {
 
     last_rcvd: time::Instant,
     last_sent: time::Instant,
+
+    in_packets: VecDeque<v5::Packet>,
     cio: ClientIO,
 }
 
 /// Client initialization and setup
 impl Client {
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
-    /// else this call might panic. Returns a clone of underlying socket with read-only
-    /// permission. After calling this method, `self` becomes a write-only instance.
-    pub fn clone_read(&mut self) -> io::Result<Client> {
+    /// else this call might panic. Returns a tuple of
+    /// (read-only-client, write-onlyu-client).
+    pub fn split_rw(mut self) -> io::Result<(Client, Client)> {
         let cio = mem::replace(&mut self.cio, ClientIO::None);
+
         let (rd_cio, wt_cio) = cio.split_sock()?;
         let reader = Client {
             client_id: self.client_id.clone(),
@@ -206,11 +212,13 @@ impl Client {
 
             last_rcvd: self.last_sent,
             last_sent: self.last_rcvd,
+
+            in_packets: VecDeque::default(),
             cio: rd_cio,
         };
 
         let _none = mem::replace(&mut self.cio, wt_cio);
-        Ok(reader)
+        Ok((reader, self))
     }
 
     /// If error is detected on this `Client` instance call this method. Reconnecting
@@ -343,23 +351,20 @@ impl Client {
     /// Return whether, if keep_alive non-ZERO, client's communication has exceeded 1.5
     /// times the configured `keep_alive`.
     pub fn expired(&self) -> bool {
-        if self.connopts.keep_alive == 0 {
-            false
-        } else {
-            let keep_alive = u64::from(self.connopts.keep_alive);
-            let micros = time::Duration::from_secs(keep_alive).as_micros() as f64;
-            ((micros * 1.5) as u128) < self.last_sent.elapsed().as_micros()
+        match self.keep_alive() {
+            0 => false,
+            keep_alive => {
+                let keep_alive = time::Duration::from_secs(keep_alive as u64).as_micros();
+                keep_alive < self.last_sent.elapsed().as_micros()
+            }
         }
     }
 
     /// Send a PingReq to server.
     pub fn ping(&mut self) -> io::Result<()> {
-        self.last_sent = time::Instant::now();
-        let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+        self.write(v5::Packet::PingReq)?;
 
-        cio.write_packet(self, v5::Packet::PingReq)?;
-
-        match cio.read_packet(self)? {
+        match self.read()? {
             v5::Packet::PingResp => Ok(()),
             pkt => {
                 let msg = format!("expected PingResp, got {:?}", pkt.to_packet_type());
@@ -367,20 +372,70 @@ impl Client {
             }
         }?;
 
-        let _none = mem::replace(&mut self.cio, cio);
-
         Ok(())
     }
 }
 
 /// IO methods
 impl Client {
-    #[cfg(feature = "fuzzy")]
-    pub fn read_packet(&mut self) -> io::Result<v5::Packet> {
+    pub fn read(&mut self) -> io::Result<v5::Packet> {
+        match self.in_packets.pop_front() {
+            Some(packet) => Ok(packet),
+            None => {
+                self.last_rcvd = time::Instant::now();
+
+                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+                let res = cio.read_packet(self);
+                let _none = mem::replace(&mut self.cio, cio);
+                res
+            }
+        }
+    }
+
+    pub fn read_noblock(&mut self) -> io::Result<v5::Packet> {
+        match self.in_packets.pop_front() {
+            Some(packet) => Ok(packet),
+            None => {
+                self.last_rcvd = time::Instant::now();
+
+                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+                let res = cio.read_noblock(self);
+                let _none = mem::replace(&mut self.cio, cio);
+                res
+            }
+        }
+    }
+
+    pub fn write(&mut self, packet: v5::Packet) -> io::Result<()> {
+        self.try_read()?;
+
+        self.last_sent = time::Instant::now();
+
         let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-        let packet = cio.read_packet(self)?;
+        let res = cio.write_packet(self, packet);
         let _none = mem::replace(&mut self.cio, cio);
-        Ok(packet)
+        res
+    }
+
+    pub fn is_disconnected(&mut self) -> io::Result<bool> {
+        self.try_read()?;
+
+        match self.in_packets.pop_back() {
+            Some(v5::Packet::Disconnect(_)) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn try_read(&mut self) -> io::Result<()> {
+        match self.read_noblock() {
+            Ok(packet) => {
+                self.in_packets.push_back(packet);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -434,6 +489,20 @@ enum ClientIO {
     None,
 }
 
+impl fmt::Debug for ClientIO {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            ClientIO::Blocking { .. } => write!(f, "ClientIO::Blocking"),
+            ClientIO::NoBlock { .. } => write!(f, "ClientIO::NoBlock"),
+            ClientIO::BlockRd { .. } => write!(f, "ClientIO::BlockRd"),
+            ClientIO::BlockWt { .. } => write!(f, "ClientIO::BlockWt"),
+            ClientIO::NoBlockRd { .. } => write!(f, "ClientIO::NoBlockRd"),
+            ClientIO::NoBlockWt { .. } => write!(f, "ClientIO::NoBlockWt"),
+            ClientIO::None { .. } => write!(f, "ClientIO::None"),
+        }
+    }
+}
+
 impl ClientIO {
     fn handshake(
         client: &Client,
@@ -446,9 +515,15 @@ impl ClientIO {
         let mut pktr = MQTTRead::new(max_packet_size);
         let mut pktw = MQTTWrite::new(&[], max_packet_size);
 
-        write_packet(client, &mut sock, &mut pktw, v5::Packet::Connect(connect))?;
+        write_packet(
+            client,
+            &mut sock,
+            &mut pktw,
+            Some(v5::Packet::Connect(connect)),
+            true, // block
+        )?;
 
-        let (val, connack) = match read_packet(client, &mut sock, &mut pktr)? {
+        let (val, connack) = match read_packet(client, &mut sock, &mut pktr, false)? {
             v5::Packet::ConnAck(connack) => (pktr, connack),
             pkt => {
                 let msg = format!("unexpected in handshake {:?}", pkt.to_packet_type());
@@ -588,26 +663,64 @@ impl ClientIO {
 
 impl ClientIO {
     fn read_packet(&mut self, client: &Client) -> io::Result<v5::Packet> {
+        let block = true;
         match self {
-            ClientIO::Blocking { sock, pktr, .. } => read_packet(client, sock, pktr),
-            ClientIO::NoBlock { sock, pktr, .. } => read_packet(client, sock, pktr),
-            ClientIO::BlockRd { sock, pktr, .. } => read_packet(client, sock, pktr),
-            ClientIO::NoBlockRd { sock, pktr, .. } => read_packet(client, sock, pktr),
+            ClientIO::Blocking { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, block)
+            }
+            ClientIO::NoBlock { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, block)
+            }
+            ClientIO::BlockRd { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, block)
+            }
+            ClientIO::NoBlockRd { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, block)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn read_noblock(&mut self, client: &Client) -> io::Result<v5::Packet> {
+        match self {
+            ClientIO::Blocking { sock, pktr, .. } => {
+                sock.set_nonblocking(true)?;
+                let res = read_packet(client, sock, pktr, false);
+                sock.set_nonblocking(false)?;
+                res
+            }
+            ClientIO::NoBlock { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, false)
+            }
+            ClientIO::BlockRd { sock, pktr, .. } => {
+                sock.set_nonblocking(true)?;
+                let res = read_packet(client, sock, pktr, false);
+                sock.set_nonblocking(false)?;
+                res
+            }
+            ClientIO::NoBlockRd { sock, pktr, .. } => {
+                read_packet(client, sock, pktr, false)
+            }
             _ => unreachable!(),
         }
     }
 
     fn write_packet(&mut self, client: &Client, pkt: v5::Packet) -> io::Result<()> {
+        let block = true;
         match self {
             ClientIO::Blocking { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, pkt)
+                write_packet(client, sock, pktw, Some(pkt), block)
             }
-            ClientIO::NoBlock { sock, pktw, .. } => write_packet(client, sock, pktw, pkt),
-            ClientIO::BlockWt { sock, pktw, .. } => write_packet(client, sock, pktw, pkt),
+            ClientIO::NoBlock { sock, pktw, .. } => {
+                write_packet(client, sock, pktw, Some(pkt), block)
+            }
+            ClientIO::BlockWt { sock, pktw, .. } => {
+                write_packet(client, sock, pktw, Some(pkt), block)
+            }
             ClientIO::NoBlockWt { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, pkt)
+                write_packet(client, sock, pktw, Some(pkt), block)
             }
-            _ => unreachable!(),
+            cio => unreachable!("{:?}", cio),
         }
     }
 }
@@ -616,6 +729,7 @@ fn read_packet<R>(
     client: &Client,
     sock: &mut R,
     pktr: &mut MQTTRead,
+    block: bool,
 ) -> io::Result<v5::Packet>
 where
     R: io::Read,
@@ -626,13 +740,31 @@ where
     timeout.set_read_timeout(client.read_timeout);
 
     let mut pr = mem::replace(pktr, MQTTRead::default());
-
+    let max_packet_size = pr.to_max_packet_size();
     let res = loop {
-        let (val, _would_block) = match pr.read(sock) {
-            Ok(tuple) => tuple,
-            Err(err) => Err(io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?,
+        pr = match pr.read(sock) {
+            Ok((val, true)) if !block => {
+                pr = val;
+                break Err(io::Error::new(io::ErrorKind::WouldBlock, ""));
+            }
+            Ok((val, _)) => val,
+            Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                pr = MQTTRead::new(max_packet_size);
+                let s = format!("malformed packet from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::InvalidData, s));
+            }
+            Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                pr = MQTTRead::new(max_packet_size);
+                let s = format!("protocol error from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::InvalidData, s));
+            }
+            Err(err) if err.kind() == ErrorKind::Disconnected => {
+                pr = MQTTRead::new(max_packet_size);
+                let s = format!("disconnected from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::BrokenPipe, s));
+            }
+            Err(err) => unreachable!("unexpected error {}", err),
         };
-        pr = val;
 
         match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !timeout.read_elapsed() => {
@@ -642,16 +774,17 @@ where
                 let s = format!("disconnect, pkt-read timesout {:?}", timeout);
                 break Err(io::Error::new(io::ErrorKind::TimedOut, s));
             }
-            Fin { .. } => {
-                let pkt = match pr.parse() {
-                    Ok(pkt) => pkt,
-                    Err(err) => {
-                        Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
-                    }
-                };
-                pr = pr.reset();
-                break Ok(pkt);
-            }
+            Fin { .. } => match pr.parse() {
+                Ok(pkt) => {
+                    pr = pr.reset();
+                    break Ok(pkt);
+                }
+                Err(err) => {
+                    pr = pr.reset();
+                    let s = err.to_string();
+                    break Err(io::Error::new(io::ErrorKind::InvalidData, s));
+                }
+            },
             MQTTRead::None => unreachable!(),
         };
     };
@@ -664,7 +797,8 @@ fn write_packet<W>(
     client: &Client,
     sock: &mut W,
     pktw: &mut MQTTWrite,
-    pkt: v5::Packet,
+    pkt: Option<v5::Packet>,
+    block: bool,
 ) -> io::Result<()>
 where
     W: io::Write,
@@ -675,17 +809,44 @@ where
     timeout.set_write_timeout(client.write_timeout);
 
     let mut pw = mem::replace(pktw, MQTTWrite::default());
+    let max_packet_size = pw.to_max_packet_size();
 
-    let blob = pkt
-        .encode()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    pw = pw.reset(blob.as_ref());
+    if let Some(pkt) = pkt {
+        match pkt.encode() {
+            Ok(blob) => {
+                pw = pw.reset(blob.as_ref());
+            }
+            Err(err) => {
+                pw = mem::replace(pktw, pw);
+                Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+            }
+        }
+    }
 
-    pw = loop {
-        let (val, _would_block) = pw
-            .write(sock)
-            .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
-        pw = val;
+    let res = loop {
+        pw = match pw.write(sock) {
+            Ok((val, true)) if !block => {
+                pw = val;
+                break Err(io::Error::new(io::ErrorKind::WouldBlock, ""));
+            }
+            Ok((val, _)) => val,
+            Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                pw = MQTTWrite::new(&[], max_packet_size);
+                let s = format!("malformed packet from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::InvalidData, s));
+            }
+            Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                pw = MQTTWrite::new(&[], max_packet_size);
+                let s = format!("protocol error from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::InvalidData, s));
+            }
+            Err(err) if err.kind() == ErrorKind::Disconnected => {
+                pw = MQTTWrite::new(&[], max_packet_size);
+                let s = format!("disconnected from MQTTRead");
+                break Err(io::Error::new(io::ErrorKind::BrokenPipe, s));
+            }
+            Err(err) => unreachable!("unexpected error {}", err),
+        };
 
         match &pw {
             Init { .. } | Remain { .. } if timeout.write_elapsed() => {
@@ -695,13 +856,13 @@ where
                 let s = format!("packet write fail after {:?}", timeout);
                 break Err(io::Error::new(io::ErrorKind::TimedOut, s));
             }
-            Fin { .. } => break Ok(pw),
+            Fin { .. } => break Ok(()),
             MQTTWrite::None => unreachable!(),
         };
-    }?;
+    };
 
-    let _pw_none = mem::replace(pktw, pw);
-    Ok(())
+    let _none = mem::replace(pktw, pw);
+    res
 }
 
 #[derive(Default, Debug)]

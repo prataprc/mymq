@@ -195,7 +195,6 @@ impl Miot {
                 conns: BTreeMap::default(),
 
                 stats: Stats::default(),
-
                 app_tx: app_tx.clone(),
             }),
         };
@@ -524,7 +523,7 @@ impl Miot {
     }
 
     fn handle_remove_connection(&mut self, req: Request) -> Response {
-        let client_id = match req {
+        let cid = match req {
             Request::RemoveConnection { client_id } => client_id,
             _ => unreachable!(),
         };
@@ -534,7 +533,7 @@ impl Miot {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let res = match conns.remove(&client_id) {
+        let res = match conns.remove(&cid) {
             Some(mut socket) => {
                 let raddr = socket.conn.peer_addr().unwrap();
                 info!("{} raddr:{} removing connection ...", self.prefix, raddr);
@@ -542,10 +541,7 @@ impl Miot {
                 Response::Removed(socket)
             }
             None => {
-                warn!(
-                    "{} client_id:{} connection for not found ...",
-                    self.prefix, *client_id
-                );
+                warn!("{} client_id:{} connection for not found ...", self.prefix, *cid);
                 Response::Ok
             }
         };

@@ -227,7 +227,7 @@ impl Socket {
             MQTTRead::None => unreachable!(),
         };
 
-        let _pr_none = mem::replace(&mut self.rd.pr, pr);
+        let _none = mem::replace(&mut self.rd.pr, pr);
         Ok(status)
     }
 
@@ -235,7 +235,8 @@ impl Socket {
     pub fn send_upstream(&mut self, prefix: &str) -> QueueStatus<v5::Packet> {
         let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
 
-        let pkts = self.rd.packets.drain(..).collect();
+        let pkts: Vec<v5::Packet> =
+            mem::replace(&mut self.rd.packets, VecDeque::default()).into();
         let mut status = session_tx.try_sends(prefix, pkts);
         self.rd.packets = status.take_values().into(); // left over packets
 
@@ -279,10 +280,8 @@ impl Socket {
     pub fn flush_packets(&mut self, prefix: &str, config: &Config) -> (QueuePkt, Stats) {
         use std::io::Write;
 
-        let mut iter = {
-            let packets = self.wt.packets.drain(..).collect::<Vec<v5::Packet>>();
-            packets.into_iter()
-        };
+        let mut iter =
+            mem::replace(&mut self.wt.packets, VecDeque::default()).into_iter();
 
         let mut stats = Stats::default();
 
@@ -307,7 +306,7 @@ impl Socket {
                         let mut pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
                         stats.items += 1;
                         pw = pw.reset(blob.as_ref());
-                        let _pw_none = mem::replace(&mut self.wt.pw, pw);
+                        let _none = mem::replace(&mut self.wt.pw, pw);
                     }
                     Err(_) => break QueueStatus::Disconnected(Vec::new()),
                 };
@@ -350,7 +349,7 @@ impl Socket {
             Err(err) => unreachable!("unexpected error: {}", err),
         };
 
-        let _pw_none = mem::replace(&mut self.wt.pw, pw);
+        let _none = mem::replace(&mut self.wt.pw, pw);
         res
     }
 }
