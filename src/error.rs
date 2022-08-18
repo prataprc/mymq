@@ -213,7 +213,7 @@ impl Clone for Error {
             cause: None,
             loc: self.loc.clone(),
             #[cfg(feature = "backtrace")]
-            backtrace: self.backtrace,
+            backtrace: Backtrace::disabled(),
         }
     }
 }
