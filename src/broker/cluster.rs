@@ -721,7 +721,7 @@ impl Cluster {
         );
 
         // Add session to the shard.
-        if let Err(err) = shard.add_session(AddSessionArgs { sock, pkt: connect }) {
+        if let Err(err) = shard.add_session(AddSessionArgs { sock, connect }) {
             error!("{} error adding session err:{}", self.prefix, err);
         }
 

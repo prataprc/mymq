@@ -99,7 +99,11 @@ pub enum Message {
     // session boundary
     /// Acknowledgement packets to remote client, connected to this session.
     ///
-    /// CONNACK, PUBLISH-ack, SUBACK, UNSUBACK, PINGRESP
+    /// CONNACK - happens during add_session.
+    /// PUBACK  - happens after QoS-1 and QoS-2 messaegs are replicated.
+    /// SUBACK  - happens after SUBSCRIBE is commited to [Cluster].
+    /// UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
+    /// PINGRESP- happens for every PINGREQ is handled by this session.
     ClientAck { packet: v5::Packet },
     /// PUBLISH Packets Message::Routed converted to Message::Packet before sending
     /// it downstream.
@@ -193,11 +197,6 @@ impl<'a> Arbitrary<'a> for Message {
 
 impl Message {
     /// Create a new Message::ClientAck value.
-    pub fn new_ping_resp() -> Message {
-        Message::ClientAck { packet: v5::Packet::PingResp }
-    }
-
-    /// Create a new Message::ClientAck value.
     pub fn new_conn_ack(connack: v5::ConnAck) -> Message {
         Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
     }
@@ -205,6 +204,11 @@ impl Message {
     /// Create a new Message::ClientAck value.
     pub fn new_pub_ack(puback: v5::Pub) -> Message {
         Message::ClientAck { packet: v5::Packet::PubAck(puback) }
+    }
+
+    /// Create a new Message::ClientAck value.
+    pub fn new_ping_resp() -> Message {
+        Message::ClientAck { packet: v5::Packet::PingResp }
     }
 
     /// Create a new Message::Routed value.

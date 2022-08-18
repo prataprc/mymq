@@ -204,6 +204,20 @@ impl Default for Error {
     }
 }
 
+impl Clone for Error {
+    fn clone(&self) -> Error {
+        Error {
+            kind: self.kind,
+            description: self.description.clone(),
+            code: self.code,
+            cause: None,
+            loc: self.loc.clone(),
+            #[cfg(feature = "backtrace")]
+            backtrace: self.backtrace,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         write!(f, "{}:{}", self.kind, self.description)

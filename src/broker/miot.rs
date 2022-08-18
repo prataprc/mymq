@@ -425,7 +425,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                app_fatal!(&self, self.as_shard().flush_connection(socket, err));
+                app_fatal!(&self, self.as_shard().flush_session(socket, err));
             }
         }
     }
@@ -465,7 +465,7 @@ impl Miot {
         for (client_id, err) in fail_queues.into_iter() {
             let req = Request::RemoveConnection { client_id };
             if let Response::Removed(socket) = self.handle_remove_connection(req) {
-                app_fatal!(&self, self.as_shard().flush_connection(socket, err));
+                app_fatal!(&self, self.as_shard().flush_session(socket, err));
             }
         }
 
@@ -537,11 +537,14 @@ impl Miot {
             Some(mut socket) => {
                 let raddr = socket.conn.peer_addr().unwrap();
                 info!("{} raddr:{} removing connection ...", self.prefix, raddr);
+
                 app_fatal!(&self, poll.registry().deregister(&mut socket.conn));
+
                 Response::Removed(socket)
             }
             None => {
                 warn!("{} client_id:{} connection for not found ...", self.prefix, *cid);
+
                 Response::Ok
             }
         };
