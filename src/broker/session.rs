@@ -25,14 +25,14 @@ pub struct Session {
     /// Shard hosting this session.
     pub shard_id: u32,
     /// Remote socket address.
-    prefix: String,
+    pub prefix: String,
     /// Broker Configuration.
-    config: Config,
+    pub config: Config,
 
-    state: SessionState,
+    pub state: SessionState,
 }
 
-pub struct SessionArgs {
+pub struct SessionArgsActive {
     pub raddr: net::SocketAddr,
     pub config: Config,
     pub client_id: ClientID,
@@ -42,18 +42,27 @@ pub struct SessionArgs {
     pub connect: v5::Connect,
 }
 
-impl Session {
-    pub fn start_active(args: SessionArgs) -> Session {
-        let prefix = format!("session:{}", args.raddr);
-        let keep_alive = KeepAlive::new(&args);
-        Session {
-            client_id: args.client_id,
-            raddr: args.raddr,
-            shard_id: args.shard_id,
-            prefix: prefix.clone(),
-            config: args.config.clone(),
+pub struct SessionArgsReplica {
+    pub raddr: net::SocketAddr,
+    pub config: Config,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+}
 
-            state: SessionState::Active {
+// initial = None
+// None -> Active / Replica
+// Active -> Active / Reconnect
+// Replica -> Active
+// Reconnect -> Active / Replica
+impl Session {
+    pub fn into_active(self, args: SessionArgsActive) -> Session {
+        use SessionState::{Active, Reconnect, Replica};
+
+        let prefix = format!("session:active:{}", args.raddr);
+        let keep_alive = KeepAlive::new(&args);
+
+        let state = match self.state {
+            SessionState::None => SessionState::Active {
                 prefix: prefix.clone(),
                 config: args.config.clone(),
                 keep_alive,
@@ -74,11 +83,104 @@ impl Session {
                 out_seqno: 1,
                 back_log: BTreeMap::default(),
             },
+            Replica { out_seqno, back_log, .. } => SessionState::Active {
+                prefix: prefix.clone(),
+                config: args.config.clone(),
+                keep_alive,
+                connect: args.connect,
+                miot_tx: args.miot_tx,
+                session_rx: args.session_rx,
+
+                topic_aliases: BTreeMap::default(),
+                subscriptions: BTreeMap::default(),
+
+                inp_qos12: Vec::default(),
+
+                out_acks: Vec::default(),
+                qos0_back_log: Vec::default(),
+
+                qos12_unacks: BTreeMap::default(),
+                next_packet_id: 1,
+                out_seqno,
+                back_log,
+            },
+            Reconnect {
+                topic_aliases, subscriptions, out_seqno, back_log, ..
+            } => SessionState::Active {
+                prefix: prefix.clone(),
+                config: args.config.clone(),
+                keep_alive,
+                connect: args.connect,
+                miot_tx: args.miot_tx,
+                session_rx: args.session_rx,
+
+                topic_aliases,
+                subscriptions,
+
+                inp_qos12: Vec::default(),
+
+                out_acks: Vec::default(),
+                qos0_back_log: Vec::default(),
+
+                qos12_unacks: BTreeMap::default(),
+                next_packet_id: 1,
+                out_seqno,
+                back_log,
+            },
+            Active { .. } => SessionState::Active {
+                prefix: prefix.clone(),
+                config: args.config.clone(),
+                keep_alive,
+                connect: args.connect,
+                miot_tx: args.miot_tx,
+                session_rx: args.session_rx,
+
+                topic_aliases: BTreeMap::default(),
+                subscriptions: BTreeMap::default(),
+
+                inp_qos12: Vec::default(),
+
+                out_acks: Vec::default(),
+                qos0_back_log: Vec::default(),
+
+                qos12_unacks: BTreeMap::default(),
+                next_packet_id: 1,
+                out_seqno: 1,
+                back_log: BTreeMap::default(),
+            },
+        };
+
+        Session {
+            client_id: args.client_id,
+            raddr: args.raddr,
+            shard_id: args.shard_id,
+            prefix: prefix.clone(),
+            config: args.config.clone(),
+            state,
         }
     }
 
-    pub fn start_replica(args: SessionArgs) -> Session {
-        let prefix = format!("session:{}", args.raddr);
+    pub fn into_replica(self, args: SessionArgsReplica) -> Session {
+        use SessionState::Reconnect;
+
+        let prefix = format!("session:replica:{}", args.raddr);
+
+        let state = match self.state {
+            SessionState::None => SessionState::Replica {
+                prefix: prefix.clone(),
+                config: args.config.clone(),
+                out_seqno: 1,
+                back_log: BTreeMap::default(),
+            },
+            Reconnect { out_seqno, back_log, .. } => SessionState::Replica {
+                prefix: prefix.clone(),
+                config: args.config.clone(),
+                out_seqno,
+                back_log,
+            },
+            ss => unreachable!("{:?}", ss),
+        };
+
         Session {
             client_id: args.client_id,
             raddr: args.raddr,
@@ -86,12 +188,39 @@ impl Session {
             prefix: prefix.clone(),
             config: args.config.clone(),
 
-            state: SessionState::Replica {
+            state,
+        }
+    }
+
+    pub fn into_reconnect(self) -> Session {
+        let prefix = format!("session:reconnect:{}", self.raddr);
+
+        let state = match self.state {
+            SessionState::Active {
+                config,
+                topic_aliases,
+                subscriptions,
+                out_seqno,
+                back_log,
+                ..
+            } => SessionState::Reconnect {
                 prefix: prefix.clone(),
-                config: args.config.clone(),
-                out_seqno: 1,
-                back_log: BTreeMap::default(),
+                config,
+                topic_aliases,
+                subscriptions,
+                out_seqno,
+                back_log,
             },
+            ss => unreachable!("{:?}", ss),
+        };
+
+        Session {
+            client_id: self.client_id,
+            raddr: self.raddr,
+            shard_id: self.shard_id,
+            prefix,
+            config: self.config.clone(),
+            state,
         }
     }
 
@@ -185,13 +314,13 @@ impl Session {
         shard: &mut Shard,
         pkts: Packets,
     ) -> Result<(QueuePkt, OutSeqnos)> {
-        let mut out_acks = Vec::default();
+        let mut acks = Vec::default();
         let mut out_seqnos = Vec::default();
         for pkt in pkts.into_iter() {
             match pkt {
                 v5::Packet::PingReq => {
                     trace!("{} received PingReq", self.prefix);
-                    out_acks.push(Message::new_ping_resp());
+                    acks.push(Message::new_ping_resp());
                 }
                 v5::Packet::Publish(publ) => {
                     let has_subscrs = self.rx_publish(shard, publ.clone())?;
@@ -199,14 +328,14 @@ impl Session {
                         (_, v5::QoS::AtMostOnce) => (),
                         (false, _) => {
                             let puback = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
-                            out_acks.push(Message::new_pub_ack(puback))
+                            acks.push(Message::new_pub_ack(puback))
                         }
                         (true, v5::QoS::AtLeastOnce) => (),
                         (true, v5::QoS::ExactlyOnce) => (),
                     }
                 }
                 v5::Packet::Subscribe(sub) => {
-                    out_acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
+                    acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
                 }
                 v5::Packet::UnSubscribe(_unsub) => todo!(),
                 v5::Packet::PubAck(_puback) => {
@@ -229,7 +358,10 @@ impl Session {
             };
         }
 
-        self.state.out_acks_extend(out_acks);
+        match &mut self.state {
+            SessionState::Active { out_acks, .. } => out_acks.extend(acks.into_iter()),
+            ss => unreachable!("{:?}", ss),
+        };
 
         Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
     }
@@ -426,7 +558,7 @@ impl Session {
     }
 }
 
-enum SessionState {
+pub enum SessionState {
     Active {
         prefix: String,
         config: Config,
@@ -487,6 +619,9 @@ enum SessionState {
     },
     #[allow(dead_code)]
     Reconnect {
+        prefix: String,
+        config: Config,
+
         // MQTT topic-aliases if enabled. ZERO is not allowed.
         topic_aliases: BTreeMap<u16, TopicName>,
         // List of topic-filters subscribed by this client, when ever
@@ -494,16 +629,16 @@ enum SessionState {
         // will also be updated.
         subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
 
-        // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
-        inp_qos12: Vec<PacketID>,
-
-        // This value is incremented for every out-going PUBLISH(qos>0).
-        // If index.len() > `receive_maximum`, don't increment this value.
-        next_packet_id: PacketID,
         /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
         /// every outgoing publish packet.
         out_seqno: OutSeqno,
+        /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
+        ///
+        /// Entries from this index are deleted after they are removed from
+        /// `qos12_unacks` and after they go through the consensus loop.
+        back_log: BTreeMap<OutSeqno, Message>,
     },
+    None,
 }
 
 impl fmt::Debug for SessionState {
@@ -512,6 +647,7 @@ impl fmt::Debug for SessionState {
             SessionState::Active { .. } => write!(f, "SessionState::Active"),
             SessionState::Reconnect { .. } => write!(f, "SessionState::Reconnect"),
             SessionState::Replica { .. } => write!(f, "SessionState::Replica"),
+            SessionState::None { .. } => write!(f, "SessionState::None"),
         }
     }
 }
@@ -553,10 +689,11 @@ impl SessionState {
             let msg = msg.into_packet(None);
             qos0_back_log.push(msg)
         }
-        let back_log = mem::replace(qos0_back_log, vec![]);
 
+        let back_log = mem::replace(qos0_back_log, vec![]);
         let mut status = flush_to_miot(prefix, miot_tx, back_log);
         let _empty = mem::replace(qos0_back_log, status.take_values());
+
         status
     }
 
@@ -643,15 +780,6 @@ impl SessionState {
         }
 
         QueueStatus::Ok(Vec::new())
-    }
-
-    fn out_acks_extend(&mut self, msgs: Vec<Message>) {
-        let out_acks = match self {
-            SessionState::Active { out_acks, .. } => out_acks,
-            ss => unreachable!("{:?}", ss),
-        };
-
-        out_acks.extend(msgs.into_iter());
     }
 
     fn out_acks_publish(&mut self, packet_id: PacketID) {

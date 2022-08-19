@@ -1184,6 +1184,7 @@ impl Shard {
             };
             sessions.remove(&socket.client_id)
         };
+
         if let Some(mut session) = session {
             session.remove_topic_filters(self.as_mut_topic_filters());
             session.close();
@@ -1195,6 +1196,9 @@ impl Shard {
         };
         let args = FlushConnectionArgs { socket, err: err };
         app_fatal!(&self, flusher.flush_connection(args));
+
+        // TODO: consensus loop: replicate flush_session so that replica shall remove
+        // the session from its book-keeping.
 
         Response::Ok
     }
@@ -1230,9 +1234,6 @@ impl Shard {
                 }
             }
         }
-
-        // nuke existing session, if already present for this client_id
-        self.try_replace_session(&client_id, raddr);
 
         // add_connection further down shall wake miot-thread.
         {
@@ -1352,8 +1353,9 @@ impl Shard {
     }
 
     // Return (new_session, session_tx (upstream), miot_rx (downstream))
-    fn activated_session(&self, req: &Request) -> (Session, PktTx, PktRx) {
-        use crate::broker::session::SessionArgs;
+    fn activated_session(&mut self, req: &Request) -> (Session, PktTx, PktRx) {
+        use crate::broker::session::SessionArgsActive;
+
         let size = self.config.mqtt_pkt_batch_size as usize;
 
         let AddSessionArgs { sock, connect } = match req {
@@ -1375,7 +1377,7 @@ impl Shard {
             let waker = self.as_miot().to_waker();
             socket::pkt_channel(self.shard_id, size, waker)
         };
-        let args = SessionArgs {
+        let args = SessionArgsActive {
             raddr,
             config: self.config.clone(),
             client_id: client_id.clone(),
@@ -1384,63 +1386,138 @@ impl Shard {
             session_rx,
             connect: connect.clone(),
         };
-        let session = Session::start_active(args);
+
+        let session = self.new_session_a(args);
+
         (session, upstream, downstream)
     }
 
     // Return (new_session,)
-    fn replicated_session(&self, args: ReplicaSessionArgs) -> Session {
-        use crate::broker::session::SessionArgs;
+    fn replicated_session(&mut self, args: ReplicaSessionArgs) -> Session {
+        use crate::broker::session::SessionArgsReplica;
 
-        // dummy channels
-        let (miot_tx, session_rx) = {
-            let waker = self.to_waker();
-            socket::pkt_channel(self.shard_id, 0, waker)
-        };
-        let args = SessionArgs {
+        let args = SessionArgsReplica {
             raddr: args.raddr,
             config: self.config.clone(),
             client_id: args.client_id,
             shard_id: self.shard_id,
-            miot_tx,
-            session_rx,
-            connect: v5::Connect::default(),
         };
-        Session::start_active(args)
+        self.new_session_r(args)
     }
 
-    fn try_replace_session(&mut self, cid: &ClientID, new_raddr: net::SocketAddr) {
+    fn new_session_a(&mut self, args: session::SessionArgsActive) -> Session {
+        use crate::broker::session::SessionState;
+
         // add_connection further down shall wake miot-thread.
         let ActiveLoop { sessions, miot, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let prefix = &self.prefix;
-        if let Some(session) = sessions.get_mut(cid) {
-            info!(
-                "{} old_raddr:{} new_raddr:{} replica:{} session take over",
-                prefix,
-                session.raddr,
-                new_raddr,
-                session.is_replica()
-            );
+        let session = match sessions.remove(&args.client_id) {
+            Some(session) => {
+                info!(
+                    "{} old_raddr:{} new_raddr:{} replica:{} session take over",
+                    self.prefix,
+                    session.raddr,
+                    args.raddr,
+                    session.is_replica()
+                );
 
-            match miot.remove_connection(cid) {
-                Ok(Some(socket)) => {
-                    let err: Result<()> = err_session_takeover(prefix, new_raddr);
-                    let arg = Request::FlushSession { socket, err: err.err() };
-                    self.handle_flush_session(arg);
+                match miot.remove_connection(&args.client_id) {
+                    Ok(Some(socket)) => {
+                        let prefix = &self.prefix;
+                        let err: Result<()> = err_session_takeover(prefix, args.raddr);
+                        let arg = Request::FlushSession { socket, err: err.err() };
+                        self.handle_flush_session(arg);
+                    }
+                    Ok(None) if session.is_replica() => (),
+                    Ok(None) => {
+                        error!(
+                            "{} client_id:{} session missing",
+                            self.prefix, *args.client_id
+                        );
+                    }
+                    Err(err) => {
+                        self.as_app_tx().send("fatal".to_string()).ok();
+                        error!("{} fatal error {} ", self.prefix, err);
+                    }
                 }
-                Ok(None) if session.is_replica() => (),
-                Ok(None) => {
-                    error!("{} client_id:{} session missing", prefix, **cid);
-                }
-                Err(err) => {
-                    self.as_app_tx().send("fatal".to_string()).ok();
-                    error!("{} fatal error {} ", prefix, err);
+
+                self.cleanup_index(&args.client_id);
+                session
+            }
+            None => {
+                let prefix = format!("session:active:{}", args.raddr);
+                Session {
+                    client_id: args.client_id.clone(),
+                    raddr: args.raddr,
+                    shard_id: args.shard_id,
+                    prefix,
+                    config: args.config.clone(),
+                    state: SessionState::None,
                 }
             }
+        };
+
+        session.into_active(args)
+    }
+
+    fn new_session_r(&mut self, args: session::SessionArgsReplica) -> Session {
+        use crate::broker::session::SessionState;
+
+        let ReplicaLoop { sessions, .. } = match &mut self.inner {
+            Inner::MainReplica(replica_loop) => replica_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let session = match sessions.remove(&args.client_id) {
+            Some(session) => {
+                info!(
+                    "{} old_raddr:{} new_raddr:{} replica:{} session take over",
+                    self.prefix,
+                    session.raddr,
+                    args.raddr,
+                    session.is_replica()
+                );
+                session
+            }
+            None => {
+                let prefix = format!("session:replica:{}", args.raddr);
+                Session {
+                    client_id: args.client_id.clone(),
+                    raddr: args.raddr,
+                    shard_id: args.shard_id,
+                    prefix,
+                    config: args.config.clone(),
+                    state: SessionState::None,
+                }
+            }
+        };
+
+        session.into_replica(args)
+    }
+
+    fn cleanup_index(&mut self, client_id: &ClientID) {
+        let ActiveLoop { index, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            _ => unreachable!(),
+        };
+
+        let mut inp_seqnos = Vec::default();
+        for (inp_seqo, msg) in index.iter() {
+            match msg {
+                Message::Index { src_client_id, .. } => {
+                    if src_client_id == client_id {
+                        inp_seqnos.push(*inp_seqo);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        for inp_seqno in inp_seqnos.into_iter() {
+            index.remove(&inp_seqno);
         }
     }
 }
