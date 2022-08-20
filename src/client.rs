@@ -417,15 +417,6 @@ impl Client {
         res
     }
 
-    pub fn is_disconnected(&mut self) -> io::Result<bool> {
-        self.try_read()?;
-
-        match self.in_packets.pop_back() {
-            Some(v5::Packet::Disconnect(_)) => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
     fn try_read(&mut self) -> io::Result<()> {
         match self.read_noblock() {
             Ok(packet) => {
