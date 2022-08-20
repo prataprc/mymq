@@ -418,10 +418,10 @@ impl Session {
         //
         // * If Retain Handling is set to 0 the Server MUST send the retained messages
         //   matching the Topic Filter of the subscription to the Client [MQTT-3.3.1-9].
-        // * If Retain Handling is set to 1 then if the subscription did not already exist,
-        //   the Server MUST send all retained message matching the Topic Filter of the
-        //   subscription to the Client, and if the subscription did exist the Server
-        //   MUST NOT send the retained messages. [MQTT-3.3.1-10].
+        // * If Retain Handling is set to 1 then if the subscription did not already
+        //   exist, the Server MUST send all retained message matching the Topic Filter
+        //   of the subscription to the Client, and if the subscription did exist
+        //   the Server MUST NOT send the retained messages. [MQTT-3.3.1-10].
         // * If Retain Handling is set to 2, the Server MUST NOT send the retained
         //   messages [MQTT-3.3.1-11].
 
@@ -542,6 +542,11 @@ impl Session {
     #[inline]
     pub fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
         self.state.as_mut_out_acks()
+    }
+
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        matches!(&self.state, SessionState::Active { .. })
     }
 
     #[inline]
@@ -701,6 +706,7 @@ impl SessionState {
         match self {
             SessionState::Active { .. } => self.out_qos_active(msgs),
             SessionState::Replica { .. } => self.out_qos_replica(msgs),
+            SessionState::Reconnect { .. } => QueueStatus::Ok(Vec::new()),
             ss => unreachable!("{:?}", ss),
         }
     }
@@ -783,12 +789,13 @@ impl SessionState {
     }
 
     fn out_acks_publish(&mut self, packet_id: PacketID) {
-        let out_acks = match self {
-            SessionState::Active { out_acks, .. } => out_acks,
+        match self {
+            SessionState::Active { out_acks, .. } => {
+                out_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
+            }
+            SessionState::Reconnect { .. } => (),
             ss => unreachable!("{:?}", ss),
-        };
-
-        out_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
+        }
     }
 
     fn out_acks_flush(&mut self) -> QueueStatus<Message> {
@@ -826,14 +833,14 @@ impl SessionState {
     }
 
     fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
-        match self {
-            SessionState::Active { .. } => (),
-            SessionState::Replica { back_log, .. } => {
-                for out_seqno in out_seqnos.into_iter() {
-                    back_log.remove(&out_seqno);
-                }
-            }
+        let back_log = match self {
+            SessionState::Active { back_log, .. } => back_log,
+            SessionState::Replica { back_log, .. } => back_log,
+            SessionState::Reconnect { back_log, .. } => back_log,
             ss => unreachable!("{:?}", ss),
+        };
+        for out_seqno in out_seqnos.into_iter() {
+            back_log.remove(&out_seqno);
         }
     }
 }

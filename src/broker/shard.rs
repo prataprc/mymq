@@ -1,10 +1,11 @@
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc};
 
+use crate::broker::session::{self, SessionArgsActive, SessionArgsReplica};
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{message, session, socket};
+use crate::broker::{message, socket};
 use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
 use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
 use crate::broker::{InpSeqno, OutSeqno, PktRx, PktTx, Timestamp};
@@ -718,7 +719,8 @@ impl Shard {
         };
 
         let mut ack_out_seqnos = BTreeMap::<ClientID, Vec<OutSeqno>>::default();
-        for (client_id, session) in sessions.iter_mut() {
+        let iter = sessions.iter_mut().filter(|(_, s)| s.is_active());
+        for (client_id, session) in iter {
             let out_seqnos = match session.route_packets(self) {
                 Ok((QueueStatus::Ok(_), out_seqnos)) => out_seqnos,
                 Ok((QueueStatus::Block(_), out_seqnos)) => out_seqnos,
@@ -828,8 +830,16 @@ impl Shard {
                 Inner::MainActive(active_loop) => active_loop,
                 inner => unreachable!("{} {:?}", self.prefix, inner),
             };
-            if let Some(session) = sessions.get_mut(msg.as_client_id()) {
-                session.incr_out_seqno(&mut msg);
+            let cid = msg.as_client_id();
+            match sessions.get_mut(cid) {
+                Some(session) if session.is_active() => session.incr_out_seqno(&mut msg),
+                Some(session) => error!(
+                    "{} client_id:{} msg-rx session is {:?}",
+                    self.prefix, **cid, session.state,
+                ),
+                None => {
+                    error!("{} client_id:{} msg-rx session is gone", self.prefix, **cid,)
+                }
             }
 
             match &msg {
@@ -872,7 +882,7 @@ impl Shard {
 
         for (client_id, msgs) in qos0_msgs.into_iter() {
             match sessions.get_mut(&client_id) {
-                Some(session) => {
+                Some(session) if session.is_active() => {
                     if let QueueStatus::Disconnected(_) = session.out_qos0(msgs) {
                         let err = {
                             let err: Result<()> = err!(
@@ -887,9 +897,13 @@ impl Shard {
                         flush_queue.push(FailedSession::new(client_id, err));
                     }
                 }
+                Some(session) => error!(
+                    "{} client_id:{} msg-rx session is {:?}",
+                    self.prefix, *client_id, session.state,
+                ),
                 None => error!(
                     "{} client_id:{} msg-rx session is gone",
-                    self.prefix, *client_id
+                    self.prefix, *client_id,
                 ),
             }
         }
@@ -1024,7 +1038,8 @@ impl Shard {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        for (client_id, session) in sessions.iter_mut() {
+        let iter = sessions.iter_mut().filter(|(_, s)| s.is_active());
+        for (client_id, session) in iter {
             if let QueueStatus::Disconnected(_) = session.out_acks_flush() {
                 let err = {
                     let err: Result<()> = err!(
@@ -1177,18 +1192,18 @@ impl Shard {
             _ => unreachable!(),
         };
 
-        let session = {
-            let ActiveLoop { sessions, .. } = match &mut self.inner {
-                Inner::MainActive(active_loop) => active_loop,
-                inner => unreachable!("{} {:?}", self.prefix, inner),
-            };
-            sessions.remove(&socket.client_id)
+        match &mut self.inner {
+            Inner::MainActive(ActiveLoop { sessions, topic_filters, .. }) => {
+                let cid = socket.client_id.clone();
+                if let Some(mut session) = sessions.remove(&cid) {
+                    session.remove_topic_filters(topic_filters);
+                    sessions.insert(cid, session.into_reconnect());
+                } else {
+                    warn!("{} client_id:{} session not found", self.prefix, *cid);
+                }
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-
-        if let Some(mut session) = session {
-            session.remove_topic_filters(self.as_mut_topic_filters());
-            session.close();
-        }
 
         let ActiveLoop { flusher, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
@@ -1207,7 +1222,11 @@ impl Shard {
         use crate::broker::miot::AddConnectionArgs;
 
         // create the session
-        let (mut session, upstream, downstream) = self.activated_session(&req);
+        let (mut session, upstream, downstream) = {
+            let (args, upstream, downstream) = self.to_args_active(&req);
+            let session = self.new_session_a(args);
+            (session, upstream, downstream)
+        };
 
         let AddSessionArgs { sock, connect } = match req {
             Request::AddSession(args) => args,
@@ -1265,7 +1284,15 @@ impl Shard {
     #[allow(dead_code)] // TODO: wire this up with consensus loop
     fn handle_add_session_r(&mut self, args: ReplicaSessionArgs) -> Response {
         // create the session
-        let session = self.replicated_session(args.clone());
+        let session = {
+            let args = SessionArgsReplica {
+                raddr: args.raddr.clone(),
+                config: self.config.clone(),
+                client_id: args.client_id.clone(),
+                shard_id: self.shard_id,
+            };
+            self.new_session_r(args)
+        };
 
         let ReplicaLoop { sessions, .. } = match &mut self.inner {
             Inner::MainReplica(replica_loop) => replica_loop,
@@ -1351,61 +1378,43 @@ impl Shard {
 
         Response::Ok
     }
+}
 
+impl Shard {
     // Return (new_session, session_tx (upstream), miot_rx (downstream))
-    fn activated_session(&mut self, req: &Request) -> (Session, PktTx, PktRx) {
-        use crate::broker::session::SessionArgsActive;
-
-        let size = self.config.mqtt_pkt_batch_size as usize;
-
-        let AddSessionArgs { sock, connect } = match req {
-            Request::AddSession(args) => args,
-            _ => unreachable!(),
-        };
-        let raddr = sock.peer_addr().unwrap();
-        let client_id = ClientID::from_connect(&connect.payload.client_id);
-
+    fn to_args_active(&mut self, req: &Request) -> (SessionArgsActive, PktTx, PktRx) {
         // This queue is wired up with miot-thread. This queue carries v5::Packet,
         // and there is a separate queue for every session.
         let (upstream, session_rx) = {
+            let size = self.config.mqtt_pkt_batch_size as usize;
             let waker = self.to_waker();
             socket::pkt_channel(self.shard_id, size, waker)
         };
         // This queue is wired up with miot-thread. This queue carries v5::Packet,
         // and there is a separate queue for every session.
         let (miot_tx, downstream) = {
+            let size = self.config.mqtt_pkt_batch_size as usize;
             let waker = self.as_miot().to_waker();
             socket::pkt_channel(self.shard_id, size, waker)
         };
-        let args = SessionArgsActive {
-            raddr,
-            config: self.config.clone(),
-            client_id: client_id.clone(),
-            shard_id: self.shard_id,
-            miot_tx,
-            session_rx,
-            connect: connect.clone(),
+
+        let args = match req {
+            Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
+                raddr: sock.peer_addr().unwrap(),
+                config: self.config.clone(),
+                client_id: ClientID::from_connect(&connect.payload.client_id),
+                shard_id: self.shard_id,
+                miot_tx,
+                session_rx,
+                connect: connect.clone(),
+            },
+            _ => unreachable!(),
         };
 
-        let session = self.new_session_a(args);
-
-        (session, upstream, downstream)
+        (args, upstream, downstream)
     }
 
-    // Return (new_session,)
-    fn replicated_session(&mut self, args: ReplicaSessionArgs) -> Session {
-        use crate::broker::session::SessionArgsReplica;
-
-        let args = SessionArgsReplica {
-            raddr: args.raddr,
-            config: self.config.clone(),
-            client_id: args.client_id,
-            shard_id: self.shard_id,
-        };
-        self.new_session_r(args)
-    }
-
-    fn new_session_a(&mut self, args: session::SessionArgsActive) -> Session {
+    fn new_session_a(&mut self, args: SessionArgsActive) -> Session {
         use crate::broker::session::SessionState;
 
         // add_connection further down shall wake miot-thread.
@@ -1594,13 +1603,6 @@ impl Shard {
     fn as_mut_miot(&mut self) -> &Miot {
         match &mut self.inner {
             Inner::MainActive(ActiveLoop { miot, .. }) => miot,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-
-    fn as_mut_topic_filters(&mut self) -> &mut SubscribedTrie {
-        match &mut self.inner {
-            Inner::MainActive(ActiveLoop { topic_filters, .. }) => topic_filters,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
