@@ -72,7 +72,7 @@ impl AsRef<[u8]> for Blob {
 }
 
 /// Type client-id implements a unique ID defined by MQTT specification.
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Default)]
 pub struct ClientID(pub String);
 
 impl Deref for ClientID {

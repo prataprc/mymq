@@ -166,7 +166,7 @@ pub struct ReplicaLoop {
 
 pub struct FinState {
     pub miot: Miot,
-    pub sessions: BTreeMap<ClientID, session::SessionStats>,
+    pub sessions: BTreeMap<ClientID, session::Stats>,
     pub inp_seqno: InpSeqno,
     pub shard_back_log: BTreeMap<u32, usize>,
     pub ack_timestamps: Vec<Timestamp>,
@@ -1415,8 +1415,6 @@ impl Shard {
     }
 
     fn new_session_a(&mut self, args: SessionArgsActive) -> Session {
-        use crate::broker::session::SessionState;
-
         // add_connection further down shall wake miot-thread.
         let ActiveLoop { sessions, miot, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
@@ -1456,25 +1454,13 @@ impl Shard {
                 self.cleanup_index(&args.client_id);
                 session
             }
-            None => {
-                let prefix = format!("session:active:{}", args.raddr);
-                Session {
-                    client_id: args.client_id.clone(),
-                    raddr: args.raddr,
-                    shard_id: args.shard_id,
-                    prefix,
-                    config: args.config.clone(),
-                    state: SessionState::None,
-                }
-            }
+            None => Session::default(),
         };
 
         session.into_active(args)
     }
 
     fn new_session_r(&mut self, args: session::SessionArgsReplica) -> Session {
-        use crate::broker::session::SessionState;
-
         let ReplicaLoop { sessions, .. } = match &mut self.inner {
             Inner::MainReplica(replica_loop) => replica_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1491,17 +1477,7 @@ impl Shard {
                 );
                 session
             }
-            None => {
-                let prefix = format!("session:replica:{}", args.raddr);
-                Session {
-                    client_id: args.client_id.clone(),
-                    raddr: args.raddr,
-                    shard_id: args.shard_id,
-                    prefix,
-                    config: args.config.clone(),
-                    state: SessionState::None,
-                }
-            }
+            None => Session::default(),
         };
 
         session.into_replica(args)

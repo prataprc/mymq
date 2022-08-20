@@ -30,6 +30,7 @@ pub struct Session {
     pub config: Config,
 
     pub state: SessionState,
+    pub stats: Stats,
 }
 
 pub struct SessionArgsActive {
@@ -47,6 +48,25 @@ pub struct SessionArgsReplica {
     pub config: Config,
     pub client_id: ClientID,
     pub shard_id: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct Stats {
+    n_pings: usize,
+}
+
+impl Default for Session {
+    fn default() -> Session {
+        Session {
+            client_id: ClientID::default(),
+            raddr: "0.0.0.0:0".parse().unwrap(),
+            shard_id: u32::default(),
+            prefix: String::default(),
+            config: Config::default(),
+            state: SessionState::None,
+            stats: Stats::default(),
+        }
+    }
 }
 
 // initial = None
@@ -157,6 +177,7 @@ impl Session {
             prefix: prefix.clone(),
             config: args.config.clone(),
             state,
+            stats: Stats::default(),
         }
     }
 
@@ -189,6 +210,7 @@ impl Session {
             config: args.config.clone(),
 
             state,
+            stats: Stats::default(),
         }
     }
 
@@ -221,6 +243,7 @@ impl Session {
             prefix,
             config: self.config.clone(),
             state,
+            stats: self.stats,
         }
     }
 
@@ -256,9 +279,8 @@ impl Session {
         connack
     }
 
-    pub fn close(self) -> SessionStats {
-        std::mem::drop(self);
-        SessionStats
+    pub fn close(self) -> Stats {
+        self.stats
     }
 }
 
@@ -319,6 +341,7 @@ impl Session {
         for pkt in pkts.into_iter() {
             match pkt {
                 v5::Packet::PingReq => {
+                    self.stats.n_pings += 1;
                     trace!("{} received PingReq", self.prefix);
                     acks.push(Message::new_ping_resp());
                 }
@@ -959,8 +982,6 @@ impl SessionState {
         }
     }
 }
-
-pub struct SessionStats;
 
 fn flush_to_miot(prefix: &str, miot_tx: &mut PktTx, mut msgs: Vec<Message>) -> QueueMsg {
     let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
