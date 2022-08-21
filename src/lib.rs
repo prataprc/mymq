@@ -105,6 +105,3 @@ pub use timer::TimerEntry;
 
 #[cfg(feature = "broker")]
 pub mod broker;
-
-#[cfg(feature = "client")]
-pub mod client;

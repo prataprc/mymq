@@ -116,6 +116,9 @@ mod suback;
 mod unsub;
 mod unsuback;
 
+#[cfg(feature = "client")]
+pub mod client;
+
 pub use auth::{Auth, AuthProperties, AuthReasonCode};
 pub use connack::{ConnAck, ConnAckProperties, ConnackFlags, ConnackReasonCode};
 pub use connect::WillProperties;
