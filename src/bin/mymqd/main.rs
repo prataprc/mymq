@@ -1,10 +1,10 @@
-use log::{error, info};
+use log::info;
 use structopt::StructOpt;
 
-use std::{io, path, sync::mpsc};
+use std::{io, path, result};
 
-use mymq::broker::Config;
-use mymq::Result;
+mod dump;
+mod start;
 
 #[derive(Clone, StructOpt)]
 pub struct Opt {
@@ -20,6 +20,9 @@ pub struct Opt {
     #[structopt(long = "log-mod", default_value = "")]
     log_mod: String,
 
+    #[structopt(long = "force-color")]
+    force_color: bool,
+
     #[structopt(subcommand)]
     subcmd: SubCommand,
 }
@@ -27,7 +30,7 @@ pub struct Opt {
 #[derive(Clone, StructOpt)]
 pub enum SubCommand {
     Start {
-        #[structopt(long = "name", default_value = "mqttd")]
+        #[structopt(long = "name", default_value = "mymqd")]
         name: String,
 
         #[structopt(long = "port", default_value = "1883")]
@@ -36,73 +39,56 @@ pub enum SubCommand {
         #[structopt(long = "num-shards", default_value = "1")]
         num_shards: u32,
     },
+    Dump {
+        #[structopt(short = "w")]
+        write_file: Option<path::PathBuf>,
+
+        #[structopt(short = "a")]
+        append_file: Option<path::PathBuf>,
+
+        #[structopt(short = "r")]
+        read_file: Option<path::PathBuf>,
+
+        #[structopt(short = "t", default_value = "0")]
+        time: u64,
+
+        #[structopt(long = "precis", default_value = "micro")]
+        precision: String,
+
+        #[structopt(long = "promisc")]
+        promisc: bool,
+
+        #[structopt(long = "devices")]
+        devices: bool,
+
+        #[structopt(long = "inp")]
+        inp: bool,
+
+        #[structopt(long = "out")]
+        out: bool,
+
+        device: Option<String>,
+    },
 }
 
-fn main() {
-    use mymq::broker::Cluster;
+pub type Result<T> = result::Result<T, String>;
 
+fn main() {
     let opts = parse_cmd_line();
 
     setup_logging(&opts);
     info!("verbosity level {:?}", opts.to_verbosity());
 
-    let (tx, rx) = mpsc::sync_channel(2);
-    let ctrlc_tx = tx.clone();
-    ctrlc::set_handler(move || ctrlc_tx.send("ctrlc".to_string()).unwrap()).unwrap();
-
-    let config = exit_on_error(parse_config(&opts), 1);
-    let cluster = {
-        let cluster = exit_on_error(Cluster::from_config(config.clone()), 2);
-        exit_on_error(cluster.spawn(tx.clone()), 3)
+    let res = match &opts.subcmd {
+        SubCommand::Start { .. } => start::run(opts),
+        SubCommand::Dump { .. } => dump::run(opts),
     };
 
-    println!("{}", rx.recv().unwrap());
-
-    // TODO: print the fin-stats
-    cluster.close_wait();
+    res.map_err(|e| println!("error: {}", e)).ok();
 }
 
 fn parse_cmd_line() -> Opt {
     Opt::from_args()
-}
-
-fn parse_config(opts: &Opt) -> Result<Config> {
-    // Environment variables can be consumed here. Configuration parameters take
-    // preference in the following order of decreasing preference:
-    // a. Command line options.
-    // b. Environment variables.
-    // c. Toml configuration file.
-    // d. System defaults.
-    let mut config = match &opts.config_loc {
-        Some(path) => {
-            info!("config_location {:?}", path.to_str());
-            Config::from_file(path)?
-        }
-        None => {
-            info!("Using default configuration for mqtt broker");
-            Config::default()
-        }
-    };
-
-    config = parse_cmd_opts(opts, parse_env(opts, config)?)?;
-
-    Ok(config)
-}
-
-fn parse_cmd_opts(opts: &Opt, mut config: Config) -> Result<Config> {
-    match &opts.subcmd {
-        SubCommand::Start { name, port, num_shards } => {
-            config.name = name.clone();
-            config.port = port.clone();
-            config.num_shards = num_shards.clone();
-        }
-    }
-
-    Ok(config)
-}
-
-fn parse_env(_opts: &Opt, config: Config) -> Result<Config> {
-    Ok(config)
 }
 
 use env_logger::{fmt::Target, Builder, WriteStyle};
@@ -158,25 +144,44 @@ fn log_format(f: &mut Formatter, r: &log::Record<'_>) -> io::Result<()> {
     )
 }
 
-fn exit_on_error<T>(res: Result<T>, code: i32) -> T {
-    match res {
-        Ok(val) => val,
-        Err(err) => {
-            error!("exit_on_error code:{} err:{}", code, err);
-            std::process::exit(code)
-        }
-    }
-}
-
 impl Opt {
     fn to_verbosity(&self) -> String {
         if self.v {
-            "2"
-        } else if self.vv {
             "1"
+        } else if self.vv {
+            "2"
         } else {
             "0"
         }
         .to_string()
+    }
+}
+
+/// Trait to pretty print a collection in row/column format.
+pub trait PrettyRow {
+    fn to_format() -> prettytable::format::TableFormat;
+
+    fn to_head() -> prettytable::Row;
+
+    fn to_row(&self) -> prettytable::Row;
+}
+
+/// Convert a collection of rows into table.
+pub fn make_table<R>(rows: &[R]) -> prettytable::Table
+where
+    R: PrettyRow,
+{
+    let mut table = prettytable::Table::new();
+
+    match rows.len() {
+        0 => table,
+        _ => {
+            table.set_titles(R::to_head());
+            rows.iter().for_each(|r| {
+                table.add_row(r.to_row());
+            });
+            table.set_format(R::to_format());
+            table
+        }
     }
 }
