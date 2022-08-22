@@ -1,9 +1,14 @@
-use prettytable::{cell, row};
+use chrono::NaiveDateTime;
+use log::debug;
 
-use std::{path, time};
+use std::{fmt, mem, path, result, time};
 
-use crate::{make_table, Opt, PrettyRow, Result, SubCommand};
+use crate::{Opt, Result, SubCommand};
+use mymq::{netw, util};
 
+const PCAP_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
+
+#[derive(Clone)]
 struct Dump {
     write_file: Option<path::PathBuf>,
     append_file: Option<path::PathBuf>,
@@ -14,41 +19,7 @@ struct Dump {
     inp: bool,
     out: bool,
     device: Option<String>,
-}
-
-impl TryFrom<SubCommand> for Dump {
-    type Error = String;
-
-    fn try_from(val: SubCommand) -> Result<Dump> {
-        match val {
-            SubCommand::Dump {
-                write_file,
-                append_file,
-                read_file,
-                time,
-                precision,
-                promisc,
-                inp,
-                out,
-                device,
-                ..
-            } => {
-                let val = Dump {
-                    write_file,
-                    append_file,
-                    read_file,
-                    time,
-                    precision: into_precision(&precision)?,
-                    promisc,
-                    inp,
-                    out,
-                    device,
-                };
-                Ok(val)
-            }
-            _ => unreachable!(),
-        }
-    }
+    eth: bool,
 }
 
 pub fn run(opts: Opt) -> Result<()> {
@@ -89,20 +60,20 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
     // TODO: pcap::Capture::snaplen
 
     let dump: Dump = opts.subcmd.try_into()?;
-    let mut capture = {
-        let capture = pcap::Capture::<pcap::Inactive>::from_device(find_device(
-            &dump.device.unwrap(),
-        )?)
-        .map_err(|e| e.to_string())?
-        .timeout(1000 /*ms*/)
-        .promisc(dump.promisc)
-        .precision(dump.precision);
+    let device_name = dump.device.clone().unwrap();
+    let capture = {
+        let device = find_device(&device_name)?;
+        let capture = pcap::Capture::<pcap::Inactive>::from_device(device)
+            .map_err(|e| e.to_string())?
+            .timeout(PCAP_TIMEOUT.as_millis() as i32)
+            .promisc(dump.promisc)
+            .precision(dump.precision);
         capture.open().map_err(|e| e.to_string())?
     };
 
-    let mut save_file = match dump.write_file {
+    let save_file = match dump.write_file.clone() {
         Some(wf) => Some(capture.savefile(&wf).map_err(|e| e.to_string())?),
-        None => match dump.append_file {
+        None => match dump.append_file.clone() {
             Some(af) => Some(capture.savefile_append(&af).map_err(|e| e.to_string())?),
             None => None,
         },
@@ -116,26 +87,39 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
         capture.direction(pcap::Direction::InOut).map_err(|e| e.to_string())?;
     }
 
+    let mut capture_iter = {
+        let codec = Codec {
+            dump: dump.clone(),
+            save_file,
+            link_type: capture.get_datalink(),
+            mac: dump.device_mac()?,
+        };
+        capture.iter(codec)
+    };
+
     let deadline = time::Instant::now() + time::Duration::from_secs(dump.time);
     loop {
-        if dump.time > 0 && time::Instant::now() > deadline {
-            break;
-        }
-
-        match capture.next_packet() {
-            Ok(pkt) => {
-                println!("pkt {}", pkt.data.len());
-                save_file.as_mut().map(|f| f.write(&pkt));
+        match capture_iter.next() {
+            Some(_pkt) if dump.time > 0 && time::Instant::now() > deadline => break,
+            Some(Err(pcap::Error::TimeoutExpired)) => {
+                debug!("timeout({:?}) expired from pcap", PCAP_TIMEOUT);
             }
-            Err(err) => println!("capture error: {}", err),
+            Some(pkt) => {
+                let pkt = pkt.map_err(|e| e.to_string())?;
+                println!("{}", pkt);
+            }
+            None => break,
         }
     }
 
-    match &mut save_file {
-        Some(file) => file.flush().map_err(|e| e.to_string())?,
-        None => (),
-    }
-
+    let capture = {
+        let device = find_device(&dump.device.unwrap())?;
+        let empty = pcap::Capture::<pcap::Inactive>::from_device(device)
+            .map_err(|e| e.to_string())?
+            .open()
+            .map_err(|e| e.to_string())?;
+        mem::replace(capture_iter.capture_mut(), empty)
+    };
     Ok(capture)
 }
 
@@ -151,7 +135,7 @@ fn find_device(name: &str) -> Result<pcap::Device> {
 
 fn list_devices(opts: &Opt) -> Result<()> {
     let devices = pcap::Device::list().map_err(|e| e.to_string())?;
-    make_table(&devices).print_tty(!opts.force_color);
+    util::make_table(&devices).print_tty(!opts.force_color);
 
     Ok(())
 }
@@ -162,45 +146,9 @@ fn list_connected_devices(opts: &Opt) -> Result<()> {
         .into_iter()
         .filter(|d| d.flags.connection_status == pcap::ConnectionStatus::Connected)
         .collect();
-    make_table(&devices).print_tty(!opts.force_color);
+    util::make_table(&devices).print_tty(!opts.force_color);
 
     Ok(())
-}
-
-impl PrettyRow for pcap::Device {
-    fn to_format() -> prettytable::format::TableFormat {
-        *prettytable::format::consts::FORMAT_CLEAN
-    }
-
-    fn to_head() -> prettytable::Row {
-        row![Fy => "Name", "IfFlags", "Status", "Address", "Description"]
-    }
-
-    fn to_row(&self) -> prettytable::Row {
-        let addresses = self
-            .addresses
-            .iter()
-            .map(|addr| pretty_print_address(addr))
-            .collect::<Vec<String>>()
-            .as_slice()
-            .join("\n--------\n");
-
-        row![
-            self.name,
-            format!("{:?}", self.flags.if_flags),
-            format!("{:?}", self.flags.connection_status),
-            addresses,
-            self.desc.as_ref().map(|val| val.as_str()).unwrap_or("-")
-        ]
-    }
-}
-
-fn pretty_print_address(addr: &pcap::Address) -> String {
-    let mut items = vec![addr.addr.to_string()];
-    addr.netmask.as_ref().map(|val| items.push(val.to_string()));
-    addr.broadcast_addr.as_ref().map(|val| items.push(val.to_string()));
-    addr.dst_addr.as_ref().map(|val| items.push(val.to_string()));
-    items.join("\n")
 }
 
 fn into_precision(val: &str) -> Result<pcap::Precision> {
@@ -208,5 +156,164 @@ fn into_precision(val: &str) -> Result<pcap::Precision> {
         "micro" => Ok(pcap::Precision::Micro),
         "nano" => Ok(pcap::Precision::Nano),
         _ => Err(format!("invalid precision {}", val)),
+    }
+}
+
+struct Codec {
+    dump: Dump,
+    save_file: Option<pcap::Savefile>,
+    link_type: pcap::Linktype,
+    mac: pnet::util::MacAddr,
+}
+
+enum Packet {
+    Ethernet(Ethernet),
+    None,
+}
+
+impl Drop for Codec {
+    fn drop(&mut self) {
+        match &mut self.save_file {
+            Some(file) => match file.flush() {
+                Ok(()) => (),
+                Err(err) => println!("error saving file: {}", err),
+            },
+            None => (),
+        }
+    }
+}
+
+impl pcap::PacketCodec for Codec {
+    type Item = Packet;
+
+    fn decode(&mut self, packet: pcap::Packet<'_>) -> Self::Item {
+        use pnet::packet::{ethernet::EthernetPacket, FromPacket};
+
+        self.save_file.as_mut().map(|f| f.write(&packet));
+
+        let ts = NaiveDateTime::from_timestamp(
+            packet.header.ts.tv_sec,
+            u32::try_from(packet.header.ts.tv_usec).unwrap(),
+        );
+
+        match self.link_type {
+            pcap::Linktype::ETHERNET if self.dump.eth => {
+                let pkt = match EthernetPacket::new(packet.data) {
+                    Some(ep) => {
+                        let pkt = Ethernet {
+                            ts,
+                            dir: pcap::Direction::InOut,
+                            eth: ep.from_packet(),
+                        };
+                        Packet::Ethernet(pkt)
+                    }
+                    None => Packet::None,
+                };
+                self.map(pkt)
+            }
+            _ => Packet::None,
+        }
+    }
+}
+
+impl Codec {
+    fn map(&self, mut pkt: Packet) -> Packet {
+        match &mut pkt {
+            Packet::Ethernet(Ethernet { dir, eth, .. }) => {
+                if self.mac == eth.source {
+                    *dir = pcap::Direction::Out;
+                    pkt
+                } else if self.mac == eth.destination {
+                    *dir = pcap::Direction::In;
+                    pkt
+                } else {
+                    Packet::None
+                }
+            }
+            Packet::None => Packet::None,
+        }
+    }
+}
+
+impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::In => {
+                write!(f, "<- {} {}", pkt.eth.source, pkt.eth.ethertype)
+            }
+            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::Out => {
+                write!(f, "-> {} {}", pkt.eth.destination, pkt.eth.ethertype)
+            }
+            Packet::Ethernet(_) => Ok(()),
+            Packet::None => Ok(()),
+        }
+    }
+}
+
+struct Ethernet {
+    ts: NaiveDateTime,
+    dir: pcap::Direction,
+    eth: pnet::packet::ethernet::Ethernet,
+}
+
+impl fmt::Display for Ethernet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let ts = self.ts.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        write!(
+            f,
+            "{} {} <- {} {}",
+            ts, self.eth.destination, self.eth.source, self.eth.ethertype
+        )
+    }
+}
+
+impl TryFrom<SubCommand> for Dump {
+    type Error = String;
+
+    fn try_from(val: SubCommand) -> Result<Dump> {
+        match val {
+            SubCommand::Dump {
+                write_file,
+                append_file,
+                read_file,
+                time,
+                precision,
+                promisc,
+                inp,
+                out,
+                eth,
+                device,
+                ..
+            } => {
+                let val = Dump {
+                    write_file,
+                    append_file,
+                    read_file,
+                    time,
+                    precision: into_precision(&precision)?,
+                    promisc,
+                    inp,
+                    out,
+                    eth,
+                    device,
+                };
+                Ok(val)
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dump {
+    fn device_mac(&self) -> Result<pnet::util::MacAddr> {
+        let device_name = self.device.clone().unwrap();
+        match netw::interfaces().into_iter().filter(|inf| inf.name == device_name).next()
+        {
+            Some(inf) => match inf.mac {
+                Some(mac) => Ok(mac.to_string().parse::<pnet::util::MacAddr>().unwrap()),
+                None => Err(format!("cannot find mac for device {:?}", device_name)),
+            },
+            None => Err(format!("cannot find mac for device {:?}", device_name)),
+        }
     }
 }

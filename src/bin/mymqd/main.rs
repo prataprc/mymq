@@ -4,6 +4,7 @@ use structopt::StructOpt;
 use std::{io, path, result};
 
 mod dump;
+mod list;
 mod start;
 
 #[derive(Clone, StructOpt)]
@@ -67,7 +68,14 @@ pub enum SubCommand {
         #[structopt(long = "out")]
         out: bool,
 
+        #[structopt(long = "eth")]
+        eth: bool,
+
         device: Option<String>,
+    },
+    List {
+        #[structopt(long = "ifs", default_value = "all")]
+        ifs: String,
     },
 }
 
@@ -82,6 +90,7 @@ fn main() {
     let res = match &opts.subcmd {
         SubCommand::Start { .. } => start::run(opts),
         SubCommand::Dump { .. } => dump::run(opts),
+        SubCommand::List { .. } => list::run(opts),
     };
 
     res.map_err(|e| println!("error: {}", e)).ok();
@@ -154,34 +163,5 @@ impl Opt {
             "0"
         }
         .to_string()
-    }
-}
-
-/// Trait to pretty print a collection in row/column format.
-pub trait PrettyRow {
-    fn to_format() -> prettytable::format::TableFormat;
-
-    fn to_head() -> prettytable::Row;
-
-    fn to_row(&self) -> prettytable::Row;
-}
-
-/// Convert a collection of rows into table.
-pub fn make_table<R>(rows: &[R]) -> prettytable::Table
-where
-    R: PrettyRow,
-{
-    let mut table = prettytable::Table::new();
-
-    match rows.len() {
-        0 => table,
-        _ => {
-            table.set_titles(R::to_head());
-            rows.iter().for_each(|r| {
-                table.add_row(r.to_row());
-            });
-            table.set_format(R::to_format());
-            table
-        }
     }
 }
