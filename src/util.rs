@@ -39,6 +39,37 @@ pub fn num_cores_ceiled() -> u32 {
     u32::try_from(ceil_power_of_2(u32::try_from(num_cpus::get()).unwrap())).unwrap()
 }
 
+/// Trait to pretty print a collection in row/column format.
+#[cfg(feature = "prettytable-rs")]
+pub trait PrettyRow {
+    fn to_format() -> prettytable::format::TableFormat;
+
+    fn to_head() -> prettytable::Row;
+
+    fn to_row(&self) -> prettytable::Row;
+}
+
+/// Convert a collection of rows into table.
+#[cfg(feature = "prettytable-rs")]
+pub fn make_table<R>(rows: &[R]) -> prettytable::Table
+where
+    R: PrettyRow,
+{
+    let mut table = prettytable::Table::new();
+
+    match rows.len() {
+        0 => table,
+        _ => {
+            table.set_titles(R::to_head());
+            rows.iter().for_each(|r| {
+                table.add_row(r.to_row());
+            });
+            table.set_format(R::to_format());
+            table
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "util_test.rs"]
 mod util_test;
