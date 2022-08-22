@@ -164,7 +164,7 @@ impl Default for Config {
     fn default() -> Config {
         let node = ConfigNode::default();
         Config {
-            name: "mqttd".to_string(),
+            name: "mymqd".to_string(),
             max_nodes: Self::DEF_MAX_NODES,
             num_shards: util::num_cores_ceiled(),
             port: Self::DEF_MQTT_PORT,
