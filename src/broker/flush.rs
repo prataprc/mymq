@@ -1,6 +1,6 @@
 use log::{debug, error, info, trace, warn};
 
-use std::{thread, time};
+use std::{io, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Socket};
@@ -274,7 +274,6 @@ impl Threadable for Flusher {
 impl Flusher {
     fn handle_flush_connection(&self, req: Request) -> Response {
         use crate::broker::socket::Stats as SockStats;
-        use crate::packet::send_disconnect;
 
         let now = time::Instant::now();
         let max_size = self.config.mqtt_max_packet_size;
@@ -399,6 +398,44 @@ impl Flusher {
         match &self.inner {
             Inner::Main(RunLoop { app_tx, .. }) => app_tx,
             _ => unreachable!(),
+        }
+    }
+}
+
+pub fn send_disconnect<W>(
+    prefix: &str,
+    code: v5::DisconnReasonCode, // server side reason code.
+    conn: &mut W,
+    timeout: time::Instant,
+    max_size: u32,
+) -> Result<()>
+where
+    W: io::Write,
+{
+    use crate::{packet::MQTTWrite, Packetize};
+
+    let dc = v5::Disconnect::new(code, None);
+    let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
+    loop {
+        let (val, would_block) = match packetw.write(conn) {
+            Ok(args) => args,
+            Err(err) => {
+                error!("{} problem writing disconnect packet {}", prefix, err);
+                break Err(err);
+            }
+        };
+        packetw = val;
+
+        if would_block && timeout < time::Instant::now() {
+            thread::sleep(SLEEP_10MS);
+        } else if would_block {
+            break err!(
+                Disconnected,
+                desc: "{} failed writing disconnect after {:?}",
+                prefix, time::Instant::now()
+            );
+        } else {
+            break Ok(());
         }
     }
 }

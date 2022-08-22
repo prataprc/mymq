@@ -441,47 +441,6 @@ impl MQTTWrite {
     }
 }
 
-#[cfg(feature = "broker")]
-pub fn send_disconnect<W>(
-    prefix: &str,
-    code: v5::DisconnReasonCode,
-    conn: &mut W,
-    timeout: time::Instant,
-    max_size: u32,
-) -> Result<()>
-where
-    W: io::Write,
-{
-    use crate::SLEEP_10MS;
-    use log::error;
-    use std::thread;
-
-    let dc = v5::Disconnect::new(code, None);
-    let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
-    loop {
-        let (val, would_block) = match packetw.write(conn) {
-            Ok(args) => args,
-            Err(err) => {
-                error!("{} problem writing disconnect packet {}", prefix, err);
-                break Err(err);
-            }
-        };
-        packetw = val;
-
-        if would_block && timeout < time::Instant::now() {
-            thread::sleep(SLEEP_10MS);
-        } else if would_block {
-            break err!(
-                Disconnected,
-                desc: "{} failed writing disconnect after {:?}",
-                prefix, time::Instant::now()
-            );
-        } else {
-            break Ok(());
-        }
-    }
-}
-
 fn check_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
     if pkt_len > max_size {
         err!(

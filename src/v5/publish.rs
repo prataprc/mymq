@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{cmp, fmt, result};
 
 use crate::util::advance;
-use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
+use crate::v5::{self, FixedHeader, PayloadFormat, Property, PropertyType, QoS};
 use crate::{Blob, Packetize, TopicName, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -247,6 +247,21 @@ pub struct PublishProperties {
     pub subscribtion_identifier: Vec<VarU32>,
     pub content_type: Option<String>,
     pub user_properties: Vec<UserProperty>,
+}
+
+impl From<v5::WillProperties> for PublishProperties {
+    fn from(val: v5::WillProperties) -> PublishProperties {
+        PublishProperties {
+            payload_format_indicator: val.payload_format_indicator,
+            message_expiry_interval: val.message_expiry_interval,
+            topic_alias: None,
+            response_topic: val.response_topic,
+            correlation_data: val.correlation_data,
+            subscribtion_identifier: Vec::default(),
+            content_type: val.content_type,
+            user_properties: val.user_properties,
+        }
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

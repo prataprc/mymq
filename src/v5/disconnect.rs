@@ -17,7 +17,6 @@ const PP: &'static str = "Packet::Disconnect";
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
-    DiconnectWillMessage = 0x04,
     UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
     ProtocolError = 0x82,
@@ -53,7 +52,6 @@ impl TryFrom<u8> for DisconnReasonCode {
     fn try_from(val: u8) -> Result<DisconnReasonCode> {
         match val {
             0x00 => Ok(DisconnReasonCode::NormalDisconnect),
-            0x04 => Ok(DisconnReasonCode::DiconnectWillMessage),
             0x80 => Ok(DisconnReasonCode::UnspecifiedError),
             0x81 => Ok(DisconnReasonCode::MalformedPacket),
             0x82 => Ok(DisconnReasonCode::ProtocolError),

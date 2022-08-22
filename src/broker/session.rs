@@ -100,10 +100,10 @@ impl Session {
 
                 qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
-                out_seqno: 1,
-                back_log: BTreeMap::default(),
+                cs_out_seqno: 1,
+                cs_back_log: BTreeMap::default(),
             },
-            Replica { out_seqno, back_log, .. } => SessionState::Active {
+            Replica { cs_out_seqno, cs_back_log, .. } => SessionState::Active {
                 prefix: prefix.clone(),
                 config: args.config.clone(),
                 keep_alive,
@@ -121,11 +121,15 @@ impl Session {
 
                 qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
-                out_seqno,
-                back_log,
+                cs_out_seqno,
+                cs_back_log,
             },
             Reconnect {
-                topic_aliases, subscriptions, out_seqno, back_log, ..
+                topic_aliases,
+                subscriptions,
+                cs_out_seqno,
+                cs_back_log,
+                ..
             } => SessionState::Active {
                 prefix: prefix.clone(),
                 config: args.config.clone(),
@@ -144,8 +148,8 @@ impl Session {
 
                 qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
-                out_seqno,
-                back_log,
+                cs_out_seqno,
+                cs_back_log,
             },
             Active { .. } => SessionState::Active {
                 prefix: prefix.clone(),
@@ -165,8 +169,8 @@ impl Session {
 
                 qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
-                out_seqno: 1,
-                back_log: BTreeMap::default(),
+                cs_out_seqno: 1,
+                cs_back_log: BTreeMap::default(),
             },
         };
 
@@ -190,14 +194,14 @@ impl Session {
             SessionState::None => SessionState::Replica {
                 prefix: prefix.clone(),
                 config: args.config.clone(),
-                out_seqno: 1,
-                back_log: BTreeMap::default(),
+                cs_out_seqno: 1,
+                cs_back_log: BTreeMap::default(),
             },
-            Reconnect { out_seqno, back_log, .. } => SessionState::Replica {
+            Reconnect { cs_out_seqno, cs_back_log, .. } => SessionState::Replica {
                 prefix: prefix.clone(),
                 config: args.config.clone(),
-                out_seqno,
-                back_log,
+                cs_out_seqno,
+                cs_back_log,
             },
             ss => unreachable!("{:?}", ss),
         };
@@ -222,16 +226,16 @@ impl Session {
                 config,
                 topic_aliases,
                 subscriptions,
-                out_seqno,
-                back_log,
+                cs_out_seqno,
+                cs_back_log,
                 ..
             } => SessionState::Reconnect {
                 prefix: prefix.clone(),
                 config,
                 topic_aliases,
                 subscriptions,
-                out_seqno,
-                back_log,
+                cs_out_seqno,
+                cs_back_log,
             },
             ss => unreachable!("{:?}", ss),
         };
@@ -624,12 +628,12 @@ pub enum SessionState {
         next_packet_id: PacketID,
         /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
         /// every outgoing publish packet.
-        out_seqno: OutSeqno,
+        cs_out_seqno: OutSeqno,
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
         /// `qos12_unacks` and after they go through the consensus loop.
-        back_log: BTreeMap<OutSeqno, Message>,
+        cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     #[allow(dead_code)]
     Replica {
@@ -638,12 +642,12 @@ pub enum SessionState {
 
         /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
         /// every outgoing publish packet.
-        out_seqno: OutSeqno,
+        cs_out_seqno: OutSeqno,
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
         /// `qos12_unacks` and after they go through the consensus loop.
-        back_log: BTreeMap<OutSeqno, Message>,
+        cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     #[allow(dead_code)]
     Reconnect {
@@ -659,12 +663,12 @@ pub enum SessionState {
 
         /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
         /// every outgoing publish packet.
-        out_seqno: OutSeqno,
+        cs_out_seqno: OutSeqno,
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
         /// `qos12_unacks` and after they go through the consensus loop.
-        back_log: BTreeMap<OutSeqno, Message>,
+        cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     None,
 }
@@ -683,9 +687,9 @@ impl fmt::Debug for SessionState {
 impl SessionState {
     fn incr_out_seqno(&mut self, msg: &mut Message) {
         match self {
-            SessionState::Active { out_seqno, .. } => {
-                let seqno = *out_seqno;
-                *out_seqno = out_seqno.saturating_add(1);
+            SessionState::Active { cs_out_seqno, .. } => {
+                let seqno = *cs_out_seqno;
+                *cs_out_seqno = cs_out_seqno.saturating_add(1);
                 match msg {
                     Message::Routed { out_seqno, .. } => *out_seqno = seqno,
                     _ => (),
@@ -743,9 +747,9 @@ impl SessionState {
                 miot_tx,
                 qos12_unacks,
                 next_packet_id,
-                back_log,
+                cs_back_log,
                 ..
-            } => (prefix, config, miot_tx, qos12_unacks, next_packet_id, back_log),
+            } => (prefix, config, miot_tx, qos12_unacks, next_packet_id, cs_back_log),
             ss => unreachable!("{:?}", ss),
         };
 
@@ -797,7 +801,7 @@ impl SessionState {
 
     fn out_qos_replica(&mut self, msgs: Vec<Message>) -> QueueMsg {
         let back_log = match self {
-            SessionState::Active { back_log, .. } => back_log,
+            SessionState::Active { cs_back_log, .. } => cs_back_log,
             ss => unreachable!("{:?}", ss),
         };
 
@@ -857,9 +861,9 @@ impl SessionState {
 
     fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
         let back_log = match self {
-            SessionState::Active { back_log, .. } => back_log,
-            SessionState::Replica { back_log, .. } => back_log,
-            SessionState::Reconnect { back_log, .. } => back_log,
+            SessionState::Active { cs_back_log, .. } => cs_back_log,
+            SessionState::Replica { cs_back_log, .. } => cs_back_log,
+            SessionState::Reconnect { cs_back_log, .. } => cs_back_log,
             ss => unreachable!("{:?}", ss),
         };
         for out_seqno in out_seqnos.into_iter() {

@@ -131,10 +131,10 @@ pub struct ActiveLoop {
 
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
-    /// MVCC clone of Cluster::topic_filters
-    topic_filters: SubscribedTrie,
-    /// MVCC clone of Cluster::retained_messages
-    retained_messages: RetainedTrie,
+    /// MVCC clone of Cluster::cc_topic_filters
+    cc_topic_filters: SubscribedTrie,
+    /// MVCC clone of Cluster::cc_retained_messages
+    cc_retained_messages: RetainedTrie,
 
     /// statistics
     stats: Stats,
@@ -251,8 +251,8 @@ impl ToJson for Shard {
 pub struct SpawnArgs {
     pub cluster: Cluster,
     pub flusher: Flusher,
-    pub topic_filters: SubscribedTrie,
-    pub retained_messages: RetainedTrie,
+    pub cc_topic_filters: SubscribedTrie,
+    pub cc_retained_messages: RetainedTrie,
 }
 
 impl Shard {
@@ -306,8 +306,8 @@ impl Shard {
                 ack_timestamps: Vec::default(),
 
                 shard_queues: BTreeMap::default(),
-                topic_filters: args.topic_filters,
-                retained_messages: args.retained_messages,
+                cc_topic_filters: args.cc_topic_filters,
+                cc_retained_messages: args.cc_retained_messages,
 
                 stats: Stats::default(),
                 app_tx: app_tx.clone(),
@@ -1193,10 +1193,10 @@ impl Shard {
         };
 
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { sessions, topic_filters, .. }) => {
+            Inner::MainActive(ActiveLoop { sessions, cc_topic_filters, .. }) => {
                 let cid = socket.client_id.clone();
                 if let Some(mut session) = sessions.remove(&cid) {
-                    session.remove_topic_filters(topic_filters);
+                    session.remove_topic_filters(cc_topic_filters);
                     sessions.insert(cid, session.into_reconnect());
                 } else {
                     warn!("{} client_id:{} session not found", self.prefix, *cid);
@@ -1320,8 +1320,8 @@ impl Shard {
         mem::drop(active_loop.flusher);
 
         mem::drop(active_loop.shard_queues);
-        mem::drop(active_loop.topic_filters);
-        mem::drop(active_loop.retained_messages);
+        mem::drop(active_loop.cc_topic_filters);
+        mem::drop(active_loop.cc_retained_messages);
 
         let mut new_sessions = BTreeMap::default();
         for (client_id, sess) in active_loop.sessions.into_iter() {
@@ -1517,7 +1517,7 @@ impl Shard {
 
     pub fn as_topic_filters(&self) -> &SubscribedTrie {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { topic_filters, .. }) => topic_filters,
+            Inner::MainActive(ActiveLoop { cc_topic_filters, .. }) => cc_topic_filters,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

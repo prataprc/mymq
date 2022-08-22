@@ -9,8 +9,8 @@ use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
 use std::{collections::VecDeque, fmt, io, mem, net, result, time};
 
-use crate::ErrorKind;
 use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
 
@@ -886,6 +886,58 @@ impl RwTimeout {
     fn set_write_timeout(&mut self, timeout: Option<time::Duration>) {
         if let Some(timeout) = timeout {
             self.deadline = Some(time::Instant::now() + timeout);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum DisconnReasonCode {
+    NormalDisconnect = 0x00,
+    DiconnectWillMessage = 0x04,
+    UnspecifiedError = 0x80,
+    MalformedPacket = 0x81,
+    ProtocolError = 0x82,
+    ImplementationError = 0x83,
+    TopicNameInvalid = 0x90,
+    ExceededReceiveMaximum = 0x93,
+    TopicAliasInvalid = 0x94,
+    PacketTooLarge = 0x95,
+    ExceedMessageRate = 0x96,
+    QuotaExceeded = 0x97,
+    AdminAction = 0x98,
+    PayloadFormatInvalid = 0x99,
+}
+
+const PP: &'static str = "Client::Disconnect";
+
+impl TryFrom<u8> for DisconnReasonCode {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<DisconnReasonCode> {
+        match val {
+            0x00 => Ok(DisconnReasonCode::NormalDisconnect),
+            0x04 => Ok(DisconnReasonCode::DiconnectWillMessage),
+            0x80 => Ok(DisconnReasonCode::UnspecifiedError),
+            0x81 => Ok(DisconnReasonCode::MalformedPacket),
+            0x82 => Ok(DisconnReasonCode::ProtocolError),
+            0x83 => Ok(DisconnReasonCode::ImplementationError),
+            0x90 => Ok(DisconnReasonCode::TopicNameInvalid),
+            0x93 => Ok(DisconnReasonCode::ExceededReceiveMaximum),
+            0x94 => Ok(DisconnReasonCode::TopicAliasInvalid),
+            0x95 => Ok(DisconnReasonCode::PacketTooLarge),
+            0x96 => Ok(DisconnReasonCode::ExceedMessageRate),
+            0x97 => Ok(DisconnReasonCode::QuotaExceeded),
+            0x98 => Ok(DisconnReasonCode::AdminAction),
+            0x99 => Ok(DisconnReasonCode::PayloadFormatInvalid),
+            val => {
+                err!(
+                    MalformedPacket,
+                    code: MalformedPacket,
+                    " {} reason-code {}",
+                    PP,
+                    val
+                )
+            }
         }
     }
 }

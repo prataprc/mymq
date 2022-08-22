@@ -6,8 +6,8 @@ use std::result;
 
 use std::ops::{Deref, DerefMut};
 
-use crate::util::advance;
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
+use crate::{util::advance, v5};
 use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -447,6 +447,23 @@ impl Connect {
             None => None,
         }
     }
+
+    pub fn to_will_publish(&self) -> Option<v5::Publish> {
+        let (_, will_flag, will_qos, will_retain) = self.flags.unwrap();
+        let will_props = self.payload.will_properties.clone();
+        match will_flag {
+            true => Some(v5::Publish {
+                retain: will_retain,
+                qos: will_qos,
+                duplicate: false,
+                topic_name: self.payload.will_topic.clone().unwrap(),
+                packet_id: None,
+                properties: will_props.map(|p| v5::PublishProperties::from(p)),
+                payload: self.payload.will_payload.clone(),
+            }),
+            false => None,
+        }
+    }
 }
 
 /// Collection of MQTT properties allowed in CONNECT packet
@@ -633,9 +650,9 @@ pub struct WillProperties {
     pub will_delay_interval: Option<u32>,
     pub payload_format_indicator: PayloadFormat, // default=PayloadFormat::Binary
     pub message_expiry_interval: Option<u32>,
-    pub content_type: Option<String>,
     pub response_topic: Option<TopicName>,
     pub correlation_data: Option<Vec<u8>>,
+    pub content_type: Option<String>,
     pub user_properties: Vec<UserProperty>,
 }
 
