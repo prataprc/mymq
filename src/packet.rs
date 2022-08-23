@@ -8,6 +8,7 @@ use crate::{v5, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement a state machine to asynchronously read from socket using [mio].
+#[derive(Debug)]
 pub enum MQTTRead {
     Init {
         data: Vec<u8>,
@@ -39,7 +40,7 @@ impl Default for MQTTRead {
     }
 }
 
-impl fmt::Debug for MQTTRead {
+impl fmt::Display for MQTTRead {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             MQTTRead::Init { .. } => write!(f, "MQTTRead::Init"),
