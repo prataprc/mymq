@@ -1,12 +1,13 @@
 use chrono::NaiveDateTime;
-use log::debug;
+use log::{debug, info};
 
-use std::{fmt, mem, path, result, time};
+use std::{mem, net, path, time};
 
 use crate::{Opt, Result, SubCommand};
-use mymq::{netw, util};
+use mymq::{netw, util, v5};
 
 const PCAP_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
+const MQTT_SIGNATURE: [u8; 4] = [77, 81, 84, 84];
 
 #[derive(Clone)]
 struct Dump {
@@ -20,6 +21,8 @@ struct Dump {
     out: bool,
     device: Option<String>,
     eth: bool,
+    ip: bool,
+    tcp: bool,
 }
 
 pub fn run(opts: Opt) -> Result<()> {
@@ -87,6 +90,7 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
         capture.direction(pcap::Direction::InOut).map_err(|e| e.to_string())?;
     }
 
+    info!("capture link {}", capture.get_datalink().get_description().unwrap());
     let mut capture_iter = {
         let codec = Codec {
             dump: dump.clone(),
@@ -106,11 +110,12 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
             }
             Some(pkt) => {
                 let pkt = pkt.map_err(|e| e.to_string())?;
-                println!("{}", pkt);
+                pkt.to_string().map(|s| println!("{}", s));
             }
             None => break,
         }
     }
+    info!("capture exiting");
 
     let capture = {
         let device = find_device(&dump.device.unwrap())?;
@@ -166,11 +171,6 @@ struct Codec {
     mac: pnet::util::MacAddr,
 }
 
-enum Packet {
-    Ethernet(Ethernet),
-    None,
-}
-
 impl Drop for Codec {
     fn drop(&mut self) {
         match &mut self.save_file {
@@ -187,67 +187,295 @@ impl pcap::PacketCodec for Codec {
     type Item = Packet;
 
     fn decode(&mut self, packet: pcap::Packet<'_>) -> Self::Item {
-        use pnet::packet::{ethernet::EthernetPacket, FromPacket};
-
         self.save_file.as_mut().map(|f| f.write(&packet));
+
+        if self.dump.eth {
+            Packet::parse_l2(packet, self)
+        } else if self.dump.ip {
+            Packet::parse_l2(packet, self).parse_l3(self)
+        } else if self.dump.tcp {
+            Packet::parse_l2(packet, self).parse_l3(self).parse_l4(self)
+        } else {
+            Packet::parse_l2(packet, self).parse_l3(self).parse_l4(self).parse_mqtt(self)
+        }
+    }
+}
+
+enum Packet {
+    LoopBack(LoopBack),
+    Ethernet(Ethernet),
+    Ipv4(Ipv4),
+    Tcp(Tcp),
+    Mqtt(Mqtt),
+    None,
+}
+
+impl Packet {
+    fn to_string(&self) -> Option<String> {
+        match self {
+            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::In => {
+                Some(format!("{} <- {} {}", pkt.ts, pkt.eth.source, pkt.eth.ethertype))
+            }
+            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::Out => Some(format!(
+                "{} -> {} {}",
+                pkt.ts, pkt.eth.destination, pkt.eth.ethertype
+            )),
+            Packet::Ethernet(_) => unreachable!(),
+            Packet::Ipv4(pkt) if pkt.dir == pcap::Direction::In => {
+                let ip = &pkt.ip;
+                Some(format!(
+                    concat!(
+                        "{} <- {:15} ecn:{} frag:{} flags:{:x} ttl:{:3} ",
+                        "id:{:5} proto:{}"
+                    ),
+                    pkt.ts,
+                    ip.source,
+                    ip.ecn,
+                    ip.fragment_offset,
+                    ip.flags,
+                    ip.ttl,
+                    ip.identification,
+                    ip.next_level_protocol,
+                ))
+            }
+            Packet::Ipv4(pkt) if pkt.dir == pcap::Direction::Out => {
+                let ip = &pkt.ip;
+                Some(format!(
+                    concat!(
+                        "{} -> {:15} ecn:{} frag:{} flags:{:x} ttl:{:3} ",
+                        "id:{:5} proto:{}"
+                    ),
+                    pkt.ts,
+                    ip.destination,
+                    ip.ecn,
+                    ip.fragment_offset,
+                    ip.flags,
+                    ip.ttl,
+                    ip.identification,
+                    ip.next_level_protocol,
+                ))
+            }
+            Packet::Ipv4(pkt) => {
+                let ip = &pkt.ip;
+                Some(format!(
+                    concat!(
+                        "{} ** ecn:{} frag:{} flags:{:x} ttl:{:3} ",
+                        "id:{:5} proto:{}"
+                    ),
+                    pkt.ts,
+                    ip.ecn,
+                    ip.fragment_offset,
+                    ip.flags,
+                    ip.ttl,
+                    ip.identification,
+                    ip.next_level_protocol,
+                ))
+            }
+            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::In => {
+                let tcp = &pkt.tcp;
+                let remote = format!("{}:{}", pkt.ip_remote, tcp.source);
+                Some(format!(
+                    "{} <- {:19} port:{} flags:{:2x}",
+                    pkt.ts, remote, tcp.destination, tcp.flags,
+                ))
+            }
+            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::Out => {
+                let tcp = &pkt.tcp;
+                let remote = format!("{}:{}", pkt.ip_remote, tcp.destination);
+                Some(format!(
+                    "{} -> {:19} port:{} flags:{:2x}",
+                    pkt.ts, remote, tcp.source, tcp.flags,
+                ))
+            }
+            Packet::Tcp(pkt) => {
+                let tcp = &pkt.tcp;
+                Some(format!(
+                    "{} ** src:{:5} dst:{:5} flags:{:2x}",
+                    pkt.ts, tcp.source, tcp.destination, tcp.flags,
+                ))
+            }
+            Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::In => {
+                Some(format!("{} <-", pkt.ts))
+            }
+            Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::Out => {
+                Some(format!("{} ->", pkt.ts))
+            }
+            Packet::Mqtt(pkt) => Some(format!("{} **", pkt.ts)),
+            Packet::None => None,
+            Packet::LoopBack(_) => None,
+        }
+    }
+}
+
+impl Packet {
+    fn parse_l2(packet: pcap::Packet<'_>, codec: &Codec) -> Packet {
+        use pnet::packet::{ethernet::EthernetPacket, FromPacket};
 
         let ts = NaiveDateTime::from_timestamp(
             packet.header.ts.tv_sec,
             u32::try_from(packet.header.ts.tv_usec).unwrap(),
         );
 
-        match self.link_type {
-            pcap::Linktype::ETHERNET if self.dump.eth => {
-                let pkt = match EthernetPacket::new(packet.data) {
-                    Some(ep) => {
-                        let pkt = Ethernet {
-                            ts,
-                            dir: pcap::Direction::InOut,
-                            eth: ep.from_packet(),
-                        };
-                        Packet::Ethernet(pkt)
-                    }
-                    None => Packet::None,
+        match codec.link_type {
+            pcap::Linktype::NULL => {
+                let l3_typ = u32::from_ne_bytes(packet.data[..4].try_into().unwrap());
+                let l3_typ = match l3_typ {
+                    2 => pnet::packet::ethernet::EtherTypes::Ipv4,
+                    _ => unreachable!(),
                 };
-                self.map(pkt)
+
+                let pkt = LoopBack {
+                    ts,
+                    dir: pcap::Direction::InOut,
+                    l3_typ,
+                    payload: packet.data[4..].to_vec(),
+                };
+
+                Packet::LoopBack(pkt).map(codec)
+            }
+            pcap::Linktype::ETHERNET => match EthernetPacket::new(packet.data) {
+                Some(ep) => {
+                    let pkt = Ethernet {
+                        ts,
+                        dir: pcap::Direction::InOut,
+                        eth: ep.from_packet(),
+                    };
+                    Packet::Ethernet(pkt).map(codec)
+                }
+                None => Packet::None,
+            },
+            _ => Packet::None,
+        }
+    }
+
+    fn parse_l3(self, codec: &Codec) -> Packet {
+        use pnet::packet::{ipv4::Ipv4Packet, FromPacket};
+
+        let (ts, dir, l3_typ, payload) = match self {
+            Packet::LoopBack(pkt) => (pkt.ts, pkt.dir, pkt.l3_typ, pkt.payload),
+            Packet::Ethernet(pkt) => {
+                (pkt.ts, pkt.dir, pkt.eth.ethertype, pkt.eth.payload)
+            }
+            Packet::None => return Packet::None,
+            _ => unreachable!(),
+        };
+
+        match l3_typ {
+            pnet::packet::ethernet::EtherTypes::Ipv4 => match Ipv4Packet::new(&payload) {
+                Some(ip) => {
+                    let pkt = Ipv4 { ts, dir, ip: ip.from_packet() };
+                    Packet::Ipv4(pkt).map(codec)
+                }
+                None => Packet::None,
+            },
+            _ => Packet::None,
+        }
+    }
+
+    fn parse_l4(self, codec: &Codec) -> Packet {
+        use pnet::packet::ip::IpNextHeaderProtocols;
+        use pnet::packet::{tcp::TcpPacket, FromPacket};
+
+        let (ts, dir, l4_typ, ip_remote, payload) = match self {
+            Packet::Ipv4(pkt) if pkt.dir == pcap::Direction::In => (
+                pkt.ts,
+                pkt.dir,
+                pkt.ip.next_level_protocol,
+                pkt.ip.source,
+                pkt.ip.payload,
+            ),
+            Packet::Ipv4(pkt) if pkt.dir == pcap::Direction::Out => (
+                pkt.ts,
+                pkt.dir,
+                pkt.ip.next_level_protocol,
+                pkt.ip.destination,
+                pkt.ip.payload,
+            ),
+            Packet::Ipv4(pkt) => (
+                pkt.ts,
+                pkt.dir,
+                pkt.ip.next_level_protocol,
+                pkt.ip.source, // loopback
+                pkt.ip.payload,
+            ),
+            Packet::None => return Packet::None,
+            _ => unreachable!(),
+        };
+
+        match l4_typ {
+            IpNextHeaderProtocols::Tcp => match TcpPacket::new(&payload) {
+                Some(tcpp) => {
+                    let pkt = Tcp { ts, dir, ip_remote, tcp: tcpp.from_packet() };
+                    Packet::Tcp(pkt).map(codec)
+                }
+                None => Packet::None,
+            },
+            _ => Packet::None,
+        }
+    }
+
+    fn parse_mqtt(self, codec: &Codec) -> Packet {
+        use mymq::Packetize;
+
+        let (ts, dir, ip_remote, src_port, dst_port, payload) = match self {
+            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::In => (
+                pkt.ts,
+                pkt.dir,
+                pkt.ip_remote,
+                pkt.tcp.source,
+                pkt.tcp.destination,
+                pkt.tcp.payload,
+            ),
+            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::Out => (
+                pkt.ts,
+                pkt.dir,
+                pkt.ip_remote,
+                pkt.tcp.source,
+                pkt.tcp.destination,
+                pkt.tcp.payload,
+            ),
+            Packet::None => return Packet::None,
+            _ => unreachable!(),
+        };
+
+        match payload.len() {
+            n if n > 4 && &payload[..4] == &MQTT_SIGNATURE => {
+                match v5::Packet::decode(payload) {
+                    Ok((mqtt, _)) => {
+                        let pkt = Mqtt { ts, dir, ip_remote, src_port, dst_port, mqtt };
+                        Packet::Mqtt(pkt).map(codec)
+                    }
+                    Err(_err) => Packet::None,
+                }
             }
             _ => Packet::None,
         }
     }
-}
 
-impl Codec {
-    fn map(&self, mut pkt: Packet) -> Packet {
-        match &mut pkt {
-            Packet::Ethernet(Ethernet { dir, eth, .. }) => {
-                if self.mac == eth.source {
-                    *dir = pcap::Direction::Out;
-                    pkt
-                } else if self.mac == eth.destination {
-                    *dir = pcap::Direction::In;
-                    pkt
+    fn map(self, codec: &Codec) -> Packet {
+        match self {
+            Packet::LoopBack(pkt) => Packet::LoopBack(pkt),
+            Packet::Ethernet(Ethernet { ts, eth, .. }) => {
+                if codec.mac == eth.source {
+                    let pkt = Ethernet { ts, dir: pcap::Direction::Out, eth };
+                    Packet::Ethernet(pkt)
+                } else if codec.mac == eth.destination {
+                    let pkt = Ethernet { ts, dir: pcap::Direction::In, eth };
+                    Packet::Ethernet(pkt)
                 } else {
                     Packet::None
                 }
             }
-            Packet::None => Packet::None,
+            pkt => pkt,
         }
     }
 }
 
-impl fmt::Display for Packet {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        match self {
-            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::In => {
-                write!(f, "<- {} {}", pkt.eth.source, pkt.eth.ethertype)
-            }
-            Packet::Ethernet(pkt) if pkt.dir == pcap::Direction::Out => {
-                write!(f, "-> {} {}", pkt.eth.destination, pkt.eth.ethertype)
-            }
-            Packet::Ethernet(_) => Ok(()),
-            Packet::None => Ok(()),
-        }
-    }
+struct LoopBack {
+    ts: NaiveDateTime,
+    dir: pcap::Direction,
+    l3_typ: pnet::packet::ethernet::EtherType,
+    payload: Vec<u8>,
 }
 
 struct Ethernet {
@@ -256,15 +484,26 @@ struct Ethernet {
     eth: pnet::packet::ethernet::Ethernet,
 }
 
-impl fmt::Display for Ethernet {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        let ts = self.ts.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
-        write!(
-            f,
-            "{} {} <- {} {}",
-            ts, self.eth.destination, self.eth.source, self.eth.ethertype
-        )
-    }
+struct Ipv4 {
+    ts: NaiveDateTime,
+    dir: pcap::Direction,
+    ip: pnet::packet::ipv4::Ipv4,
+}
+
+struct Tcp {
+    ts: NaiveDateTime,
+    dir: pcap::Direction,
+    ip_remote: net::Ipv4Addr,
+    tcp: pnet::packet::tcp::Tcp,
+}
+
+struct Mqtt {
+    ts: NaiveDateTime,
+    dir: pcap::Direction,
+    ip_remote: net::Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    mqtt: v5::Packet,
 }
 
 impl TryFrom<SubCommand> for Dump {
@@ -282,6 +521,8 @@ impl TryFrom<SubCommand> for Dump {
                 inp,
                 out,
                 eth,
+                ip,
+                tcp,
                 device,
                 ..
             } => {
@@ -295,6 +536,8 @@ impl TryFrom<SubCommand> for Dump {
                     inp,
                     out,
                     eth,
+                    ip,
+                    tcp,
                     device,
                 };
                 Ok(val)

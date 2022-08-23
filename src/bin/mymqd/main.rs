@@ -71,6 +71,12 @@ pub enum SubCommand {
         #[structopt(long = "eth")]
         eth: bool,
 
+        #[structopt(long = "ip")]
+        ip: bool,
+
+        #[structopt(long = "tcp")]
+        tcp: bool,
+
         device: Option<String>,
     },
     List {
