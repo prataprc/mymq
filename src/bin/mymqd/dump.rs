@@ -1,13 +1,14 @@
 use chrono::NaiveDateTime;
-use log::{debug, info};
+use log::{debug, error, info, trace};
 
-use std::{mem, net, path, time};
+use std::{cmp, collections::BTreeMap, mem, net, path, time};
 
 use crate::{Opt, Result, SubCommand};
-use mymq::{netw, util, v5};
+use mymq::{netw, util, v5, MQTTRead};
 
 const PCAP_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
-const MQTT_SIGNATURE: [u8; 4] = [77, 81, 84, 84];
+const MQTT_SIGNATURE: [u8; 6] = [0, 4, 77, 81, 84, 84];
+const MAX_PACKET_SIZE: u32 = 10 * 1024 * 1024; // 10 MB
 
 #[derive(Clone)]
 struct Dump {
@@ -23,6 +24,7 @@ struct Dump {
     eth: bool,
     ip: bool,
     tcp: bool,
+    port: u16,
 }
 
 pub fn run(opts: Opt) -> Result<()> {
@@ -97,6 +99,8 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
             save_file,
             link_type: capture.get_datalink(),
             mac: dump.device_mac()?,
+            inp_conns: BTreeMap::default(),
+            out_conns: BTreeMap::default(),
         };
         capture.iter(codec)
     };
@@ -106,7 +110,7 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
         match capture_iter.next() {
             Some(_pkt) if dump.time > 0 && time::Instant::now() > deadline => break,
             Some(Err(pcap::Error::TimeoutExpired)) => {
-                debug!("timeout({:?}) expired from pcap", PCAP_TIMEOUT);
+                trace!("timeout({:?}) expired from pcap", PCAP_TIMEOUT);
             }
             Some(pkt) => {
                 let pkt = pkt.map_err(|e| e.to_string())?;
@@ -164,11 +168,15 @@ fn into_precision(val: &str) -> Result<pcap::Precision> {
     }
 }
 
+type Key = (net::Ipv4Addr, u16);
+type Val = (Vec<u8>, MQTTRead, bool);
 struct Codec {
     dump: Dump,
     save_file: Option<pcap::Savefile>,
     link_type: pcap::Linktype,
     mac: pnet::util::MacAddr,
+    inp_conns: BTreeMap<Key, Val>,
+    out_conns: BTreeMap<Key, Val>,
 }
 
 impl Drop for Codec {
@@ -198,6 +206,79 @@ impl pcap::PacketCodec for Codec {
         } else {
             Packet::parse_l2(packet, self).parse_l3(self).parse_l4(self).parse_mqtt(self)
         }
+    }
+}
+
+impl Codec {
+    fn read_packet(
+        &mut self,
+        key: &(net::Ipv4Addr, u16),
+        dir: pcap::Direction,
+    ) -> Result<Option<v5::Packet>> {
+        use mymq::MQTTRead::{Fin, Header, Init, Remain};
+
+        let conns = match dir {
+            pcap::Direction::In => &mut self.inp_conns,
+            pcap::Direction::Out => &mut self.out_conns,
+            _ => unreachable!(),
+        };
+
+        let (buf, pktr) = match conns.get_mut(&key) {
+            Some((buf, pktr, _)) => (buf, pktr),
+            None => return Ok(None),
+        };
+
+        let mut pr = mem::replace(pktr, MQTTRead::default());
+        let max_packet_size = pr.to_max_packet_size();
+        let mut slice = buf.as_slice();
+        // println!("read_packet key:{:?} dir:{:?} slice:{}", key, dir, slice.len());
+        let res = loop {
+            if slice.len() == 0 {
+                break Ok(None);
+            }
+            pr = match pr.read(&mut slice) {
+                Ok((val, true)) => {
+                    pr = val;
+                    break Ok(None);
+                }
+                Ok((val, false)) => val,
+                Err(err) if err.kind() == mymq::ErrorKind::MalformedPacket => {
+                    pr = MQTTRead::new(max_packet_size);
+                    break Err(format!("malformed packet from MQTTRead"));
+                }
+                Err(err) if err.kind() == mymq::ErrorKind::ProtocolError => {
+                    pr = MQTTRead::new(max_packet_size);
+                    break Err(format!("protocol error from MQTTRead"));
+                }
+                Err(err) if err.kind() == mymq::ErrorKind::Disconnected => {
+                    pr = MQTTRead::new(max_packet_size);
+                    break Ok(None);
+                }
+                Err(err) => unreachable!("unexpected error {}", err),
+            };
+
+            match &pr {
+                Init { .. } | Header { .. } | Remain { .. } => (),
+                Fin { .. } => match pr.parse() {
+                    Ok(pkt) => {
+                        pr = pr.reset();
+                        break Ok(Some(pkt));
+                    }
+                    Err(err) => {
+                        pr = pr.reset();
+                        break Err(err.to_string());
+                    }
+                },
+                MQTTRead::None => unreachable!(),
+            }
+        };
+        let m = buf.len() - slice.len();
+        buf.drain(..m);
+
+        // println!("read_packet pr:{:?} res:{:?}", pr, res);
+
+        let _none = mem::replace(pktr, pr);
+        res
     }
 }
 
@@ -273,32 +354,55 @@ impl Packet {
             }
             Packet::Tcp(pkt) if pkt.dir == pcap::Direction::In => {
                 let tcp = &pkt.tcp;
+                let payload = &tcp.payload;
                 let remote = format!("{}:{}", pkt.ip_remote, tcp.source);
+                let n = cmp::min(payload.len(), 4);
                 Some(format!(
-                    "{} <- {:19} port:{} flags:{:2x}",
-                    pkt.ts, remote, tcp.destination, tcp.flags,
+                    "{} <- {:19} port:{} flags:{:2x} payload:{}({:?})",
+                    pkt.ts,
+                    remote,
+                    tcp.destination,
+                    tcp.flags,
+                    payload.len(),
+                    &payload[..n],
                 ))
             }
             Packet::Tcp(pkt) if pkt.dir == pcap::Direction::Out => {
                 let tcp = &pkt.tcp;
+                let payload = &tcp.payload;
                 let remote = format!("{}:{}", pkt.ip_remote, tcp.destination);
+                let n = cmp::min(payload.len(), 4);
                 Some(format!(
-                    "{} -> {:19} port:{} flags:{:2x}",
-                    pkt.ts, remote, tcp.source, tcp.flags,
+                    "{} -> {:19} port:{} flags:{:2x} payload:{}({:?})",
+                    pkt.ts,
+                    remote,
+                    tcp.source,
+                    tcp.flags,
+                    payload.len(),
+                    &payload[..n],
                 ))
             }
             Packet::Tcp(pkt) => {
                 let tcp = &pkt.tcp;
+                let payload = &tcp.payload;
+                let n = cmp::min(payload.len(), 4);
                 Some(format!(
-                    "{} ** src:{:5} dst:{:5} flags:{:2x}",
-                    pkt.ts, tcp.source, tcp.destination, tcp.flags,
+                    "{} ** src:{:5} dst:{:5} flags:{:2x} payload:{}({:?})",
+                    pkt.ts,
+                    tcp.source,
+                    tcp.destination,
+                    tcp.flags,
+                    payload.len(),
+                    &payload[..n],
                 ))
             }
             Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::In => {
-                Some(format!("{} <-", pkt.ts))
+                let remote = format!("{}:{}", pkt.ip_remote, pkt.src_port);
+                Some(format!("{} <- {:19} {}", pkt.ts, remote, 0))
             }
             Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::Out => {
-                Some(format!("{} ->", pkt.ts))
+                let remote = format!("{}:{}", pkt.ip_remote, pkt.dst_port);
+                Some(format!("{} -> {:19} {}", pkt.ts, remote, 0))
             }
             Packet::Mqtt(pkt) => Some(format!("{} **", pkt.ts)),
             Packet::None => None,
@@ -414,41 +518,104 @@ impl Packet {
         }
     }
 
-    fn parse_mqtt(self, codec: &Codec) -> Packet {
-        use mymq::Packetize;
-
-        let (ts, dir, ip_remote, src_port, dst_port, payload) = match self {
-            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::In => (
-                pkt.ts,
-                pkt.dir,
-                pkt.ip_remote,
-                pkt.tcp.source,
-                pkt.tcp.destination,
-                pkt.tcp.payload,
-            ),
-            Packet::Tcp(pkt) if pkt.dir == pcap::Direction::Out => (
-                pkt.ts,
-                pkt.dir,
-                pkt.ip_remote,
-                pkt.tcp.source,
-                pkt.tcp.destination,
-                pkt.tcp.payload,
-            ),
+    fn parse_mqtt(self, codec: &mut Codec) -> Packet {
+        let (ts, dir, ip_remote, tcp) = match self {
+            Packet::Tcp(pkt) => (pkt.ts, pkt.dir, pkt.ip_remote, pkt.tcp),
             Packet::None => return Packet::None,
             _ => unreachable!(),
         };
 
-        match payload.len() {
-            n if n > 4 && &payload[..4] == &MQTT_SIGNATURE => {
-                match v5::Packet::decode(payload) {
-                    Ok((mqtt, _)) => {
-                        let pkt = Mqtt { ts, dir, ip_remote, src_port, dst_port, mqtt };
-                        Packet::Mqtt(pkt).map(codec)
+        let (key, dir) = if tcp.source < 2000 || codec.dump.port == tcp.source {
+            let dir = match dir {
+                pcap::Direction::InOut => pcap::Direction::Out,
+                dir => dir,
+            };
+            ((ip_remote, tcp.destination), dir)
+        } else if tcp.destination < 2000 || codec.dump.port == tcp.destination {
+            let dir = match dir {
+                pcap::Direction::InOut => pcap::Direction::In,
+                dir => dir,
+            };
+            ((ip_remote, tcp.source), dir)
+        } else {
+            error!("unexpected");
+            return Packet::None;
+        };
+
+        let conns = match dir {
+            pcap::Direction::In => &mut codec.inp_conns,
+            pcap::Direction::Out => &mut codec.out_conns,
+            _ => unreachable!(),
+        };
+
+        let flags = tcp.flags;
+        if (flags & 0x1) > 0 || (flags & 0x2) > 0 || (flags & 0x4) > 0 {
+            if conns.remove(&key).is_some() {
+                debug!("removing key:{:?} dir:{:?} flags:{:?}", key, dir, flags);
+            }
+        }
+        // println!("dir:{:?} flags:{:x}", dir, flags);
+
+        let mqtt_ok = match conns.get_mut(&key) {
+            Some((buf, _, mqtt_ok)) => {
+                buf.extend(&tcp.payload);
+                *mqtt_ok
+            }
+            None if (flags & 0x2) > 0 => {
+                let buf = tcp.payload.to_vec();
+                let pktr = MQTTRead::new(MAX_PACKET_SIZE);
+                debug!("inserting key:{:?} dir:{:?}", key, dir);
+                conns.insert(key, (buf, pktr, false));
+                false
+            }
+            None => return Packet::None,
+        };
+
+        if dir == pcap::Direction::In && !mqtt_ok {
+            let (buf, _, mqtt_ok) = conns.get_mut(&key).unwrap();
+            let tri = check_connect(buf);
+            match tri {
+                Triplet::Maybe => return Packet::None,
+                Triplet::True => {
+                    *mqtt_ok = true;
+                    let buf = Vec::default();
+                    let pktr = MQTTRead::new(MAX_PACKET_SIZE);
+                    let key = (ip_remote, tcp.source);
+                    debug!("inserting remote key:{:?} dir:{:?}", key, dir);
+                    codec.out_conns.insert(key, (buf, pktr, true));
+                }
+                Triplet::False => {
+                    if conns.remove(&key).is_some() {
+                        debug!("removing (not mqtt) key:{:?} dir:{:?}", key, dir);
                     }
-                    Err(_err) => Packet::None,
+                    return Packet::None;
                 }
             }
-            _ => Packet::None,
+        }
+
+        // println!("dir:{:?} flags:{:x}", dir, flags);
+
+        match codec.read_packet(&key, dir) {
+            Ok(Some(mqtt)) => {
+                // println!("mqtt flags:{:x} dir:{:?}", flags, dir);
+                let pkt = Mqtt {
+                    ts,
+                    dir,
+                    ip_remote,
+                    src_port: tcp.source,
+                    dst_port: tcp.destination,
+                    mqtt,
+                };
+                Packet::Mqtt(pkt).map(codec)
+            }
+            Ok(None) => {
+                // println!("none flags:{:x} dir:{:?}", flags, dir);
+                Packet::None
+            }
+            Err(err) => {
+                println!("error reading packet: {}", err);
+                Packet::None
+            }
         }
     }
 
@@ -523,6 +690,7 @@ impl TryFrom<SubCommand> for Dump {
                 eth,
                 ip,
                 tcp,
+                port,
                 device,
                 ..
             } => {
@@ -538,6 +706,7 @@ impl TryFrom<SubCommand> for Dump {
                     eth,
                     ip,
                     tcp,
+                    port,
                     device,
                 };
                 Ok(val)
@@ -559,4 +728,31 @@ impl Dump {
             None => Err(format!("cannot find mac for device {:?}", device_name)),
         }
     }
+}
+
+fn check_connect(buf: &[u8]) -> Triplet {
+    use mymq::Packetize;
+
+    if buf.len() < 7 {
+        Triplet::Maybe
+    } else {
+        match mymq::VarU32::decode(&buf[1..7]).ok() {
+            Some((_, n)) if buf.len() >= (1 + n + 6) => {
+                if MQTT_SIGNATURE == &buf[1 + n..1 + n + 6] {
+                    Triplet::True
+                } else {
+                    Triplet::False
+                }
+            }
+            Some((_, _)) => Triplet::Maybe,
+            None => Triplet::False,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Triplet {
+    True,
+    False,
+    Maybe,
 }

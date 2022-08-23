@@ -77,6 +77,9 @@ pub enum SubCommand {
         #[structopt(long = "tcp")]
         tcp: bool,
 
+        #[structopt(long = "port", default_value = "0")]
+        port: u16,
+
         device: Option<String>,
     },
     List {
