@@ -1,6 +1,6 @@
 //! Module implement MQTT Client.
 
-use log::trace;
+use log::{error, trace};
 
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -76,10 +76,10 @@ impl ClientBuilder {
     /// and other communication methods, on the returned client, shall block.
     ///
     /// NOTE: This call shall block until CONNACK is successfully received from remote.
-    pub fn connect(self, remote: net::SocketAddr) -> io::Result<Client> {
+    pub fn connect(self, raddr: net::SocketAddr) -> io::Result<Client> {
         let sock = match self.connect_timeout {
-            Some(timeout) => net::TcpStream::connect_timeout(&remote, timeout)?,
-            None => net::TcpStream::connect(&remote)?,
+            Some(timeout) => net::TcpStream::connect_timeout(&raddr, timeout)?,
+            None => net::TcpStream::connect(&raddr)?,
         };
         sock.set_read_timeout(self.read_timeout)?;
         sock.set_write_timeout(self.write_timeout)?;
@@ -90,7 +90,7 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        let mut client = self.into_client(remote);
+        let mut client = self.into_client(raddr);
 
         let (cio, connack) = {
             let connect = client.to_connect(true /*clean_start*/);
@@ -110,8 +110,8 @@ impl ClientBuilder {
     /// [io::ErrorKind::Interrupted] returns.
     ///
     /// NOTE: This call shall block until CONNACK is successfully received from remote.
-    pub fn connect_noblock(self, remote: net::SocketAddr) -> io::Result<Client> {
-        let sock = net::TcpStream::connect(remote)?;
+    pub fn connect_noblock(self, raddr: net::SocketAddr) -> io::Result<Client> {
+        let sock = net::TcpStream::connect(raddr)?;
         if let Some(nodelay) = self.nodelay {
             sock.set_nodelay(nodelay)?
         }
@@ -119,7 +119,7 @@ impl ClientBuilder {
             sock.set_ttl(ttl)?
         }
 
-        let mut client = self.into_client(remote);
+        let mut client = self.into_client(raddr);
 
         let (cio, connack) = {
             let connect = client.to_connect(true /*clean_start*/);
@@ -133,10 +133,10 @@ impl ClientBuilder {
         Ok(client)
     }
 
-    fn into_client(self, remote: net::SocketAddr) -> Client {
+    fn into_client(self, raddr: net::SocketAddr) -> Client {
         Client {
             client_id: self.client_id.unwrap_or_else(|| ClientID::new_uuid_v4()),
-            remote,
+            raddr,
             protocol_version: self.protocol_version,
             connect_timeout: self.connect_timeout,
             read_timeout: self.read_timeout,
@@ -162,7 +162,7 @@ impl ClientBuilder {
 /// Type to interface with MQTT broker.
 pub struct Client {
     client_id: ClientID,
-    remote: net::SocketAddr,
+    raddr: net::SocketAddr,
     protocol_version: MqttProtocol,
     connect_timeout: Option<time::Duration>,
     read_timeout: Option<time::Duration>,
@@ -184,6 +184,22 @@ pub struct Client {
     cio: ClientIO,
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        let code = v5::DisconnReasonCode::try_from(u8::from(
+            DisconnReasonCode::NormalDisconnect,
+        ))
+        .unwrap();
+        let disconnect = v5::Disconnect { code, properties: None };
+        if let Err(err) = self.write(v5::Packet::Disconnect(disconnect)) {
+            error!(
+                "client_id:{:?} raddr:{:?} drop error:{}",
+                self.client_id, self.raddr, err
+            )
+        }
+    }
+}
+
 /// Client initialization and setup
 impl Client {
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
@@ -195,7 +211,7 @@ impl Client {
         let (rd_cio, wt_cio) = cio.split_sock()?;
         let reader = Client {
             client_id: self.client_id.clone(),
-            remote: self.remote,
+            raddr: self.raddr,
             protocol_version: self.protocol_version,
             connect_timeout: self.connect_timeout,
             read_timeout: self.read_timeout,
@@ -226,8 +242,8 @@ impl Client {
     /// as before.
     pub fn reconnect(mut self) -> io::Result<Self> {
         let sock = match self.connect_timeout {
-            Some(timeout) => net::TcpStream::connect_timeout(&self.remote, timeout)?,
-            None => net::TcpStream::connect(&self.remote)?,
+            Some(timeout) => net::TcpStream::connect_timeout(&self.raddr, timeout)?,
+            None => net::TcpStream::connect(&self.raddr)?,
         };
         sock.set_read_timeout(self.read_timeout)?;
         sock.set_write_timeout(self.write_timeout)?;
@@ -890,6 +906,8 @@ impl RwTimeout {
     }
 }
 
+const PP: &'static str = "Client::Disconnect";
+
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
@@ -908,7 +926,28 @@ pub enum DisconnReasonCode {
     PayloadFormatInvalid = 0x99,
 }
 
-const PP: &'static str = "Client::Disconnect";
+impl From<DisconnReasonCode> for u8 {
+    fn from(val: DisconnReasonCode) -> u8 {
+        use DisconnReasonCode::*;
+
+        match val {
+            NormalDisconnect => 0x00,
+            DiconnectWillMessage => 0x04,
+            UnspecifiedError => 0x80,
+            MalformedPacket => 0x81,
+            ProtocolError => 0x82,
+            ImplementationError => 0x83,
+            TopicNameInvalid => 0x90,
+            ExceededReceiveMaximum => 0x93,
+            TopicAliasInvalid => 0x94,
+            PacketTooLarge => 0x95,
+            ExceedMessageRate => 0x96,
+            QuotaExceeded => 0x97,
+            AdminAction => 0x98,
+            PayloadFormatInvalid => 0x99,
+        }
+    }
+}
 
 impl TryFrom<u8> for DisconnReasonCode {
     type Error = Error;
