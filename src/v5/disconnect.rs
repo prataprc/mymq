@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::util::advance;
 use crate::v5::{FixedHeader, Property, PropertyType};
@@ -44,6 +43,45 @@ pub enum DisconnReasonCode {
     ExceedMaximumConnectTime = 0xA0,
     SubscriptionIdNotSupported = 0xA1,
     WildcardSubscriptionsNotSupported = 0xA2,
+}
+
+impl fmt::Display for DisconnReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use DisconnReasonCode::*;
+
+        match self {
+            NormalDisconnect => write!(f, "normal_disconnect"),
+            UnspecifiedError => write!(f, "unspecified_error"),
+            MalformedPacket => write!(f, "malformed_packet"),
+            ProtocolError => write!(f, "protocol_error"),
+            ImplementationError => write!(f, "implementation_error"),
+            NotAuthorized => write!(f, "not_authorized"),
+            ServerBusy => write!(f, "server_busy"),
+            ServerShutdown => write!(f, "server_shutdown"),
+            KeepAliveTimeout => write!(f, "keepalive_timeout"),
+            SessionTakenOver => write!(f, "session_takenover"),
+            InvalidTopicFilter => write!(f, "invalid_topicfilter"),
+            TopicNameInvalid => write!(f, "topicname_invalid"),
+            ExceededReceiveMaximum => write!(f, "exceeded_receive_maximum"),
+            TopicAliasInvalid => write!(f, "topicalias_invalid"),
+            PacketTooLarge => write!(f, "packet_toolarge"),
+            ExceedMessageRate => write!(f, "exceed_messagerate"),
+            QuotaExceeded => write!(f, "quota_exceeded"),
+            AdminAction => write!(f, "admin_action"),
+            PayloadFormatInvalid => write!(f, "payload_format_invalid"),
+            RetainNotSupported => write!(f, "retain_notsupported"),
+            QoSNotSupported => write!(f, "qos_notsupported"),
+            UseAnotherServer => write!(f, "use_anotherserver"),
+            ServerMoved => write!(f, "server_moved"),
+            UnsupportedSharedSubscription => write!(f, "unsupported_sharedsubscription"),
+            ExceedConnectionRate => write!(f, "exceed_connectionrate"),
+            ExceedMaximumConnectTime => write!(f, "exceed_maximumconnecttime"),
+            SubscriptionIdNotSupported => write!(f, "subscriptionid_notsupported"),
+            WildcardSubscriptionsNotSupported => {
+                write!(f, "wildcardsubscriptions_notsupported")
+            }
+        }
+    }
 }
 
 impl TryFrom<u8> for DisconnReasonCode {
@@ -97,6 +135,30 @@ impl TryFrom<u8> for DisconnReasonCode {
 pub struct Disconnect {
     pub code: DisconnReasonCode,
     pub properties: Option<DisconnProperties>,
+}
+
+impl fmt::Display for Disconnect {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "DISCONNECT code:{}", self.code)?;
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = properties.session_expiry_interval {
+                props.push(format!("  session_expiry_interval: {}", val));
+            }
+            if let Some(val) = &properties.reason_string {
+                props.push(format!("  reason_string: {:?}", val));
+            }
+            if let Some(val) = &properties.server_reference {
+                props.push(format!("  server_reference: {:?}", val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -189,8 +251,8 @@ impl Disconnect {
 pub struct DisconnProperties {
     pub session_expiry_interval: Option<u32>,
     pub reason_string: Option<String>,
-    pub user_properties: Vec<UserProperty>,
     pub server_reference: Option<String>,
+    pub user_properties: Vec<UserProperty>,
 }
 
 #[cfg(any(feature = "fuzzy", test))]

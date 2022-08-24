@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::util::advance;
 use crate::v5::{self, FixedHeader, PacketType, Property, PropertyType};
@@ -72,6 +71,32 @@ pub struct Pub {
     pub packet_id: u16,
     pub code: ReasonCode,
     pub properties: Option<PubProperties>,
+}
+
+impl fmt::Display for Pub {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let name = match self.packet_type {
+            PacketType::PubAck => "PUBACK",
+            PacketType::PubRec => "PUBREC",
+            PacketType::PubRel => "PUBREL",
+            PacketType::PubComp => "PUBCOMP",
+            _ => unreachable!(),
+        };
+        write!(f, "{} packet_id:{} code:{}", name, self.packet_id, self.code)?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = &properties.reason_string {
+                props.push(format!("  reason_string: {:?}", val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

@@ -1,10 +1,11 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
-
-use std::ops::{Deref, DerefMut};
+use std::{
+    fmt,
+    ops::{Deref, DerefMut},
+    result,
+};
 
 use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
 use crate::{util::advance, v5};
@@ -182,6 +183,90 @@ impl Default for ConnectPayload {
             username: None,
             password: None,
         }
+    }
+}
+
+impl fmt::Display for Connect {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        let keep_alive = match self.keep_alive {
+            0 => "".to_string(),
+            n => format!(" keep_alive:{}", n),
+        };
+        let cid = &self.payload.client_id;
+        write!(f, "CONNECT client:{:?} flags:{:2x}{}\n", cid, *self.flags, keep_alive)?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = properties.session_expiry_interval {
+                props.push(format!("  session_expiry_interval: {}", val));
+            }
+            if let Some(val) = properties.receive_maximum {
+                props.push(format!("  receive_maximum: {}", val));
+            }
+            if let Some(val) = properties.max_packet_size {
+                props.push(format!("  max_packet_size: {}", val));
+            }
+            if let Some(val) = properties.topic_alias_max {
+                props.push(format!("  topic_alias_max: {}", val));
+            }
+            if let Some(val) = properties.request_response_info {
+                props.push(format!("  request_response_info: {}", val));
+            }
+            if let Some(val) = properties.request_problem_info {
+                props.push(format!("  request_problem_info: {}", val));
+            }
+            if let Some(val) = &properties.authentication_method {
+                props.push(format!("  authentication_method: {:?}", val));
+            }
+            if let Some(val) = &properties.authentication_data {
+                props.push(format!("  authentication_data: {}", val.len()));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        let mut items = Vec::default();
+        items.push(format!("  client_id: {:?}", self.payload.client_id));
+        if let Some(username) = &self.payload.username {
+            items.push(format!("  username: {:?}", username))
+        }
+        if let Some(_password) = &self.payload.password {
+            items.push(format!("  password: ***"))
+        }
+        if let Some(wtopic) = &self.payload.will_topic {
+            items.push(format!("  will_topic: {:?}", wtopic))
+        }
+        if let Some(wpayload) = &self.payload.will_payload {
+            items.push(format!("  will_payload: {}", wpayload.len()))
+        }
+
+        if let Some(will_properties) = &self.payload.will_properties {
+            if let Some(val) = will_properties.will_delay_interval {
+                items.push(format!("  will_delay_interval: {}", val))
+            }
+            items.push(format!(
+                "  payload_format_indicator: {}",
+                will_properties.payload_format_indicator
+            ));
+            if let Some(val) = will_properties.message_expiry_interval {
+                items.push(format!("  message_expiry_interval: {}", val))
+            }
+            if let Some(val) = &will_properties.response_topic {
+                items.push(format!("  response_topic: {:?}", val))
+            }
+            if let Some(val) = &will_properties.correlation_data {
+                items.push(format!("  correlation_data: {}", val.len()))
+            }
+            if let Some(val) = &will_properties.content_type {
+                items.push(format!("  content_type: {:?}", val))
+            }
+            for (key, val) in will_properties.user_properties.iter() {
+                items.push(format!("  {:?}: {:?}", key, val));
+            }
+        }
+        write!(f, "{}\n", items.join("\n"))
     }
 }
 

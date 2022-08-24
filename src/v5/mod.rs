@@ -3,9 +3,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-use std::cmp;
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{cmp, fmt, result};
 
 use crate::util::advance;
 use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, UserProperty, VarU32};
@@ -144,6 +142,7 @@ pub struct Subscription {
     pub client_id: ClientID,
     /// Shard ID hosting this client and its session.
     pub shard_id: u32,
+
     /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
     pub subscription_id: Option<u32>,
     /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
@@ -299,6 +298,28 @@ pub enum Packet {
     PingResp,
     Disconnect(Disconnect),
     Auth(Auth),
+}
+
+impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Packet::Connect(connect) => <Connect as fmt::Display>::fmt(connect, f),
+            Packet::ConnAck(connack) => <ConnAck as fmt::Display>::fmt(connack, f),
+            Packet::Publish(publish) => <Publish as fmt::Display>::fmt(publish, f),
+            Packet::PubAck(val) => <Pub as fmt::Display>::fmt(val, f),
+            Packet::PubRec(val) => <Pub as fmt::Display>::fmt(val, f),
+            Packet::PubRel(val) => <Pub as fmt::Display>::fmt(val, f),
+            Packet::PubComp(val) => <Pub as fmt::Display>::fmt(val, f),
+            Packet::Subscribe(sub) => <Subscribe as fmt::Display>::fmt(sub, f),
+            Packet::SubAck(suback) => <SubAck as fmt::Display>::fmt(suback, f),
+            Packet::UnSubscribe(unsub) => <UnSubscribe as fmt::Display>::fmt(unsub, f),
+            Packet::UnsubAck(unsub_ack) => <UnsubAck as fmt::Display>::fmt(unsub_ack, f),
+            Packet::PingReq => write!(f, "PINGREQ"),
+            Packet::PingResp => write!(f, "PINGRESP"),
+            Packet::Disconnect(disconn) => <Disconnect as fmt::Display>::fmt(disconn, f),
+            Packet::Auth(auth) => <Auth as fmt::Display>::fmt(auth, f),
+        }
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
@@ -476,6 +497,16 @@ pub enum QoS {
     AtMostOnce = 0,
     AtLeastOnce = 1,
     ExactlyOnce = 2,
+}
+
+impl fmt::Display for QoS {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            QoS::AtMostOnce => write!(f, "at_most_once"),
+            QoS::AtLeastOnce => write!(f, "at_least_once"),
+            QoS::ExactlyOnce => write!(f, "exactly_once"),
+        }
+    }
 }
 
 impl TryFrom<u8> for QoS {
@@ -1145,6 +1176,15 @@ impl Property {
 pub enum PayloadFormat {
     Binary = 0,
     Utf8 = 1,
+}
+
+impl fmt::Display for PayloadFormat {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            PayloadFormat::Binary => write!(f, "binary"),
+            PayloadFormat::Utf8 => write!(f, "utf8"),
+        }
+    }
 }
 
 impl Default for PayloadFormat {

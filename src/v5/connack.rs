@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use std::ops::{Deref, DerefMut};
 
@@ -117,6 +116,37 @@ pub enum ConnackReasonCode {
     ExceedConnectionRate = 0x9f,
 }
 
+impl fmt::Display for ConnackReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use ConnackReasonCode::*;
+
+        match self {
+            Success => write!(f, "success"),
+            UnspecifiedError => write!(f, "unspecified_error"),
+            MalformedPacket => write!(f, "malformed_packet"),
+            ProtocolError => write!(f, "protocol_error"),
+            ImplementationError => write!(f, "implementation_error"),
+            UnsupportedProtocolVersion => write!(f, "unsupported_protocolversion"),
+            InvalidClientID => write!(f, "invalid_clientid"),
+            BadLogin => write!(f, "bad_login"),
+            NotAuthorized => write!(f, "not_authorized"),
+            ServerUnavailable => write!(f, "server_unavailable"),
+            ServerBusy => write!(f, "server_busy"),
+            Banned => write!(f, "banned"),
+            BadAuthenticationMethod => write!(f, "bad_authentication_method"),
+            TopicNameInvalid => write!(f, "topicname_invalid"),
+            PacketTooLarge => write!(f, "packet_toolarge"),
+            QuotaExceeded => write!(f, "quota_exceeded"),
+            PayloadFormatInvalid => write!(f, "payloadformat_invalid"),
+            RetainNotSupported => write!(f, "retain_notsupported"),
+            InvalidQoS => write!(f, "invalid_qos"),
+            UseAnotherServer => write!(f, "use_anotherserver"),
+            ServerMoved => write!(f, "server_moved"),
+            ExceedConnectionRate => write!(f, "exceed_connectionrate"),
+        }
+    }
+}
+
 impl TryFrom<u8> for ConnackReasonCode {
     type Error = Error;
 
@@ -157,6 +187,70 @@ pub struct ConnAck {
     pub flags: ConnackFlags,
     pub code: ConnackReasonCode,
     pub properties: Option<ConnAckProperties>,
+}
+
+impl fmt::Display for ConnAck {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "CONNACK flags:{:2x} code:{}\n", *self.flags, self.code)?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = properties.session_expiry_interval {
+                props.push(format!("  session_expiry_interval: {}", val));
+            }
+            if let Some(val) = properties.receive_maximum {
+                props.push(format!("  receive_maximum: {}", val));
+            }
+            if let Some(val) = properties.maximum_qos {
+                props.push(format!("  maximum_qos: {}", val));
+            }
+            if let Some(val) = properties.retain_available {
+                props.push(format!("  retain_available: {}", val));
+            }
+            if let Some(val) = properties.max_packet_size {
+                props.push(format!("  max_packet_size: {}", val));
+            }
+            if let Some(val) = &properties.assigned_client_identifier {
+                props.push(format!("  assigned_client_identifier: {:?}", val));
+            }
+            if let Some(val) = properties.topic_alias_max {
+                props.push(format!("  topic_alias_max: {}", val));
+            }
+            if let Some(val) = &properties.reason_string {
+                props.push(format!("  reason_string: {:?}", val));
+            }
+            if let Some(val) = properties.wildcard_subscription_available {
+                props.push(format!("  wildcard_subscription_available: {}", val));
+            }
+            if let Some(val) = properties.subscription_identifiers_available {
+                props.push(format!("  subscription_identifiers_available: {}", val));
+            }
+            if let Some(val) = properties.shared_subscription_available {
+                props.push(format!("  shared_subscription_available: {}", val));
+            }
+            if let Some(val) = properties.server_keep_alive {
+                props.push(format!("  server_keep_alive: {}", val));
+            }
+            if let Some(val) = &properties.response_information {
+                props.push(format!("  response_information: {:?}", val));
+            }
+            if let Some(val) = &properties.server_reference {
+                props.push(format!("  server_reference: {:?}", val));
+            }
+            if let Some(val) = &properties.authentication_method {
+                props.push(format!("  authentication_method: {:?}", val));
+            }
+            if let Some(val) = &properties.authentication_data {
+                props.push(format!("  authentication_data: {}", val.len()));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for ConnAck {

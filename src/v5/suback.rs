@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::util::advance;
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
@@ -64,8 +63,27 @@ impl TryFrom<u8> for SubAckReasonCode {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubAck {
     pub packet_id: u16,
-    pub properties: Option<SubAckProperties>,
     pub return_codes: Vec<SubAckReasonCode>,
+    pub properties: Option<SubAckProperties>,
+}
+
+impl fmt::Display for SubAck {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "SUBACK packet_id:{} rc:{:?}", self.packet_id, self.return_codes)?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = &properties.reason_string {
+                props.push(format!("  reason_string: {:?}", val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

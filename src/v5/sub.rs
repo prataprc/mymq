@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::v5::{FixedHeader, Property, PropertyType, QoS};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
@@ -115,8 +114,36 @@ impl From<RetainForwardRule> for u8 {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Subscribe {
     pub packet_id: u16,
-    pub properties: Option<SubscribeProperties>,
     pub filters: Vec<SubscribeFilter>,
+    pub properties: Option<SubscribeProperties>,
+}
+
+impl fmt::Display for Subscribe {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "SUBSCRIBE packet_id:{}", self.packet_id)?;
+
+        let mut filters = Vec::default();
+        for filter in self.filters.iter() {
+            filters.push(format!(
+                "(filter:{:?} opt:{:2x})",
+                filter.topic_filter, filter.opt.0
+            ));
+        }
+        write!(f, "{}", filters.join("\n"))?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            if let Some(val) = properties.subscription_id {
+                props.push(format!("  subscription_id: {}", *val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

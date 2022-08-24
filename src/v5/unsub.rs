@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::v5::{FixedHeader, Property, PropertyType};
 use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
@@ -14,8 +13,30 @@ const PP: &'static str = "Packet::UnSubscribe";
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct UnSubscribe {
     pub packet_id: u16,
-    pub properties: Option<UnSubscribeProperties>,
     pub filters: Vec<TopicFilter>,
+    pub properties: Option<UnSubscribeProperties>,
+}
+
+impl fmt::Display for UnSubscribe {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "UNSUBSCRIBE packet_id:{}", self.packet_id)?;
+
+        let mut filters = Vec::default();
+        for topic_filter in self.filters.iter() {
+            filters.push(format!("filter:{:?}", topic_filter));
+        }
+        write!(f, "{}", filters.join("\n"))?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]

@@ -24,8 +24,53 @@ pub struct Publish {
 
 impl fmt::Display for Publish {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        let packet_id = self.packet_id.map(|x| x.to_string()).unwrap_or("-".to_string());
-        write!(f, "PUBLISH<{},packet_id:{}>", *self.topic_name, packet_id)
+        let packet_id = match &self.packet_id {
+            Some(val) => format!(" packet_id:{}", val),
+            None => "".to_string(),
+        };
+        write!(
+            f,
+            "PUBLISH retain:{} qos:{} dup:{} topic:{:?} payload:{}{}",
+            self.retain,
+            self.qos,
+            self.duplicate,
+            *self.topic_name,
+            self.payload.as_ref().map(|x| x.as_slice()).unwrap_or(&[]).len(),
+            packet_id,
+        )?;
+
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            props.push(format!(
+                "  payload_format_indicator: {}",
+                properties.payload_format_indicator
+            ));
+            if let Some(val) = properties.message_expiry_interval {
+                props.push(format!("  message_expiry_interval: {}", val));
+            }
+            if let Some(val) = properties.topic_alias {
+                props.push(format!("  topic_alias: {}", val));
+            }
+            if let Some(val) = &properties.response_topic {
+                props.push(format!("  response_topic: {:?}", *val));
+            }
+            if let Some(val) = &properties.correlation_data {
+                props.push(format!("  correlation_data: {}", val.len()));
+            }
+            if !properties.subscribtion_identifiers.is_empty() {
+                let val = &properties.subscribtion_identifiers;
+                props.push(format!("  subscribtion_identifiers: {:?}", val));
+            }
+            if let Some(val) = &properties.content_type {
+                props.push(format!("  content_type: {}", val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -164,10 +209,10 @@ impl Publish {
     pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
         for id in ids.into_iter() {
             match &mut self.properties {
-                Some(props) => props.subscribtion_identifier.push(VarU32(id)),
+                Some(props) => props.subscribtion_identifiers.push(VarU32(id)),
                 None => {
                     self.properties = Some(PublishProperties {
-                        subscribtion_identifier: vec![VarU32(id)],
+                        subscribtion_identifiers: vec![VarU32(id)],
                         ..PublishProperties::default()
                     });
                 }
@@ -244,7 +289,7 @@ pub struct PublishProperties {
     pub topic_alias: Option<u16>,
     pub response_topic: Option<TopicName>,
     pub correlation_data: Option<Vec<u8>>,
-    pub subscribtion_identifier: Vec<VarU32>,
+    pub subscribtion_identifiers: Vec<VarU32>,
     pub content_type: Option<String>,
     pub user_properties: Vec<UserProperty>,
 }
@@ -257,7 +302,7 @@ impl From<v5::WillProperties> for PublishProperties {
             topic_alias: None,
             response_topic: val.response_topic,
             correlation_data: val.correlation_data,
-            subscribtion_identifier: Vec::default(),
+            subscribtion_identifiers: Vec::default(),
             content_type: val.content_type,
             user_properties: val.user_properties,
         }
@@ -284,7 +329,7 @@ impl<'a> Arbitrary<'a> for PublishProperties {
             topic_alias: uns.arbitrary::<Option<u16>>()?.map(|x| x.saturating_add(1)),
             response_topic: uns.arbitrary()?,
             correlation_data: uns.arbitrary()?,
-            subscribtion_identifier: uns.arbitrary()?,
+            subscribtion_identifiers: uns.arbitrary()?,
             content_type,
             user_properties: types::valid_user_props(uns, n_user_props)?,
         };
@@ -327,7 +372,7 @@ impl Packetize for PublishProperties {
                 TopicAlias(val) => props.topic_alias = Some(val),
                 ResponseTopic(val) => props.response_topic = Some(val),
                 CorrelationData(val) => props.correlation_data = Some(val),
-                SubscriptionIdentifier(val) => props.subscribtion_identifier.push(val),
+                SubscriptionIdentifier(val) => props.subscribtion_identifiers.push(val),
                 ContentType(val) => props.content_type = Some(val),
                 UserProp(val) => props.user_properties.push(val),
                 _ => {
@@ -354,7 +399,7 @@ impl Packetize for PublishProperties {
         enc_prop!(opt: data, CorrelationData, &self.correlation_data);
         enc_prop!(opt: data, ContentType, &self.content_type);
 
-        for subid in self.subscribtion_identifier.iter() {
+        for subid in self.subscribtion_identifiers.iter() {
             enc_prop!(data, SubscriptionIdentifier, subid);
         }
         for uprop in self.user_properties.iter() {
@@ -379,7 +424,7 @@ impl PublishProperties {
             && self.topic_alias.is_none()
             && self.response_topic.is_none()
             && self.correlation_data.is_none()
-            && self.subscribtion_identifier.len() == 0
+            && self.subscribtion_identifiers.len() == 0
             && self.content_type.is_none()
             && self.user_properties.len() == 0
     }

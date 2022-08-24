@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::result;
+use std::{fmt, result};
 
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
 use crate::{util::advance, Blob, Packetize, UserProperty, VarU32};
@@ -18,6 +17,18 @@ pub enum AuthReasonCode {
     Success = 0x00,
     ContinueAuthentication = 0x18,
     ReAuthenticate = 0x19,
+}
+
+impl fmt::Display for AuthReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        use AuthReasonCode::*;
+
+        match self {
+            Success => write!(f, "success"),
+            ContinueAuthentication => write!(f, "continue_authentication"),
+            ReAuthenticate => write!(f, "re_authenticate"),
+        }
+    }
 }
 
 impl TryFrom<u8> for AuthReasonCode {
@@ -38,6 +49,32 @@ impl TryFrom<u8> for AuthReasonCode {
 pub struct Auth {
     pub code: AuthReasonCode,
     pub properties: Option<AuthProperties>,
+}
+
+impl fmt::Display for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "AUTH code:{}", self.code)?;
+        if let Some(properties) = &self.properties {
+            let mut props = Vec::default();
+            props.push(format!(
+                "  authentication_method: {:?}",
+                properties.authentication_method
+            ));
+            props.push(format!(
+                "  authentication_data: {}",
+                properties.authentication_data.len()
+            ));
+            if let Some(val) = &properties.reason_string {
+                props.push(format!("  reason_string: {:?}", val));
+            }
+            for (key, val) in properties.user_properties.iter() {
+                props.push(format!("  {:?}: {:?}", key, val));
+            }
+            write!(f, "{}\n", props.join("\n"))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
