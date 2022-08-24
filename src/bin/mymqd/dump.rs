@@ -398,13 +398,13 @@ impl Packet {
             }
             Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::In => {
                 let remote = format!("{}:{}", pkt.ip_remote, pkt.src_port);
-                Some(format!("{} <- {:19} {}", pkt.ts, remote, 0))
+                Some(format!("{} <- {:19} {}", pkt.ts, remote, pkt.mqtt))
             }
             Packet::Mqtt(pkt) if pkt.dir == pcap::Direction::Out => {
                 let remote = format!("{}:{}", pkt.ip_remote, pkt.dst_port);
-                Some(format!("{} -> {:19} {}", pkt.ts, remote, 0))
+                Some(format!("{} -> {:19} {}", pkt.ts, remote, pkt.mqtt))
             }
-            Packet::Mqtt(pkt) => Some(format!("{} **", pkt.ts)),
+            Packet::Mqtt(pkt) => Some(format!("{} ** {}", pkt.ts, pkt.mqtt)),
             Packet::None => None,
             Packet::LoopBack(_) => None,
         }
