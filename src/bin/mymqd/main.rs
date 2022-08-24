@@ -30,62 +30,9 @@ pub struct Opt {
 
 #[derive(Clone, StructOpt)]
 pub enum SubCommand {
-    Start {
-        #[structopt(long = "name", default_value = "mymqd")]
-        name: String,
-
-        #[structopt(long = "port", default_value = "1883")]
-        port: u16,
-
-        #[structopt(long = "num-shards", default_value = "1")]
-        num_shards: u32,
-    },
-    Dump {
-        #[structopt(short = "w")]
-        write_file: Option<path::PathBuf>,
-
-        #[structopt(short = "a")]
-        append_file: Option<path::PathBuf>,
-
-        #[structopt(short = "r")]
-        read_file: Option<path::PathBuf>,
-
-        #[structopt(short = "t", default_value = "0")]
-        time: u64,
-
-        #[structopt(long = "precis", default_value = "micro")]
-        precision: String,
-
-        #[structopt(long = "promisc")]
-        promisc: bool,
-
-        #[structopt(long = "devices")]
-        devices: bool,
-
-        #[structopt(long = "inp")]
-        inp: bool,
-
-        #[structopt(long = "out")]
-        out: bool,
-
-        #[structopt(long = "eth")]
-        eth: bool,
-
-        #[structopt(long = "ip")]
-        ip: bool,
-
-        #[structopt(long = "tcp")]
-        tcp: bool,
-
-        #[structopt(long = "port", default_value = "0")]
-        port: u16,
-
-        device: Option<String>,
-    },
-    List {
-        #[structopt(long = "ifs", default_value = "all")]
-        ifs: String,
-    },
+    Start(start::Start),
+    Dump(dump::Dump),
+    List(list::List),
 }
 
 pub type Result<T> = result::Result<T, String>;
@@ -97,9 +44,9 @@ fn main() {
     info!("verbosity level {:?}", opts.to_verbosity());
 
     let res = match &opts.subcmd {
-        SubCommand::Start { .. } => start::run(opts),
-        SubCommand::Dump { .. } => dump::run(opts),
-        SubCommand::List { .. } => list::run(opts),
+        SubCommand::Start(_) => start::run(opts),
+        SubCommand::Dump(_) => dump::run(opts),
+        SubCommand::List(_) => list::run(opts),
     };
 
     res.map_err(|e| println!("error: {}", e)).ok();

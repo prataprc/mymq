@@ -1,5 +1,6 @@
 use chrono::NaiveDateTime;
 use log::{debug, error, info, trace};
+use structopt::StructOpt;
 
 use std::{cmp, collections::BTreeMap, mem, net, path, time};
 
@@ -10,45 +11,74 @@ const PCAP_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
 const MQTT_SIGNATURE: [u8; 6] = [0, 4, 77, 81, 84, 84];
 const MAX_PACKET_SIZE: u32 = 10 * 1024 * 1024; // 10 MB
 
-#[derive(Clone)]
-struct Dump {
+#[derive(Clone, StructOpt)]
+pub struct Dump {
+    #[structopt(short = "w")]
     write_file: Option<path::PathBuf>,
+
+    #[structopt(short = "a")]
     append_file: Option<path::PathBuf>,
+
+    #[structopt(short = "r")]
     read_file: Option<path::PathBuf>,
+
+    #[structopt(short = "t", default_value = "0")]
     time: u64,
-    precision: pcap::Precision,
+
+    #[structopt(long = "precis", default_value = "micro")]
+    precision: String,
+
+    #[structopt(long = "promisc")]
     promisc: bool,
+
+    #[structopt(long = "devices")]
+    devices: bool,
+
+    #[structopt(long = "inp")]
     inp: bool,
+
+    #[structopt(long = "out")]
     out: bool,
-    device: Option<String>,
+
+    #[structopt(long = "eth")]
     eth: bool,
+
+    #[structopt(long = "ip")]
     ip: bool,
+
+    #[structopt(long = "tcp")]
     tcp: bool,
+
+    #[structopt(long = "port", default_value = "0")]
     port: u16,
+
+    device: Option<String>,
 }
 
 pub fn run(opts: Opt) -> Result<()> {
-    match &opts.subcmd {
-        SubCommand::Dump { devices, .. } if *devices => list_devices(&opts)?,
-        SubCommand::Dump { read_file: Some(_), .. } => {
-            let _capture = run_offline(opts.clone())?;
-        }
-        SubCommand::Dump { device: Some(_), .. } => {
-            let mut capture = run_active(opts.clone())?;
-            println!("capture stats {:?}", capture.stats().unwrap());
-        }
-        SubCommand::Dump { .. } => list_connected_devices(&opts)?,
+    let dump = match &opts.subcmd {
+        SubCommand::Dump(dump) => dump.clone(),
         _ => unreachable!(),
+    };
+
+    if dump.devices {
+        list_devices(&opts, dump)?;
+    } else if let Some(_) = &dump.read_file {
+        let _capture = run_offline(opts.clone(), dump)?;
+    } else if let Some(_) = &dump.device {
+        let mut capture = run_active(opts.clone(), dump)?;
+        println!("capture stats {:?}", capture.stats().unwrap());
+    } else {
+        list_connected_devices(&opts, dump)?;
     }
 
     Ok(())
 }
 
-fn run_offline(opts: Opt) -> Result<pcap::Capture<pcap::Offline>> {
-    let dump: Dump = opts.subcmd.try_into()?;
+fn run_offline(_opts: Opt, dump: Dump) -> Result<pcap::Capture<pcap::Offline>> {
     let capture = pcap::Capture::<pcap::Offline>::from_file_with_precision(
         &dump.read_file.unwrap(),
-        dump.precision,
+        into_precision(&dump.precision)?,
     )
     .map_err(|e| e.to_string())?;
 
@@ -57,14 +87,13 @@ fn run_offline(opts: Opt) -> Result<pcap::Capture<pcap::Offline>> {
     Ok(capture)
 }
 
-fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
+fn run_active(_opts: Opt, dump: Dump) -> Result<pcap::Capture<pcap::Active>> {
     // TODO: pcap::TimestampType
     // TODO: pcap::Capture::immediate_mode
     // TODO: pcap::Capture::rfmon
     // TODO: pcap::Capture::buffer_size
     // TODO: pcap::Capture::snaplen
 
-    let dump: Dump = opts.subcmd.try_into()?;
     let device_name = dump.device.clone().unwrap();
     let capture = {
         let device = find_device(&device_name)?;
@@ -72,7 +101,7 @@ fn run_active(opts: Opt) -> Result<pcap::Capture<pcap::Active>> {
             .map_err(|e| e.to_string())?
             .timeout(PCAP_TIMEOUT.as_millis() as i32)
             .promisc(dump.promisc)
-            .precision(dump.precision);
+            .precision(into_precision(&dump.precision)?);
         capture.open().map_err(|e| e.to_string())?
     };
 
@@ -142,14 +171,14 @@ fn find_device(name: &str) -> Result<pcap::Device> {
     Err(format!("cannot find device {}", name))
 }
 
-fn list_devices(opts: &Opt) -> Result<()> {
+fn list_devices(opts: &Opt, _dump: Dump) -> Result<()> {
     let devices = pcap::Device::list().map_err(|e| e.to_string())?;
     util::make_table(&devices).print_tty(!opts.force_color);
 
     Ok(())
 }
 
-fn list_connected_devices(opts: &Opt) -> Result<()> {
+fn list_connected_devices(opts: &Opt, _dump: Dump) -> Result<()> {
     let devices: Vec<pcap::Device> = pcap::Device::list()
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -671,49 +700,6 @@ struct Mqtt {
     src_port: u16,
     dst_port: u16,
     mqtt: v5::Packet,
-}
-
-impl TryFrom<SubCommand> for Dump {
-    type Error = String;
-
-    fn try_from(val: SubCommand) -> Result<Dump> {
-        match val {
-            SubCommand::Dump {
-                write_file,
-                append_file,
-                read_file,
-                time,
-                precision,
-                promisc,
-                inp,
-                out,
-                eth,
-                ip,
-                tcp,
-                port,
-                device,
-                ..
-            } => {
-                let val = Dump {
-                    write_file,
-                    append_file,
-                    read_file,
-                    time,
-                    precision: into_precision(&precision)?,
-                    promisc,
-                    inp,
-                    out,
-                    eth,
-                    ip,
-                    tcp,
-                    port,
-                    device,
-                };
-                Ok(val)
-            }
-            _ => unreachable!(),
-        }
-    }
 }
 
 impl Dump {
