@@ -133,4 +133,4 @@ pub use socket::{pkt_channel, PktRx, PktTx, Socket};
 pub use spinlock::Spinlock;
 pub use thread::{Rx, Thread, Threadable, Tx};
 pub use ticker::Ticker;
-pub use ttrie::{RetainedTrie, SubscribedTrie};
+pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};

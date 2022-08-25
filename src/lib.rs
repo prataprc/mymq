@@ -73,6 +73,10 @@ pub trait IterTopicPath<'a> {
     type Iter: Iterator<Item = &'a str> + Clone;
 
     fn iter_topic_path(&'a self) -> Self::Iter;
+
+    fn is_dollar_topic(&self) -> bool;
+
+    fn is_begin_wild_card(&self) -> bool;
 }
 
 /// Trait that returns Jsonified strings.

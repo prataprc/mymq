@@ -1,6 +1,6 @@
-#[cfg(any(feature = "fuzzy", test))]
+#[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
-#[cfg(any(feature = "fuzzy", test))]
+#[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 use std::result;
 
 use std::ops::{Deref, DerefMut};
@@ -139,9 +139,22 @@ impl From<String> for TopicName {
     }
 }
 
-#[cfg(any(feature = "fuzzy", test))]
+#[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 impl<'a> Arbitrary<'a> for TopicName {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let names = [
+            "/".to_string(),
+            "sport".to_string(),
+            "sport/".to_string(),
+            "sport/tennis/player1".to_string(),
+            "sport/tennis/player1/ranking".to_string(),
+            "sport/tennis/player1/score/wimbledon".to_string(),
+            "sport/tennis/player2".to_string(),
+            "sport/tennis/player1/ranking".to_string(),
+            "/finance".to_string(),
+            "$SYS/monitor/Clients".to_string(),
+        ];
+        match uns.arbitrary::<u8>() {}
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS"].into_iter().map(|s| s.to_string()).collect();
         let string_choice: Vec<String> =
@@ -201,6 +214,15 @@ impl<'a> IterTopicPath<'a> for TopicName {
     fn iter_topic_path(&'a self) -> Self::Iter {
         self.split('/')
     }
+
+    fn is_dollar_topic(&self) -> bool {
+        self.0.as_bytes()[0] == 36 // '$'
+    }
+
+    fn is_begin_wild_card(&self) -> bool {
+        let ch = self.0.as_bytes()[0];
+        ch == 35 || ch == 43 // '#' or '+'
+    }
 }
 
 impl TopicName {
@@ -209,9 +231,8 @@ impl TopicName {
         if self.0.len() == 0 {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicName")?;
         }
-
         if self.0.chars().any(|ch| matches!(ch, '#' | '+' | '\u{0}')) {
-            err!(MalformedPacket, code: MalformedPacket, "")?;
+            err!(MalformedPacket, code: MalformedPacket, "invalid char found")?;
         }
 
         Ok(())
@@ -265,11 +286,36 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
     fn iter_topic_path(&'a self) -> Self::Iter {
         self.split('/')
     }
+
+    fn is_dollar_topic(&self) -> bool {
+        self.0.as_bytes()[0] == 36 // '$'
+    }
+
+    fn is_begin_wild_card(&self) -> bool {
+        let ch = self.0.as_bytes()[0];
+        ch == 35 || ch == 43 // '#' or '+'
+    }
 }
 
-#[cfg(any(feature = "fuzzy", test))]
+#[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 impl<'a> Arbitrary<'a> for TopicFilter {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let filters = [
+            "#".to_string(),
+            "sport/#".to_string(),
+            "sport/tennis/#".to_string(),
+            "$SYS/#".to_string(),
+            "+".to_string(),
+            "sport/tennis/+".to_string(),
+            "sport/+".to_string(),
+            "sport/+/player1".to_string(),
+            "+/+".to_string(),
+            "/+".to_string(),
+            "+/tennis/#".to_string(),
+            "+/monitor/Clients".to_string(),
+            "$SYS/monitor/+".to_string(),
+        ];
+
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS", "#", "+"].into_iter().map(|s| s.to_string()).collect();
         let string_choice: Vec<String> =
@@ -315,8 +361,9 @@ impl TopicFilter {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
             err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicFilter")?;
-        } else if self.0.chars().any(|ch| matches!(ch, '\u{0}')) {
-            err!(MalformedPacket, code: MalformedPacket, "")?;
+        }
+        if self.0.chars().any(|ch| matches!(ch, '\u{0}')) {
+            err!(MalformedPacket, code: MalformedPacket, "null char found")?;
         }
 
         let levels = self.iter_topic_path();
@@ -327,7 +374,7 @@ impl TopicFilter {
         }
 
         let mut iter = levels.clone().skip_while(|l| l != &"#");
-        iter.next();
+        iter.next(); // skip the '#'
         if let Some(_) = iter.next() {
             err!(MalformedPacket, code: MalformedPacket, "chars after # wildcard")?;
         }

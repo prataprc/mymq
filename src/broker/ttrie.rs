@@ -50,6 +50,7 @@ impl SubscribedTrie {
     where
         K: IterTopicPath<'b>,
     {
+        let is_dollar = key.is_dollar_topic();
         let in_levels = key.iter_topic_path();
 
         let (mut stats, root) = {
@@ -59,7 +60,7 @@ impl SubscribedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let matches = match root.match_topic(in_levels, true /*dollar-match*/) {
+        let matches = match root.match_topic(in_levels, is_dollar, false) {
             Some(vals) => {
                 stats.hits = stats.hits.saturating_add(1);
                 vals
@@ -166,6 +167,7 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'b>,
     {
+        let is_wilder = key.is_begin_wild_card();
         let in_levels = key.iter_topic_path();
 
         let (mut stats, root) = {
@@ -175,7 +177,7 @@ impl RetainedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let res = match root.match_topic(in_levels, false) {
+        let res = match root.match_topic(in_levels, false, is_wilder) {
             Some(mut vals) => {
                 assert!(vals.len() == 1);
                 stats.hits = stats.hits.saturating_add(1);
@@ -509,7 +511,12 @@ impl<V> Node<V> {
         }
     }
 
-    fn match_topic<'a, I>(&self, mut in_levels: I, dollar: bool) -> Option<Vec<V>>
+    fn match_topic<'a, I>(
+        &self,
+        mut in_levels: I,
+        is_dollar: bool,
+        is_wilder: bool,
+    ) -> Option<Vec<V>>
     where
         I: Iterator<Item = &'a str> + Clone,
         V: Clone,
@@ -526,7 +533,7 @@ impl<V> Node<V> {
         let in_level = in_level.unwrap();
 
         let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
-            Node::Root { children } if dollar => Box::new(
+            Node::Root { children } if is_dollar => Box::new(
                 // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
                 // with a wildcard character (# or +) with Topic Names beginning with
                 // a $ character. The Server SHOULD prevent Clients from using such
@@ -535,6 +542,12 @@ impl<V> Node<V> {
                 // $ character for other purposes.
                 children.iter().filter(|child| !matches!(child.as_name(), "#" | "+")),
             ),
+            Node::Root { children } if is_wilder => Box::new(
+                // Same as above but for RetainedTrie
+                children.iter().filter(|child| {
+                    !matches!(child.as_name().as_bytes().first(), Some(36) /*'$'*/)
+                }),
+            ),
             Node::Root { children } => Box::new(children.iter()),
             Node::Child { children, .. } => Box::new(children.iter()),
         };
@@ -542,16 +555,19 @@ impl<V> Node<V> {
         let mut acc = vec![];
         for child in children {
             match match_level(in_level, child.as_name()) {
-                (_slevel, true) => {
+                Match::All => {
                     if let Node::Child { values, .. } = child.borrow() {
                         acc.extend(values.to_vec().into_iter());
                     }
                 }
-                (true, _mlevel) => match child.match_topic(in_levels.clone(), dollar) {
-                    Some(values) => acc.extend(values.into_iter()),
-                    None => (),
-                },
-                (false, false) => (),
+                Match::True => {
+                    let in_levels = in_levels.clone();
+                    match child.match_topic(in_levels, is_dollar, is_wilder) {
+                        Some(values) => acc.extend(values.into_iter()),
+                        None => (),
+                    }
+                }
+                Match::False => (),
             }
         }
 
@@ -559,16 +575,38 @@ impl<V> Node<V> {
     }
 }
 
+/// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
+/// algorithm is commutative between TopicName and TopicFilter.
+pub fn route_match(this: &str, other: &str) -> bool {
+    let mut iter = this.split('/').zip(other.split("/"));
+    loop {
+        match iter.next() {
+            Some((l1, l2)) => match match_level(l1, l2) {
+                Match::All => break true,
+                Match::False => break false,
+                Match::True => (),
+            },
+            None => break true,
+        }
+    }
+}
+
+enum Match {
+    All,
+    True,
+    False,
+}
+
 // (level_match, multi_level_match)
 // input key must have be already validated !!
-fn match_level(in_lvl: &str, trie_level: &str) -> (bool, bool) {
+fn match_level(in_lvl: &str, trie_level: &str) -> Match {
     match (in_lvl, trie_level) {
-        ("#", _) => (true, true),
-        (_, "#") => (true, true),
-        ("+", _) => (true, false),
-        (_, "+") => (true, false),
-        (in_lvl, trie_level) if compare_level(in_lvl, trie_level) => (true, false),
-        (_, _) => (false, false),
+        ("#", _) => Match::All,
+        (_, "#") => Match::All,
+        ("+", _) => Match::True,
+        (_, "+") => Match::True,
+        (in_lvl, trie_level) if compare_level(in_lvl, trie_level) => Match::True,
+        (_, _) => Match::False,
     }
 }
 

@@ -1,8 +1,11 @@
+use arbitrary::Unstructured;
 use log::info;
+use rand::{rngs::StdRng, seq::SliceRandom};
 use structopt::StructOpt;
 
 use std::{io, path, result};
 
+mod arbitr;
 mod dump;
 mod list;
 mod start;
@@ -24,6 +27,9 @@ pub struct Opt {
     #[structopt(long = "force-color")]
     force_color: bool,
 
+    #[structopt(long = "seed")]
+    seed: Option<u64>,
+
     #[structopt(subcommand)]
     subcmd: SubCommand,
 }
@@ -33,6 +39,7 @@ pub enum SubCommand {
     Start(start::Start),
     Dump(dump::Dump),
     List(list::List),
+    Arbitr(arbitr::Arbitr),
 }
 
 pub type Result<T> = result::Result<T, String>;
@@ -47,6 +54,7 @@ fn main() {
         SubCommand::Start(_) => start::run(opts),
         SubCommand::Dump(_) => dump::run(opts),
         SubCommand::List(_) => list::run(opts),
+        SubCommand::Arbitr(_) => arbitr::run(opts),
     };
 
     res.map_err(|e| println!("error: {}", e)).ok();
@@ -120,4 +128,12 @@ impl Opt {
         }
         .to_string()
     }
+}
+
+pub fn new_unstructured<'a>(
+    rng: &mut StdRng,
+    bytes: &'a mut Vec<u8>,
+) -> Unstructured<'a> {
+    bytes.shuffle(rng);
+    Unstructured::new(bytes.as_slice())
 }
