@@ -214,18 +214,12 @@ impl Packetize for Disconnect {
             }
             m if m < 2 => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = {
-                    let code = DisconnReasonCode::try_from(code)?;
-                    ReasonCode::try_from(code as u8)?
-                };
+                let code = ReasonCode::try_from(code)?;
                 (Disconnect { code, properties: None }, n)
             }
             _ => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = {
-                    let code = DisconnReasonCode::try_from(code)?;
-                    ReasonCode::try_from(code as u8)?
-                };
+                let code = ReasonCode::try_from(code)?;
                 let (properties, n) = dec_props!(DisconnProperties, stream, n);
                 (Disconnect { code, properties }, n)
             }
