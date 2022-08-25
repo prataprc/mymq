@@ -18,3 +18,8 @@
 * Handle retain-messages in Will, Publish, Subscribe scenarios, `retain_available`.
 * Take the list of DisconnReasonCode on the server side and figure out places where
   this error can happen.
+* Section 4.7.3: The topic resource MAY be either predefined in the Server by an
+  administrator or it MAY be dynamically created by the Server when it receives the
+  first subscription or an Application Message with that Topic Name. The Server MAY also
+  use a security component to authorize particular actions on the topic resource for a
+  given Client.
