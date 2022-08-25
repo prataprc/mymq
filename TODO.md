@@ -16,3 +16,5 @@
 * Review code for `#[allow(dead_code)]`.
 * Validate and document all thread handles, cluster, listener, flusher, shard, miot.
 * Handle retain-messages in Will, Publish, Subscribe scenarios, `retain_available`.
+* Take the list of DisconnReasonCode on the server side and figure out places where
+  this error can happen.
