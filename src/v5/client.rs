@@ -1,5 +1,7 @@
 //! Module implement MQTT Client.
 
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::Arbitrary;
 use log::{error, trace};
 
 #[cfg(unix)]
@@ -186,11 +188,11 @@ pub struct Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let code = v5::DisconnReasonCode::try_from(u8::from(
-            DisconnReasonCode::NormalDisconnect,
-        ))
-        .unwrap();
-        let disconnect = v5::Disconnect { code, properties: None };
+        let disconnect = v5::Disconnect {
+            code: ReasonCode::try_from(DisconnReasonCode::NormalDisconnect as u8)
+                .unwrap(),
+            properties: None,
+        };
         if let Err(err) = self.write(v5::Packet::Disconnect(disconnect)) {
             error!(
                 "client_id:{:?} raddr:{:?} drop error:{}",
@@ -401,7 +403,7 @@ impl Client {
                 self.last_rcvd = time::Instant::now();
 
                 let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-                let res = cio.read_packet(self);
+                let res = cio.read(self);
                 let _none = mem::replace(&mut self.cio, cio);
                 res
             }
@@ -431,6 +433,15 @@ impl Client {
         let res = cio.write_packet(self, packet);
         let _none = mem::replace(&mut self.cio, cio);
         res
+    }
+
+    pub fn disconnect(&mut self, code: DisconnReasonCode) -> io::Result<()> {
+        let code = match ReasonCode::try_from(code as u8) {
+            Ok(val) => Ok(val),
+            Err(err) => Err(io::Error::new(io::ErrorKind::InvalidInput, err.to_string())),
+        }?;
+        let disconnect = v5::Disconnect { code, properties: None };
+        self.write(v5::Packet::Disconnect(disconnect))
     }
 
     fn try_read(&mut self) -> io::Result<()> {
@@ -669,7 +680,7 @@ impl ClientIO {
 }
 
 impl ClientIO {
-    fn read_packet(&mut self, client: &Client) -> io::Result<v5::Packet> {
+    fn read(&mut self, client: &Client) -> io::Result<v5::Packet> {
         let block = true;
         match self {
             ClientIO::Blocking { sock, pktr, .. } => {
@@ -908,10 +919,11 @@ impl RwTimeout {
 
 const PP: &'static str = "Client::Disconnect";
 
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum DisconnReasonCode {
     NormalDisconnect = 0x00,
-    DiconnectWillMessage = 0x04,
+    DisconnectWillMessage = 0x04,
     UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
     ProtocolError = 0x82,
@@ -932,7 +944,7 @@ impl From<DisconnReasonCode> for u8 {
 
         match val {
             NormalDisconnect => 0x00,
-            DiconnectWillMessage => 0x04,
+            DisconnectWillMessage => 0x04,
             UnspecifiedError => 0x80,
             MalformedPacket => 0x81,
             ProtocolError => 0x82,
@@ -955,7 +967,7 @@ impl TryFrom<u8> for DisconnReasonCode {
     fn try_from(val: u8) -> Result<DisconnReasonCode> {
         match val {
             0x00 => Ok(DisconnReasonCode::NormalDisconnect),
-            0x04 => Ok(DisconnReasonCode::DiconnectWillMessage),
+            0x04 => Ok(DisconnReasonCode::DisconnectWillMessage),
             0x80 => Ok(DisconnReasonCode::UnspecifiedError),
             0x81 => Ok(DisconnReasonCode::MalformedPacket),
             0x82 => Ok(DisconnReasonCode::ProtocolError),

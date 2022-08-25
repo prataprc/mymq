@@ -6,7 +6,7 @@ use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Socket};
 
 use crate::{v5, ToJson, SLEEP_10MS};
-use crate::{Error, ErrorKind, Result};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -414,8 +414,12 @@ where
 {
     use crate::{packet::MQTTWrite, Packetize};
 
-    let dc = v5::Disconnect::new(code, None);
-    let mut packetw = MQTTWrite::new(dc.encode().unwrap().as_ref(), max_size);
+    let disconn = v5::Disconnect {
+        code: ReasonCode::try_from(code as u8)?,
+        properties: None,
+    };
+
+    let mut packetw = MQTTWrite::new(disconn.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,

@@ -1,3 +1,6 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::Arbitrary;
+
 #[cfg(feature = "backtrace")]
 use std::backtrace::Backtrace;
 
@@ -419,6 +422,7 @@ impl fmt::Display for ErrorKind {
 }
 
 /// ReasonCode defined by `MQTT-spec`, each variant defines error value.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ReasonCode {

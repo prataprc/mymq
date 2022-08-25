@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::util::advance;
-use crate::v5::{FixedHeader, Property, PropertyType};
+use crate::v5::{client, FixedHeader, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -133,7 +133,7 @@ impl TryFrom<u8> for DisconnReasonCode {
 /// DISCONNECT Packet
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Disconnect {
-    pub code: DisconnReasonCode,
+    pub code: ReasonCode,
     pub properties: Option<DisconnProperties>,
 }
 
@@ -164,8 +164,9 @@ impl fmt::Display for Disconnect {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Disconnect {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let code: client::DisconnReasonCode = uns.arbitrary()?;
         let val = Disconnect {
-            code: uns.arbitrary()?,
+            code: ReasonCode::try_from(u8::from(code)).unwrap(),
             properties: uns.arbitrary()?,
         };
 
@@ -174,10 +175,6 @@ impl<'a> Arbitrary<'a> for Disconnect {
 }
 
 impl Disconnect {
-    pub fn new(code: DisconnReasonCode, props: Option<DisconnProperties>) -> Disconnect {
-        Disconnect { code, properties: props }
-    }
-
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {
@@ -185,6 +182,19 @@ impl Disconnect {
                 self.properties = None
             }
         }
+    }
+
+    pub fn is_publish_will_message(&self) -> bool {
+        let rcode = client::DisconnReasonCode::DisconnectWillMessage as u8;
+        if (self.code as u8) == rcode {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -199,17 +209,23 @@ impl Packetize for Disconnect {
 
         let (val, n) = match *fh.remaining_len {
             0 => {
-                let code = DisconnReasonCode::NormalDisconnect;
+                let code = ReasonCode::Success;
                 (Disconnect { code, properties: None }, n)
             }
             m if m < 2 => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = DisconnReasonCode::try_from(code)?;
+                let code = {
+                    let code = DisconnReasonCode::try_from(code)?;
+                    ReasonCode::try_from(code as u8)?
+                };
                 (Disconnect { code, properties: None }, n)
             }
             _ => {
                 let (code, n) = dec_field!(u8, stream, n);
-                let code = DisconnReasonCode::try_from(code)?;
+                let code = {
+                    let code = DisconnReasonCode::try_from(code)?;
+                    ReasonCode::try_from(code as u8)?
+                };
                 let (properties, n) = dec_props!(DisconnProperties, stream, n);
                 (Disconnect { code, properties }, n)
             }
@@ -237,12 +253,6 @@ impl Packetize for Disconnect {
         // println!("Disconnect encoded {:?}", data);
 
         Ok(Blob::Large { data })
-    }
-}
-
-impl Disconnect {
-    fn validate(&self) -> Result<()> {
-        Ok(())
     }
 }
 

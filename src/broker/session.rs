@@ -342,6 +342,7 @@ impl Session {
     ) -> Result<(QueuePkt, OutSeqnos)> {
         let mut acks = Vec::default();
         let mut out_seqnos = Vec::default();
+        // NOTE: packets after DISCONNECT shall be ignored.
         for pkt in pkts.into_iter() {
             match pkt {
                 v5::Packet::PingReq => {
@@ -349,8 +350,9 @@ impl Session {
                     trace!("{} received PingReq", self.prefix);
                     acks.push(Message::new_ping_resp());
                 }
+
                 v5::Packet::Publish(publ) => {
-                    let has_subscrs = self.rx_publish(shard, publ.clone())?;
+                    let has_subscrs = self.rx_publish(shard, &publ)?;
                     match (has_subscrs, publ.qos) {
                         (_, v5::QoS::AtMostOnce) => (),
                         (false, _) => {
@@ -361,10 +363,7 @@ impl Session {
                         (true, v5::QoS::ExactlyOnce) => (),
                     }
                 }
-                v5::Packet::Subscribe(sub) => {
-                    acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
-                }
-                v5::Packet::UnSubscribe(_unsub) => todo!(),
+
                 v5::Packet::PubAck(_puback) => {
                     // TODO: cleanup qos12_unacks
                     out_seqnos.push(0);
@@ -373,7 +372,22 @@ impl Session {
                 v5::Packet::PubRec(_puback) => todo!(),
                 v5::Packet::PubRel(_puback) => todo!(),
                 v5::Packet::PubComp(_puback) => todo!(),
-                v5::Packet::Disconnect(_disconn) => todo!(),
+
+                v5::Packet::Subscribe(sub) => {
+                    acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
+                }
+
+                v5::Packet::UnSubscribe(_unsub) => todo!(),
+
+                v5::Packet::Disconnect(disconn) => {
+                    let code = {
+                        let code = self.rx_disconnect(shard, &disconn)?;
+                        Some(ReasonCode::try_from(code as u8).unwrap())
+                    };
+                    // TODO handle disconnect with will message
+                    err_disconnect(code)?;
+                }
+
                 v5::Packet::Auth(_auth) => todo!(),
 
                 // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
@@ -391,6 +405,59 @@ impl Session {
         };
 
         Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
+    }
+
+    // return `true` if there where subscribers.
+    fn rx_publish(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<bool> {
+        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap() {
+            err_unsup_qos(&self.prefix, publish.qos)?
+        }
+
+        if self.state.is_duplicate(&publish) {
+            return Ok(false);
+        }
+
+        self.book_retain(shard, &publish)?;
+        self.state.book_qos(&publish)?;
+
+        let inp_seqno = shard.incr_inp_seqno();
+        let topic_name = self.state.publish_topic_name(&publish)?;
+        let subscrs = shard.match_subscribers(&topic_name);
+        let has_subscrs = subscrs.len() > 0;
+
+        let ack_needed = match publish.packet_id {
+            Some(packet_id) => {
+                let msg = Message::new_index(&self.client_id, packet_id);
+                shard.book_index(publish.qos, msg);
+                true
+            }
+            None => false,
+        };
+
+        for (id, (subscr, ids)) in subscrs.into_iter() {
+            if subscr.no_local && id == self.client_id {
+                trace!(
+                    "{} topic:{:?} client_id:{:?} skipping as no_local",
+                    self.prefix,
+                    topic_name,
+                    id
+                );
+                continue;
+            }
+
+            let publish = {
+                let mut publish = publish.clone();
+                let retain = subscr.retain_as_published && publish.retain;
+                let qos = subscr.route_qos(&publish, self.config.mqtt_maximum_qos);
+                publish.set_fixed_header(retain, qos, false);
+                publish.set_subscription_ids(ids);
+                publish
+            };
+            let msg = Message::new_routed(self, inp_seqno, publish, id, ack_needed);
+            shard.route_to_client(subscr.shard_id, msg);
+        }
+
+        Ok(has_subscrs)
     }
 
     // return suback and retained-messages if any.
@@ -455,57 +522,41 @@ impl Session {
         Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
     }
 
-    // return `true` if there where subscribers.
-    fn rx_publish(&mut self, shard: &mut Shard, publish: v5::Publish) -> Result<bool> {
-        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap() {
-            err_unsup_qos(&self.prefix, publish.qos)?
-        }
+    fn rx_disconnect(
+        &mut self,
+        _shard: &mut Shard,
+        disconn: &v5::Disconnect,
+    ) -> Result<v5::DisconnReasonCode> {
+        use v5::client::DisconnReasonCode::*;
 
-        if self.state.is_duplicate(&publish) {
-            return Ok(false);
-        }
-
-        self.book_retain(shard, &publish)?;
-        self.state.book_qos(&publish)?;
-
-        let inp_seqno = shard.incr_inp_seqno();
-        let topic_name = self.state.publish_topic_name(&publish)?;
-        let subscrs = shard.match_subscribers(&topic_name);
-        let has_subscrs = subscrs.len() > 0;
-
-        let ack_needed = match publish.packet_id {
-            Some(packet_id) => {
-                let msg = Message::new_index(&self.client_id, packet_id);
-                shard.book_index(publish.qos, msg);
-                true
+        let code = match v5::client::DisconnReasonCode::try_from(disconn.code as u8)? {
+            NormalDisconnect => v5::DisconnReasonCode::NormalDisconnect,
+            DisconnectWillMessage => v5::DisconnReasonCode::NormalDisconnect,
+            UnspecifiedError | MalformedPacket | ProtocolError | ImplementationError => {
+                debug!("{} client disconnected code:{}", self.prefix, disconn.code);
+                v5::DisconnReasonCode::NormalDisconnect
             }
-            None => false,
+            TopicNameInvalid | ExceededReceiveMaximum | TopicAliasInvalid => {
+                debug!("{} client disconnected code:{}", self.prefix, disconn.code);
+                v5::DisconnReasonCode::NormalDisconnect
+            }
+            PacketTooLarge | ExceedMessageRate | QuotaExceeded | AdminAction => {
+                debug!("{} client disconnected code:{}", self.prefix, disconn.code);
+                v5::DisconnReasonCode::NormalDisconnect
+            }
+            PayloadFormatInvalid => {
+                debug!("{} client disconnected code:{}", self.prefix, disconn.code);
+                v5::DisconnReasonCode::NormalDisconnect
+            }
         };
 
-        for (id, (subscr, ids)) in subscrs.into_iter() {
-            if subscr.no_local && id == self.client_id {
-                trace!(
-                    "{} topic:{:?} client_id:{:?} skipping as no_local",
-                    self.prefix,
-                    topic_name,
-                    id
-                );
-                continue;
+        if let Some(props) = &disconn.properties {
+            if let Some(txt) = &props.reason_string {
+                debug!("{} disconnect with reason string {}", self.prefix, txt);
             }
-
-            let publish = {
-                let mut publish = publish.clone();
-                let retain = subscr.retain_as_published && publish.retain;
-                let qos = subscr.route_qos(&publish, self.config.mqtt_maximum_qos);
-                publish.set_fixed_header(retain, qos, false);
-                publish.set_subscription_ids(ids);
-                publish
-            };
-            let msg = Message::new_routed(self, inp_seqno, publish, id, ack_needed);
-            shard.route_to_client(subscr.shard_id, msg);
         }
 
-        Ok(has_subscrs)
+        Ok(code)
     }
 
     fn book_retain(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
@@ -997,6 +1048,15 @@ fn flush_to_miot(prefix: &str, miot_tx: &mut PktTx, mut msgs: Vec<Message>) -> Q
     msgs.drain(..(m - n));
 
     status.map(msgs)
+}
+
+fn err_disconnect(code: Option<ReasonCode>) -> Result<()> {
+    Err(Error {
+        kind: ErrorKind::Disconnected,
+        code,
+        loc: format!("{}:{}", file!(), line!()),
+        ..Error::default()
+    })
 }
 
 fn err_unsup_qos(prefix: &str, qos: v5::QoS) -> Result<()> {
