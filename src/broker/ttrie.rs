@@ -60,18 +60,23 @@ impl SubscribedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let matches = match root.match_topic(in_levels, is_dollar, false) {
-            Some(vals) => {
-                stats.hits = stats.hits.saturating_add(1);
-                vals
-            }
-            None => Vec::new(),
-        };
+        let vals = root.match_topic_name(in_levels, is_dollar);
+        if !vals.is_empty() {
+            stats.hits = stats.hits.saturating_add(1);
+        }
 
         let inner = Inner { stats, root: Arc::clone(&root) };
         *self.inner.write() = Arc::new(inner);
 
-        matches
+        vals
+    }
+
+    pub fn pretty_print(&self) {
+        let root = {
+            let inner = Arc::clone(&self.inner.read());
+            Arc::clone(&inner.root)
+        };
+        root.pretty_print("");
     }
 }
 
@@ -99,7 +104,7 @@ impl SubscribedTrie {
         *self.inner.write() = Arc::new(inner);
     }
 
-    pub fn do_unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
+    fn do_unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
     where
         K: IterTopicPath<'a>,
     {
@@ -163,7 +168,7 @@ impl RetainedTrie {
         self.do_remove(key)
     }
 
-    pub fn match_topic_filter<'b, K>(&self, key: &'b K) -> Option<v5::Publish>
+    pub fn match_topic_filter<'b, K>(&self, key: &'b K) -> Vec<v5::Publish>
     where
         K: IterTopicPath<'b>,
     {
@@ -177,19 +182,23 @@ impl RetainedTrie {
 
         stats.lookups = stats.lookups.saturating_add(1);
 
-        let res = match root.match_topic(in_levels, false, is_wilder) {
-            Some(mut vals) => {
-                assert!(vals.len() == 1);
-                stats.hits = stats.hits.saturating_add(1);
-                Some(vals.remove(0))
-            }
-            None => None,
-        };
+        let (vals, _) = root.match_topic_filter(in_levels, is_wilder);
+        if !vals.is_empty() {
+            stats.hits = stats.hits.saturating_add(1);
+        }
 
         let inner = Inner { stats, root: Arc::clone(&root) };
         *self.inner.write() = Arc::new(inner);
 
-        res
+        vals
+    }
+
+    pub fn pretty_print(&self) {
+        let root = {
+            let inner = Arc::clone(&self.inner.read());
+            Arc::clone(&inner.root)
+        };
+        root.pretty_print("");
     }
 }
 
@@ -214,7 +223,7 @@ impl RetainedTrie {
         *self.inner.write() = Arc::new(inner);
     }
 
-    pub fn do_remove<'a, K>(&self, key: &'a K)
+    fn do_remove<'a, K>(&self, key: &'a K)
     where
         K: IterTopicPath<'a>,
     {
@@ -272,7 +281,9 @@ impl<V> Node<V> {
             },
         }
     }
+}
 
+impl<V> Node<V> {
     fn as_name(&self) -> &str {
         match self {
             Node::Child { name, .. } => name.as_str(),
@@ -289,6 +300,43 @@ impl<V> Node<V> {
         }
     }
 
+    fn subtree_values(&self) -> Vec<V>
+    where
+        V: Clone,
+    {
+        let (children, mut acc) = match self {
+            Node::Root { children } => (children, Vec::default()),
+            Node::Child { children, values, .. } => (children, values.to_vec()),
+        };
+
+        for child in children.iter() {
+            acc.extend(child.subtree_values().into_iter());
+        }
+        acc
+    }
+
+    fn pretty_print(&self, prefix: &str) {
+        match self {
+            Node::Root { children } => {
+                println!("{}Node::Root {}", prefix, children.len());
+                let prefix = format!("{}  ", prefix);
+                for child in children.iter() {
+                    child.pretty_print(&prefix);
+                }
+            }
+            Node::Child { name, children, values } => {
+                let (n, m) = (children.len(), values.len());
+                println!("{}Node {:?} children:{} values:{}", prefix, name, n, m);
+                let prefix = format!("{}  ", prefix);
+                for child in children.iter() {
+                    child.pretty_print(&prefix);
+                }
+            }
+        }
+    }
+}
+
+impl<V> Node<V> {
     // return (first, repeat)
     // `first` is whether this is the first time a topic is subscribed.
     fn insert_value(&mut self, value: V) -> (bool, bool)
@@ -366,7 +414,9 @@ impl<V> Node<V> {
             Node::Root { .. } => unreachable!(),
         }
     }
+}
 
+impl<V> Node<V> {
     // return (root, first, repeat)
     fn sub<'a, K>(&self, mut in_levels: K, value: V) -> (Node<V>, bool, bool)
     where
@@ -511,26 +561,29 @@ impl<V> Node<V> {
         }
     }
 
-    fn match_topic<'a, I>(
-        &self,
-        mut in_levels: I,
-        is_dollar: bool,
-        is_wilder: bool,
-    ) -> Option<Vec<V>>
+    fn match_topic_name<'a, I>(&self, mut in_levels: I, is_dollar: bool) -> Vec<V>
     where
         I: Iterator<Item = &'a str> + Clone,
         V: Clone,
     {
-        let in_level = in_levels.next();
-
-        if in_level == None {
-            match self {
-                Node::Child { values, .. } => return Some(values.to_vec()),
-                Node::Root { .. } => return None,
-            }
-        }
-
-        let in_level = in_level.unwrap();
+        let in_level = match in_levels.next() {
+            None => match self {
+                Node::Child { values, children, .. } => {
+                    let mut acc: Vec<V> = values.to_vec();
+                    for child in children.iter().map(|x| x.as_ref()) {
+                        match child {
+                            Node::Child { name, values, .. } if name == "#" => {
+                                acc.extend_from_slice(values)
+                            }
+                            _ => (),
+                        }
+                    }
+                    return acc;
+                }
+                Node::Root { .. } => return Vec::default(),
+            },
+            Some(in_level) => in_level,
+        };
 
         let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
             Node::Root { children } if is_dollar => Box::new(
@@ -541,12 +594,6 @@ impl<V> Node<V> {
                 // implementations MAY use Topic Names that start with a leading
                 // $ character for other purposes.
                 children.iter().filter(|child| !matches!(child.as_name(), "#" | "+")),
-            ),
-            Node::Root { children } if is_wilder => Box::new(
-                // Same as above but for RetainedTrie
-                children.iter().filter(|child| {
-                    !matches!(child.as_name().as_bytes().first(), Some(36) /*'$'*/)
-                }),
             ),
             Node::Root { children } => Box::new(children.iter()),
             Node::Child { children, .. } => Box::new(children.iter()),
@@ -562,48 +609,128 @@ impl<V> Node<V> {
                 }
                 Match::True => {
                     let in_levels = in_levels.clone();
-                    match child.match_topic(in_levels, is_dollar, is_wilder) {
-                        Some(values) => acc.extend(values.into_iter()),
-                        None => (),
-                    }
+                    let values = child.match_topic_name(in_levels, is_dollar);
+                    acc.extend(values.into_iter())
                 }
                 Match::False => (),
             }
         }
 
-        Some(acc)
+        acc
+    }
+
+    // return (optional list of publishes, multi_level)
+    fn match_topic_filter<'a, I>(
+        &self,
+        mut in_levels: I,
+        is_wilder: bool,
+    ) -> (Vec<V>, bool)
+    where
+        I: Iterator<Item = &'a str> + Clone,
+        V: Clone,
+    {
+        let in_level = match in_levels.next() {
+            None => return (Vec::default(), false),
+            Some("#") => return (self.subtree_values(), true),
+            Some(in_level) => in_level,
+        };
+
+        let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
+            Node::Root { children } if is_wilder => Box::new(
+                // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
+                // with a wildcard character (# or +) with Topic Names beginning with
+                // a $ character. The Server SHOULD prevent Clients from using such
+                // Topic Names to exchange messages with other Clients. Server
+                // implementations MAY use Topic Names that start with a leading
+                // $ character for other purposes.
+                children.iter().filter(|child| {
+                    !matches!(child.as_name().as_bytes().first(), Some(36) /*'$'*/)
+                }),
+            ),
+            Node::Root { children } => Box::new(children.iter()),
+            Node::Child { children, .. } => Box::new(children.iter()),
+        };
+
+        let mut acc = vec![];
+        let mut multi_level = false;
+        for child in children {
+            match match_level(in_level, child.as_name()) {
+                Match::All => {
+                    if let Node::Child { values, .. } = child.borrow() {
+                        acc.extend(values.to_vec().into_iter());
+                    }
+                }
+                Match::True => {
+                    let in_levels = in_levels.clone();
+                    multi_level = match child.match_topic_filter(in_levels, is_wilder) {
+                        (values, true) => {
+                            acc.extend(values.into_iter());
+                            multi_level || true
+                        }
+                        (values, false) => {
+                            acc.extend(values.into_iter());
+                            multi_level || false
+                        }
+                    };
+                }
+                Match::False => (),
+            }
+        }
+
+        if let (true, Node::Child { values, .. }) = (multi_level, self) {
+            acc.extend(values.to_vec().into_iter())
+        }
+
+        (acc, false)
     }
 }
 
 /// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
 /// algorithm is commutative between TopicName and TopicFilter.
-pub fn route_match(this: &str, other: &str) -> bool {
-    match (this.chars().next(), other.chars().next()) {
-        (None, _) => return false,
-        (_, None) => return false,
-        (Some('$'), Some('#')) => return false,
-        (Some('$'), Some('+')) => return false,
-        (Some('#'), Some('$')) => return false,
-        (Some('+'), Some('$')) => return false,
-        (_, _) => (),
+pub fn route_match<'a, 'b>(this: &'a str, index: Vec<&'b str>) -> Vec<&'b str> {
+    let mut outs = Vec::default();
+    for other in index.into_iter() {
+        match (this.chars().next(), other.clone().chars().next()) {
+            (None, _) => return Vec::default(),
+            (_, None) => return Vec::default(),
+            (Some('$'), Some('#')) => return Vec::default(),
+            (Some('$'), Some('+')) => return Vec::default(),
+            (Some('#'), Some('$')) => return Vec::default(),
+            (Some('+'), Some('$')) => return Vec::default(),
+            (_, _) => (),
+        }
+
+        let mut iter1 = this.split('/');
+        let mut iter2 = other.clone().split('/');
+        let _b = loop {
+            match (iter1.next(), iter2.next()) {
+                (Some(l1), Some(l2)) => match match_level(l1, l2) {
+                    Match::All => {
+                        outs.push(other);
+                        break true;
+                    }
+                    Match::False => break false,
+                    Match::True => (),
+                },
+                (None, Some("#")) => {
+                    outs.push(other);
+                    break true;
+                }
+                (None, Some(_)) => break false,
+                (Some("#"), None) => {
+                    outs.push(other);
+                    break true;
+                }
+                (Some(_), None) => break false,
+                (None, None) => {
+                    outs.push(other);
+                    break true;
+                }
+            }
+        };
     }
 
-    let mut iter1 = this.split('/');
-    let mut iter2 = other.split('/');
-    loop {
-        match (iter1.next(), iter2.next()) {
-            (Some(l1), Some(l2)) => match match_level(l1, l2) {
-                Match::All => break true,
-                Match::False => break false,
-                Match::True => (),
-            },
-            (None, Some("#")) => break true,
-            (None, Some(_)) => break false,
-            (Some("#"), None) => break true,
-            (Some(_), None) => break false,
-            (None, None) => break true,
-        }
-    }
+    outs
 }
 
 enum Match {
