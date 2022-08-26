@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::util::advance;
-use crate::v5::{client, FixedHeader, Property, PropertyType};
+use crate::v5::{FixedHeader, Property, PropertyType};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -164,9 +164,9 @@ impl fmt::Display for Disconnect {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Disconnect {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let code: client::DisconnReasonCode = uns.arbitrary()?;
+        let code: DisconnReasonCode = uns.arbitrary()?;
         let val = Disconnect {
-            code: ReasonCode::try_from(u8::from(code)).unwrap(),
+            code: ReasonCode::try_from(code as u8).unwrap(),
             properties: uns.arbitrary()?,
         };
 
@@ -185,8 +185,7 @@ impl Disconnect {
     }
 
     pub fn is_publish_will_message(&self) -> bool {
-        let rcode = client::DisconnReasonCode::DisconnectWillMessage as u8;
-        if (self.code as u8) == rcode {
+        if (self.code as u8) == 0x4 {
             true
         } else {
             false
