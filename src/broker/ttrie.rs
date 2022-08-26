@@ -578,15 +578,30 @@ impl<V> Node<V> {
 /// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
 /// algorithm is commutative between TopicName and TopicFilter.
 pub fn route_match(this: &str, other: &str) -> bool {
-    let mut iter = this.split('/').zip(other.split("/"));
+    match (this.chars().next(), other.chars().next()) {
+        (None, _) => return false,
+        (_, None) => return false,
+        (Some('$'), Some('#')) => return false,
+        (Some('$'), Some('+')) => return false,
+        (Some('#'), Some('$')) => return false,
+        (Some('+'), Some('$')) => return false,
+        (_, _) => (),
+    }
+
+    let mut iter1 = this.split('/');
+    let mut iter2 = other.split('/');
     loop {
-        match iter.next() {
-            Some((l1, l2)) => match match_level(l1, l2) {
+        match (iter1.next(), iter2.next()) {
+            (Some(l1), Some(l2)) => match match_level(l1, l2) {
                 Match::All => break true,
                 Match::False => break false,
                 Match::True => (),
             },
-            None => break true,
+            (None, Some("#")) => break true,
+            (None, Some(_)) => break false,
+            (Some("#"), None) => break true,
+            (Some(_), None) => break false,
+            (None, None) => break true,
         }
     }
 }
