@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc};
 use std::{fmt, result};
 
 #[allow(unused_imports)]
-use crate::broker::Shard;
+use crate::broker::{Cluster, Shard};
 
 use crate::broker::{InpSeqno, OutSeqno, QueueStatus, Session};
 
