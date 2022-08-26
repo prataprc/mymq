@@ -11,7 +11,7 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 const PP: &'static str = "Packet::Publish";
 
 /// PUBLISH Packet
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Publish {
     pub retain: bool,
     pub qos: QoS,

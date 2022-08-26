@@ -132,7 +132,7 @@ pub use unsub::{UnSubscribe, UnSubscribeProperties};
 pub use unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReasonCode};
 
 /// Type captures an active subscription by client.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Subscription {
     /// Uniquely identifies this subscription for the subscribing client. Within entire
     /// cluster, `(client_id, topic_filter)` is uqniue.
@@ -159,8 +159,9 @@ impl PartialEq for Subscription {
     fn eq(&self, other: &Self) -> bool {
         self.topic_filter == other.topic_filter
             && self.client_id == other.client_id
-            && self.subscription_id == other.subscription_id
+            && self.shard_id == other.shard_id
             // subscription options
+            && self.subscription_id == other.subscription_id
             && self.qos == other.qos
             && self.no_local == other.no_local
             && self.retain_as_published == other.retain_as_published
@@ -497,6 +498,12 @@ pub enum QoS {
     AtMostOnce = 0,
     AtLeastOnce = 1,
     ExactlyOnce = 2,
+}
+
+impl Default for QoS {
+    fn default() -> QoS {
+        QoS::AtMostOnce
+    }
 }
 
 impl fmt::Display for QoS {

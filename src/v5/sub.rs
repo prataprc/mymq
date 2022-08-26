@@ -85,6 +85,12 @@ pub enum RetainForwardRule {
     Never = 2,
 }
 
+impl Default for RetainForwardRule {
+    fn default() -> RetainForwardRule {
+        RetainForwardRule::OnEverySubscribe
+    }
+}
+
 impl TryFrom<u8> for RetainForwardRule {
     type Error = Error;
 
