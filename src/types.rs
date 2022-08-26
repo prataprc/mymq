@@ -142,49 +142,56 @@ impl From<String> for TopicName {
 #[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 impl<'a> Arbitrary<'a> for TopicName {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let names = [
-            "/".to_string(),
-            "sport".to_string(),
-            "sport/".to_string(),
-            "sport/tennis/player1".to_string(),
-            "sport/tennis/player1/ranking".to_string(),
-            "sport/tennis/player1/score/wimbledon".to_string(),
-            "sport/tennis/player2".to_string(),
-            "sport/tennis/player1/ranking".to_string(),
-            "/finance".to_string(),
-            "$SYS/monitor/Clients".to_string(),
+        let names_choice = [
+            "/",
+            "sport",
+            "sport/",
+            "sport/tennis/player1",
+            "sport/tennis/player1/ranking",
+            "sport/tennis/player1/score/wimbledon",
+            "sport/tennis/player2",
+            "sport/tennis/player1/ranking",
+            "/finance",
+            "$SYS/monitor/Clients",
         ];
-        match uns.arbitrary::<u8>() {}
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS"].into_iter().map(|s| s.to_string()).collect();
         let string_choice: Vec<String> =
             vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
 
-        let c = uns.arbitrary::<u8>()?;
-        let levels = match c {
-            00..=09 => vec![uns.choose(&string_choice)?.to_string()],
+        let s = match uns.arbitrary::<u8>()? {
+            0..=100 => uns.choose(&names_choice)?.to_string(),
             _ => {
-                let mut levels = vec![];
-                for _ in 0..((c % 10) + 1) {
-                    let level = match uns.arbitrary::<u8>()? {
-                        000..=200 => uns.choose(&string_choice)?.to_string(),
-                        201..=255 => uns.choose(&level_choice)?.clone(),
-                    };
-                    levels.push(level);
+                let c = uns.arbitrary::<u8>()?;
+                let levels = match c {
+                    00..=09 => vec![uns.choose(&string_choice)?.to_string()],
+                    _ => {
+                        let mut levels = vec![];
+                        for _ in 0..((c % 10) + 1) {
+                            let level = match uns.arbitrary::<u8>()? {
+                                000..=200 => uns.choose(&string_choice)?.to_string(),
+                                201..=255 => uns.choose(&level_choice)?.clone(),
+                            };
+                            levels.push(level);
+                        }
+                        levels
+                    }
+                };
+
+                let mut s = String::from_iter(
+                    levels
+                        .join("/")
+                        .chars()
+                        .filter(|ch| !matches!(ch, '#' | '+' | '\u{0}')),
+                );
+
+                loop {
+                    if s.len() > 0 {
+                        break s;
+                    }
+                    s = uns.choose(&string_choice)?.to_string();
                 }
-                levels
             }
-        };
-
-        let mut s = String::from_iter(
-            levels.join("/").chars().filter(|ch| !matches!(ch, '#' | '+' | '\u{0}')),
-        );
-
-        s = loop {
-            if s.len() > 0 {
-                break s;
-            }
-            s = uns.choose(&string_choice)?.to_string();
         };
 
         Ok(s.into())
@@ -300,7 +307,7 @@ impl<'a> IterTopicPath<'a> for TopicFilter {
 #[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 impl<'a> Arbitrary<'a> for TopicFilter {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let filters = [
+        let filters_choice = [
             "#".to_string(),
             "sport/#".to_string(),
             "sport/tennis/#".to_string(),
@@ -315,41 +322,50 @@ impl<'a> Arbitrary<'a> for TopicFilter {
             "+/monitor/Clients".to_string(),
             "$SYS/monitor/+".to_string(),
         ];
-
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS", "#", "+"].into_iter().map(|s| s.to_string()).collect();
         let string_choice: Vec<String> =
             vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
 
-        let c = uns.arbitrary::<u8>()?;
-        let levels = match c {
-            00..=09 => vec![uns.choose(&level_choice)?.to_string()],
-            10..=20 => vec![uns.choose(&string_choice)?.to_string()],
+        let s = match uns.arbitrary::<u8>()? {
+            0..=100 => uns.choose(&filters_choice)?.to_string(),
             _ => {
-                let mut levels = vec![];
-                for _ in 0..((c % 10) + 1) {
-                    let level = match uns.arbitrary::<u8>()? {
-                        000..=200 => uns.choose(&string_choice)?.to_string(),
-                        201..=255 => uns.choose(&level_choice)?.clone(),
-                    };
-                    levels.push(level);
-                }
-                match levels.iter().enumerate().skip_while(|(_, s)| s != &"#").next() {
-                    Some((i, _)) => levels[..i + 1].to_vec(),
-                    None => levels,
+                let c = uns.arbitrary::<u8>()?;
+                let levels = match c {
+                    00..=09 => vec![uns.choose(&level_choice)?.to_string()],
+                    10..=20 => vec![uns.choose(&string_choice)?.to_string()],
+                    _ => {
+                        let mut levels = vec![];
+                        for _ in 0..((c % 10) + 1) {
+                            let level = match uns.arbitrary::<u8>()? {
+                                000..=200 => uns.choose(&string_choice)?.to_string(),
+                                201..=255 => uns.choose(&level_choice)?.clone(),
+                            };
+                            levels.push(level);
+                        }
+                        match levels
+                            .iter()
+                            .enumerate()
+                            .skip_while(|(_, s)| s != &"#")
+                            .next()
+                        {
+                            Some((i, _)) => levels[..i + 1].to_vec(),
+                            None => levels,
+                        }
+                    }
+                };
+
+                let mut s = String::from_iter(
+                    levels.join("/").chars().filter(|ch| !matches!(ch, '\u{0}')),
+                );
+
+                loop {
+                    if s.len() > 0 {
+                        break s;
+                    }
+                    s = uns.choose(&string_choice)?.to_string();
                 }
             }
-        };
-
-        let mut s = String::from_iter(
-            levels.join("/").chars().filter(|ch| !matches!(ch, '\u{0}')),
-        );
-
-        s = loop {
-            if s.len() > 0 {
-                break s;
-            }
-            s = uns.choose(&string_choice)?.to_string();
         };
 
         Ok(s.into())
