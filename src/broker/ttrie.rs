@@ -1,4 +1,6 @@
-use std::{borrow::Borrow, sync::Arc};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
+use std::{borrow::Borrow, thread};
 
 use crate::broker::Spinlock;
 use crate::{v5, v5::Subscription, IterTopicPath};
@@ -7,27 +9,37 @@ use crate::{v5, v5::Subscription, IterTopicPath};
 ///
 /// Indexed with TopicFilter and matched using TopicName.
 pub struct SubscribedTrie {
+    mu: Arc<Mutex<u32>>,
+    stats: Stats,
     inner: Arc<Spinlock<Arc<Inner<Subscription>>>>,
 }
 
 struct Inner<V> {
-    stats: Stats,
     root: Arc<Node<V>>,
 }
 
 impl Default for SubscribedTrie {
     fn default() -> SubscribedTrie {
         let inner = Inner {
-            stats: Stats::default(),
             root: Arc::new(Node::<Subscription>::Root { children: Vec::default() }),
         };
-        SubscribedTrie { inner: Arc::new(Spinlock::new(Arc::new(inner))) }
+        let mu = Arc::new(Mutex::new(0));
+        SubscribedTrie {
+            mu,
+            stats: Stats::default(),
+            inner: Arc::new(Spinlock::new(Arc::new(inner))),
+        }
     }
 }
 
 impl SubscribedTrie {
     pub fn clone(&self) -> SubscribedTrie {
-        SubscribedTrie { inner: Arc::clone(&self.inner) }
+        let mu = Arc::clone(&self.mu);
+        SubscribedTrie {
+            mu,
+            stats: self.stats.clone(),
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -36,6 +48,18 @@ impl SubscribedTrie {
     where
         K: IterTopicPath<'b>,
     {
+        use std::sync::TryLockError;
+
+        let _guard = loop {
+            match self.mu.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::WouldBlock) => thread::yield_now(),
+                Err(TryLockError::Poisoned(_)) => {
+                    panic!("SubscribedTrie::subscribe IPCFail write lock poisoned");
+                }
+            }
+        };
+
         self.do_subscribe(key, value)
     }
 
@@ -43,7 +67,19 @@ impl SubscribedTrie {
     where
         K: IterTopicPath<'a>,
     {
-        self.do_unsubscribe(key, value);
+        use std::sync::TryLockError;
+
+        let _guard = loop {
+            match self.mu.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::WouldBlock) => thread::yield_now(),
+                Err(TryLockError::Poisoned(_)) => {
+                    panic!("SubscribedTrie::unsubscribe IPCFail write lock poisoned");
+                }
+            }
+        };
+
+        self.do_unsubscribe(key, value)
     }
 
     pub fn match_topic_name<'b, K>(&self, key: &'b K) -> Vec<Subscription>
@@ -53,20 +89,17 @@ impl SubscribedTrie {
         let is_dollar = key.is_dollar_topic();
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
-        stats.lookups = stats.lookups.saturating_add(1);
+        self.stats.lookups.fetch_add(1, SeqCst);
 
         let vals = root.match_topic_name(in_levels, is_dollar);
         if !vals.is_empty() {
-            stats.hits = stats.hits.saturating_add(1);
+            self.stats.hits.fetch_add(1, SeqCst);
         }
-
-        let inner = Inner { stats, root: Arc::clone(&root) };
-        *self.inner.write() = Arc::new(inner);
 
         vals
     }
@@ -87,20 +120,20 @@ impl SubscribedTrie {
     {
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
         let (root, first, repeat) = root.sub(in_levels, value);
         if first {
-            stats.count = stats.count.saturating_add(1);
+            self.stats.count.fetch_add(1, SeqCst);
         }
         if repeat {
-            stats.repeat = stats.repeat.saturating_add(1);
+            self.stats.repeat.fetch_add(1, SeqCst);
         }
 
-        let inner = Inner { stats, root: Arc::new(root) };
+        let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
     }
 
@@ -110,22 +143,22 @@ impl SubscribedTrie {
     {
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
         let (root, last, missing) = root.unsub(in_levels, value);
         let root = root.unwrap();
 
         if last {
-            stats.count = stats.count.saturating_sub(1);
+            self.stats.count.fetch_add(1, SeqCst);
         }
         if missing {
-            stats.missing = stats.missing.saturating_sub(1);
+            self.stats.missing.fetch_add(1, SeqCst);
         }
 
-        let inner = Inner { stats, root: Arc::new(root) };
+        let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
     }
 }
@@ -134,22 +167,33 @@ impl SubscribedTrie {
 ///
 /// Indexed with TopicName and matched using TopicFilter.
 pub struct RetainedTrie {
+    mu: Arc<Mutex<u32>>,
+    stats: Stats,
     inner: Arc<Spinlock<Arc<Inner<v5::Publish>>>>,
 }
 
 impl Default for RetainedTrie {
     fn default() -> RetainedTrie {
         let inner = Inner {
-            stats: Stats::default(),
             root: Arc::new(Node::<v5::Publish>::Root { children: Vec::default() }),
         };
-        RetainedTrie { inner: Arc::new(Spinlock::new(Arc::new(inner))) }
+        let mu = Arc::new(Mutex::new(0));
+        RetainedTrie {
+            mu,
+            stats: Stats::default(),
+            inner: Arc::new(Spinlock::new(Arc::new(inner))),
+        }
     }
 }
 
 impl RetainedTrie {
     pub fn clone(&self) -> RetainedTrie {
-        RetainedTrie { inner: Arc::clone(&self.inner) }
+        let mu = Arc::clone(&self.mu);
+        RetainedTrie {
+            mu,
+            stats: self.stats.clone(),
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -158,6 +202,18 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'b>,
     {
+        use std::sync::TryLockError;
+
+        let _guard = loop {
+            match self.mu.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::WouldBlock) => thread::yield_now(),
+                Err(TryLockError::Poisoned(_)) => {
+                    panic!("RetainedTrie::set IPCFail write lock poisoned");
+                }
+            }
+        };
+
         self.do_set(key, value)
     }
 
@@ -165,6 +221,18 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'a>,
     {
+        use std::sync::TryLockError;
+
+        let _guard = loop {
+            match self.mu.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::WouldBlock) => thread::yield_now(),
+                Err(TryLockError::Poisoned(_)) => {
+                    panic!("RetainedTrie::remove IPCFail write lock poisoned");
+                }
+            }
+        };
+
         self.do_remove(key)
     }
 
@@ -175,20 +243,17 @@ impl RetainedTrie {
         let is_wilder = key.is_begin_wild_card();
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
-        stats.lookups = stats.lookups.saturating_add(1);
+        self.stats.lookups.fetch_add(1, SeqCst);
 
         let (vals, _) = root.match_topic_filter(in_levels, is_wilder);
         if !vals.is_empty() {
-            stats.hits = stats.hits.saturating_add(1);
+            self.stats.hits.fetch_add(1, SeqCst);
         }
-
-        let inner = Inner { stats, root: Arc::clone(&root) };
-        *self.inner.write() = Arc::new(inner);
 
         vals
     }
@@ -209,17 +274,17 @@ impl RetainedTrie {
     {
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
         let (root, first) = root.set(in_levels, value);
         if first {
-            stats.count = stats.count.saturating_add(1);
+            self.stats.count.fetch_add(1, SeqCst);
         }
 
-        let inner = Inner { stats, root: Arc::new(root) };
+        let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
     }
 
@@ -229,21 +294,21 @@ impl RetainedTrie {
     {
         let in_levels = key.iter_topic_path();
 
-        let (mut stats, root) = {
+        let root = {
             let inner = Arc::clone(&self.inner.read());
-            (inner.stats, Arc::clone(&inner.root))
+            Arc::clone(&inner.root)
         };
 
         let (root, missing) = root.remove(in_levels);
         let root = root.unwrap();
 
         if missing {
-            stats.missing = stats.missing.saturating_sub(1);
+            self.stats.missing.fetch_add(1, SeqCst);
         } else {
-            stats.count = stats.count.saturating_sub(1);
+            self.stats.count.fetch_add(1, SeqCst);
         }
 
-        let inner = Inner { stats, root: Arc::new(root) };
+        let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
     }
 }
@@ -300,18 +365,39 @@ impl<V> Node<V> {
         }
     }
 
-    fn subtree_values(&self) -> Vec<V>
+    fn subtree_values(&self, is_wilder: bool) -> Vec<V>
     where
         V: Clone,
     {
-        let (children, mut acc) = match self {
-            Node::Root { children } => (children, Vec::default()),
-            Node::Child { children, values, .. } => (children, values.to_vec()),
+        let mut acc = Vec::default();
+        match self {
+            Node::Root { children } if is_wilder => {
+                // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
+                // with a wildcard character (# or +) with Topic Names beginning with
+                // a $ character. The Server SHOULD prevent Clients from using such
+                // Topic Names to exchange messages with other Clients. Server
+                // implementations MAY use Topic Names that start with a leading
+                // $ character for other purposes.
+                for child in children.iter() {
+                    let b = child.as_name().as_bytes().first();
+                    if !matches!(b, Some(36) /*'$'*/) {
+                        acc.extend(child.subtree_values(false).into_iter());
+                    }
+                }
+            }
+            Node::Root { children } => {
+                for child in children.iter() {
+                    acc.extend(child.subtree_values(false).into_iter());
+                }
+            }
+            Node::Child { children, values, .. } => {
+                acc.extend(values.to_vec().into_iter());
+                for child in children.iter() {
+                    acc.extend(child.subtree_values(false).into_iter());
+                }
+            }
         };
 
-        for child in children.iter() {
-            acc.extend(child.subtree_values().into_iter());
-        }
         acc
     }
 
@@ -382,22 +468,13 @@ impl<V> Node<V> {
         V: Ord,
     {
         match self {
-            Node::Child { values, .. } if values.len() == 0 => unreachable!(),
-            Node::Child { values, .. } if values.len() == 1 => {
-                match &values[0] == value {
-                    true => {
-                        values.remove(0);
-                        (true, false)
-                    }
-                    false => (false, true),
-                }
-            }
+            Node::Child { values, .. } if values.len() == 0 => (false, true),
             Node::Child { values, .. } => match values.binary_search(value) {
                 Ok(off) => {
                     values.remove(off);
-                    (false, false)
+                    (values.len() == 1, false)
                 }
-                Err(_off) => (false, true),
+                Err(_off) => (values.len() == 1, true),
             },
             Node::Root { .. } => unreachable!(),
         }
@@ -453,32 +530,29 @@ impl<V> Node<V> {
     }
 
     // return (root, last, missing)
-    fn unsub<'a, K>(&self, mut inl: K, val: &V) -> (Option<Node<V>>, bool, bool)
+    fn unsub<'a, K>(&self, mut key: K, val: &V) -> (Option<Node<V>>, bool, bool)
     where
         K: Iterator<Item = &'a str>,
         V: Clone + Ord,
     {
         let mut cow_node = self.cow_clone();
 
-        match inl.next() {
-            Some(in_level) => {
+        match key.next() {
+            Some(ky) => {
                 let (is_root, children) = match &mut cow_node {
                     Node::Root { children } => (true, children),
                     Node::Child { children, .. } => (false, children),
                 };
-                match children.binary_search_by_key(&in_level, |n| n.as_name()) {
-                    Ok(off) => {
-                        let child = children.remove(off);
-                        match child.unsub(inl, val) {
-                            (Some(child), last, miss) => {
-                                children.insert(off, Arc::new(child));
-                                (Some(cow_node), last, miss)
-                            }
-                            (None, last, mi) if is_root => (Some(cow_node), last, mi),
-                            (None, last, mi) if cow_node.is_empty() => (None, last, mi),
-                            (None, last, mi) => (Some(cow_node), last, mi),
+                match children.binary_search_by_key(&ky, |n| n.as_name()) {
+                    Ok(off) => match children.remove(off).unsub(key, val) {
+                        (Some(child), last, miss) => {
+                            children.insert(off, Arc::new(child));
+                            (Some(cow_node), last, miss)
                         }
-                    }
+                        (None, last, miss) if is_root => (Some(cow_node), last, miss),
+                        (None, last, miss) if cow_node.is_empty() => (None, last, miss),
+                        (None, last, miss) => (Some(cow_node), last, miss),
+                    },
                     Err(_off) => (Some(cow_node), false, true),
                 }
             }
@@ -525,32 +599,29 @@ impl<V> Node<V> {
     }
 
     // return (root, missing)
-    fn remove<'a, K>(&self, mut inl: K) -> (Option<Node<V>>, bool)
+    fn remove<'a, K>(&self, mut key: K) -> (Option<Node<V>>, bool)
     where
         K: Iterator<Item = &'a str>,
         V: Clone,
     {
         let mut cow_node = self.cow_clone();
 
-        match inl.next() {
-            Some(in_level) => {
+        match key.next() {
+            Some(ky) => {
                 let (is_root, children) = match &mut cow_node {
                     Node::Root { children } => (true, children),
                     Node::Child { children, .. } => (false, children),
                 };
-                match children.binary_search_by_key(&in_level, |n| n.as_name()) {
-                    Ok(off) => {
-                        let child = children.remove(off);
-                        match child.remove(inl) {
-                            (Some(child), missing) => {
-                                children.insert(off, Arc::new(child));
-                                (Some(cow_node), missing)
-                            }
-                            (None, missing) if is_root => (Some(cow_node), missing),
-                            (None, missing) if cow_node.is_empty() => (None, missing),
-                            (None, missing) => (Some(cow_node), missing),
+                match children.binary_search_by_key(&ky, |n| n.as_name()) {
+                    Ok(off) => match children.remove(off).remove(key) {
+                        (Some(child), missing) => {
+                            children.insert(off, Arc::new(child));
+                            (Some(cow_node), missing)
                         }
-                    }
+                        (None, missing) if is_root => (Some(cow_node), missing),
+                        (None, missing) if cow_node.is_empty() => (None, missing),
+                        (None, missing) => (Some(cow_node), missing),
+                    },
                     Err(_off) => (Some(cow_node), true),
                 }
             }
@@ -568,6 +639,7 @@ impl<V> Node<V> {
     {
         let in_level = match in_levels.next() {
             None => match self {
+                Node::Root { .. } => return Vec::default(),
                 Node::Child { values, children, .. } => {
                     let mut acc: Vec<V> = values.to_vec();
                     for child in children.iter().map(|x| x.as_ref()) {
@@ -580,7 +652,6 @@ impl<V> Node<V> {
                     }
                     return acc;
                 }
-                Node::Root { .. } => return Vec::default(),
             },
             Some(in_level) => in_level,
         };
@@ -630,23 +701,18 @@ impl<V> Node<V> {
         V: Clone,
     {
         let in_level = match in_levels.next() {
-            None => return (Vec::default(), false),
-            Some("#") => return (self.subtree_values(), true),
+            None => match self {
+                Node::Root { .. } => return (Vec::default(), false),
+                Node::Child { values, .. } => return (values.to_vec(), false),
+            },
+            Some("#") => match self {
+                Node::Root { .. } => return (self.subtree_values(is_wilder), true),
+                Node::Child { .. } => return (self.subtree_values(false), true),
+            },
             Some(in_level) => in_level,
         };
 
         let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
-            Node::Root { children } if is_wilder => Box::new(
-                // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
-                // with a wildcard character (# or +) with Topic Names beginning with
-                // a $ character. The Server SHOULD prevent Clients from using such
-                // Topic Names to exchange messages with other Clients. Server
-                // implementations MAY use Topic Names that start with a leading
-                // $ character for other purposes.
-                children.iter().filter(|child| {
-                    !matches!(child.as_name().as_bytes().first(), Some(36) /*'$'*/)
-                }),
-            ),
             Node::Root { children } => Box::new(children.iter()),
             Node::Child { children, .. } => Box::new(children.iter()),
         };
@@ -655,11 +721,7 @@ impl<V> Node<V> {
         let mut multi_level = false;
         for child in children {
             match match_level(in_level, child.as_name()) {
-                Match::All => {
-                    if let Node::Child { values, .. } = child.borrow() {
-                        acc.extend(values.to_vec().into_iter());
-                    }
-                }
+                Match::All => acc.extend(child.subtree_values(false).into_iter()),
                 Match::True => {
                     let in_levels = in_levels.clone();
                     multi_level = match child.match_topic_filter(in_levels, is_wilder) {
@@ -683,54 +745,6 @@ impl<V> Node<V> {
 
         (acc, false)
     }
-}
-
-/// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
-/// algorithm is commutative between TopicName and TopicFilter.
-pub fn route_match<'a, 'b>(this: &'a str, index: Vec<&'b str>) -> Vec<&'b str> {
-    let mut outs = Vec::default();
-    for other in index.into_iter() {
-        match (this.chars().next(), other.clone().chars().next()) {
-            (None, _) => return Vec::default(),
-            (_, None) => return Vec::default(),
-            (Some('$'), Some('#')) => return Vec::default(),
-            (Some('$'), Some('+')) => return Vec::default(),
-            (Some('#'), Some('$')) => return Vec::default(),
-            (Some('+'), Some('$')) => return Vec::default(),
-            (_, _) => (),
-        }
-
-        let mut iter1 = this.split('/');
-        let mut iter2 = other.clone().split('/');
-        let _b = loop {
-            match (iter1.next(), iter2.next()) {
-                (Some(l1), Some(l2)) => match match_level(l1, l2) {
-                    Match::All => {
-                        outs.push(other);
-                        break true;
-                    }
-                    Match::False => break false,
-                    Match::True => (),
-                },
-                (None, Some("#")) => {
-                    outs.push(other);
-                    break true;
-                }
-                (None, Some(_)) => break false,
-                (Some("#"), None) => {
-                    outs.push(other);
-                    break true;
-                }
-                (Some(_), None) => break false,
-                (None, None) => {
-                    outs.push(other);
-                    break true;
-                }
-            }
-        };
-    }
-
-    outs
 }
 
 enum Match {
@@ -760,16 +774,69 @@ fn compare_level(in_level: &str, trie_level: &str) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Stats {
     // number of topics in the trie.
-    pub count: usize,
+    pub count: Arc<AtomicUsize>,
     // number repeated inserts of same topic.
-    pub repeat: usize,
+    pub repeat: Arc<AtomicUsize>,
     // number of missing topics removed.
-    pub missing: usize,
+    pub missing: Arc<AtomicUsize>,
     // total number of matches
-    pub lookups: usize,
+    pub lookups: Arc<AtomicUsize>,
     // number of hits
-    pub hits: usize,
+    pub hits: Arc<AtomicUsize>,
+}
+
+/// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
+/// algorithm is commutative between TopicName and TopicFilter.
+pub fn route_match<S: AsRef<str>>(this: &str, index: &[S]) -> Vec<String> {
+    let mut outs = Vec::default();
+    for other in index.iter() {
+        let other: &str = other.as_ref();
+        match (this.chars().next(), other.chars().next()) {
+            (None, _) => return Vec::default(),
+            (_, None) => return Vec::default(),
+            (Some('$'), Some('#')) => continue,
+            (Some('$'), Some('+')) => continue,
+            (Some('#'), Some('$')) => continue,
+            (Some('+'), Some('$')) => continue,
+            (_, _) => (),
+        }
+        let mut iter1 = this.split('/');
+        let mut iter2 = other.split('/');
+        let _b = loop {
+            match (iter1.next(), iter2.next()) {
+                (Some(l1), Some(l2)) => match match_level(l1, l2) {
+                    Match::All => {
+                        // println!("other1 {}", other);
+                        outs.push(other.to_string());
+                        break true;
+                    }
+                    Match::False => break false,
+                    Match::True => (),
+                },
+                (None, Some("#")) => {
+                    // println!("other2 {}", other);
+                    outs.push(other.to_string());
+                    break true;
+                }
+                (None, Some(_)) => break false,
+                (Some("#"), None) => {
+                    // println!("other3 {}", other);
+                    outs.push(other.to_string());
+                    break true;
+                }
+                (Some(_), None) => break false,
+                (None, None) => {
+                    // println!("other4 {}", other);
+                    outs.push(other.to_string());
+                    break true;
+                }
+            }
+        };
+    }
+
+    // println!("outs {:?}", outs);
+    outs
 }

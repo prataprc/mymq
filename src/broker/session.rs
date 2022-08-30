@@ -289,9 +289,9 @@ impl Session {
 }
 
 impl Session {
-    pub fn remove_topic_filters(&mut self, topic_filters: &mut SubscribedTrie) {
+    pub fn remove_topic_filters(&mut self, filters: &mut SubscribedTrie) {
         for (topic_filter, value) in self.state.as_subscriptions().iter() {
-            topic_filters.unsubscribe(topic_filter, value);
+            filters.unsubscribe(topic_filter, value);
         }
     }
 }
@@ -485,6 +485,7 @@ impl Session {
             shard
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
+
             self.state
                 .as_mut_subscriptions()
                 .insert(filter.topic_filter.clone(), subscription);

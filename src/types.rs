@@ -89,6 +89,12 @@ impl DerefMut for ClientID {
     }
 }
 
+impl From<String> for ClientID {
+    fn from(val: String) -> ClientID {
+        ClientID(val)
+    }
+}
+
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for ClientID {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
@@ -144,23 +150,31 @@ impl<'a> Arbitrary<'a> for TopicName {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let names_choice = [
             "/",
+            "//",
+            "/space ok",
             "sport",
             "sport/",
             "sport/tennis/player1",
             "sport/tennis/player1/ranking",
             "sport/tennis/player1/score/wimbledon",
             "sport/tennis/player2",
-            "sport/tennis/player1/ranking",
+            "sport/tennis/player2/ranking",
             "/finance",
             "$SYS/monitor/Clients",
+            "$SYS/name",
         ];
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS"].into_iter().map(|s| s.to_string()).collect();
-        let string_choice: Vec<String> =
-            vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
+        let string_choice: Vec<String> = vec![
+            "", "a", "ab", "abc", "space ok", "sport", "tennis", "player1", "player2",
+            "ranking", "score", "finance",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
         let s = match uns.arbitrary::<u8>()? {
-            0..=100 => uns.choose(&names_choice)?.to_string(),
+            0..=10 => uns.choose(&names_choice)?.to_string(),
             _ => {
                 let c = uns.arbitrary::<u8>()?;
                 let levels = match c {
@@ -309,26 +323,37 @@ impl<'a> Arbitrary<'a> for TopicFilter {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let filters_choice = [
             "#".to_string(),
-            "sport/#".to_string(),
-            "sport/tennis/#".to_string(),
-            "$SYS/#".to_string(),
             "+".to_string(),
+            "/+".to_string(),
+            "/".to_string(),
+            "//".to_string(),
+            "/space ok".to_string(),
+            "sport/#".to_string(),
+            "sport/+".to_string(),
+            "sport/tennis/#".to_string(),
             "sport/tennis/+".to_string(),
             "sport/+".to_string(),
             "sport/+/player1".to_string(),
+            "sport/tennis/player1/#".to_string(),
             "+/+".to_string(),
             "/+".to_string(),
             "+/tennis/#".to_string(),
             "+/monitor/Clients".to_string(),
+            "$SYS/#".to_string(),
             "$SYS/monitor/+".to_string(),
         ];
         let level_choice: Vec<String> =
             vec!["", "$", "$SYS", "#", "+"].into_iter().map(|s| s.to_string()).collect();
-        let string_choice: Vec<String> =
-            vec!["", "a", "ab", "abc"].into_iter().map(|s| s.to_string()).collect();
+        let string_choice: Vec<String> = vec![
+            "", "a", "ab", "abc", "space ok", "sport", "tennis", "player1", "player2",
+            "ranking", "score", "finance", "monitor", "Clients",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
         let s = match uns.arbitrary::<u8>()? {
-            0..=100 => uns.choose(&filters_choice)?.to_string(),
+            0..=6 => uns.choose(&filters_choice)?.to_string(),
             _ => {
                 let c = uns.arbitrary::<u8>()?;
                 let levels = match c {

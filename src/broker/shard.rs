@@ -790,6 +790,7 @@ impl Shard {
             mem::replace(flush_queue, Vec::default())
         };
 
+        flush_queue.sort_by_key(|a| a.client_id.clone());
         flush_queue.dedup_by_key(|a| a.client_id.clone());
 
         for FailedSession { client_id, err } in flush_queue.into_iter() {
