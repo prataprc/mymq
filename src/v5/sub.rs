@@ -117,7 +117,7 @@ impl From<RetainForwardRule> for u8 {
 }
 
 /// SUBSCRIBE Packet
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Subscribe {
     pub packet_id: u16,
     pub filters: Vec<SubscribeFilter>,
@@ -156,14 +156,15 @@ impl fmt::Display for Subscribe {
 impl<'a> Arbitrary<'a> for Subscribe {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let mut filters: Vec<SubscribeFilter> = vec![];
-        for _i in 0..((uns.arbitrary::<u8>()? % 32) + 1) {
+        let n = (uns.arbitrary::<u8>()? % 32) + 1;
+        for _i in 0..n {
             filters.push(uns.arbitrary()?)
         }
 
         let val = Subscribe {
             packet_id: uns.arbitrary()?,
-            properties: uns.arbitrary()?,
             filters,
+            properties: uns.arbitrary()?,
         };
 
         Ok(val)
@@ -228,6 +229,44 @@ impl Packetize for Subscribe {
 }
 
 impl Subscribe {
+    pub fn add_filter(&mut self, filter: TopicFilter, opt: SubscriptionOpt) -> &mut Self {
+        let filter = SubscribeFilter { topic_filter: filter, opt };
+        self.filters.push(filter);
+
+        self
+    }
+
+    pub fn set_subscription_id(&mut self, subscription_id: VarU32) -> &mut Self {
+        match &mut self.properties {
+            Some(props) => props.subscription_id = Some(subscription_id),
+            None => {
+                let props = SubscribeProperties {
+                    subscription_id: Some(subscription_id),
+                    user_properties: Vec::default(),
+                };
+                self.properties = Some(props);
+            }
+        }
+
+        self
+    }
+
+    pub fn add_user_property(&mut self, key: &str, value: &str) -> &mut Self {
+        let up = (key.to_string(), value.to_string());
+        match &mut self.properties {
+            Some(props) => props.user_properties.push(up),
+            None => {
+                let props = SubscribeProperties {
+                    subscription_id: None,
+                    user_properties: vec![up],
+                };
+                self.properties = Some(props);
+            }
+        }
+
+        self
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {

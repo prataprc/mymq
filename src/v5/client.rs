@@ -2,7 +2,7 @@
 
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
-use log::{error, trace};
+use log::{error, trace, warn};
 
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -156,6 +156,7 @@ impl ClientBuilder {
             last_rcvd: time::Instant::now(),
             rd_deadline: None,
             wt_deadline: None,
+            packet_id: 1,
 
             in_packets: VecDeque::default(),
             cio: ClientIO::None,
@@ -185,6 +186,7 @@ pub struct Client {
     last_sent: time::Instant,
     rd_deadline: Option<time::Instant>,
     wt_deadline: Option<time::Instant>,
+    packet_id: u16,
 
     in_packets: VecDeque<v5::Packet>,
     cio: ClientIO,
@@ -243,6 +245,7 @@ impl Client {
             last_sent: self.last_rcvd,
             rd_deadline: None,
             wt_deadline: None,
+            packet_id: 0,
 
             in_packets: VecDeque::default(),
             cio: rd_cio,
@@ -410,6 +413,40 @@ impl Client {
 
 /// IO methods
 impl Client {
+    /// Subscribe one or more filters with broker. Below is an example of how to
+    /// subscribe for a single filter.
+    ///
+    /// ```ignore
+    ///     let opt = {
+    ///         let fwdrule = v5::RetainForwardRule::OnNewSubscribe;
+    ///         let retain_as_published = true;
+    ///         let no_local = true;
+    ///         let qos = QoS::AtMostOnce;
+    ///         v5::SubscriptionOpt::new(fwdrule, retain_as_published, no_local, qos)
+    ///     };
+    ///     let filter: TopicFilter = "#".into();
+    ///     let mut sub = v5::Subscribe::default();
+    ///     sub.add_filter(filter, opt);
+    ///
+    ///     sub.set_subscription_id(0x1003);
+    ///
+    ///     let suback = client.subscribe(sub).expect("failed to subscribe");
+    /// ```
+    ///
+    /// Note that this call shall block until the subscription message is sent to the
+    /// remote and subscribe-ack is recieved with the same `packet_id`. [Client] shall
+    /// automatically choose a `packet_id` for this subscription.
+    pub fn subscribe(&mut self, mut sub: v5::Subscribe) -> io::Result<v5::SubAck> {
+        sub.packet_id = self.next_packet_id();
+        self.write(v5::Packet::Subscribe(sub.clone()))?;
+        self.cio_read_sub_ack(&sub)
+    }
+
+    /// Disconnect with remote. Client can read packets after this call, but typically
+    /// the connection is gone. But [Self::reconnect] should work.
+    ///
+    /// NOTE: Applications can also compose their own disconnect message via
+    /// [v5::Disconnect] and send it via [Self::write] method.
     pub fn disconnect(&mut self, code: DisconnReasonCode) -> io::Result<()> {
         let code = match ReasonCode::try_from(code as u8) {
             Ok(val) => Ok(val),
@@ -419,61 +456,51 @@ impl Client {
         self.write(v5::Packet::Disconnect(disconnect))
     }
 
+    /// Read a single packet from connection, block until a packet is available.
     pub fn read(&mut self) -> io::Result<v5::Packet> {
         match self.in_packets.pop_front() {
             Some(packet) => Ok(packet),
             None => {
-                self.last_rcvd = time::Instant::now();
-
-                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-                match cio.read(self) {
-                    res @ Ok(v5::Packet::Disconnect(_)) => res,
-                    res => {
-                        let _none = mem::replace(&mut self.cio, cio);
-                        res
-                    }
-                }
+                self.cio_read()?;
+                Ok(self.in_packets.pop_front().unwrap())
             }
         }
     }
 
+    /// Same as [Self::read], but does not block. Application must be prepared to
+    /// handle [io::ErrorKind::WouldBlock], and [io::ErrorKind::Interrupted]
     pub fn read_noblock(&mut self) -> io::Result<v5::Packet> {
         match self.in_packets.pop_front() {
             Some(packet) => Ok(packet),
             None => {
-                self.last_rcvd = time::Instant::now();
-
-                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-                match cio.read_noblock(self) {
-                    res @ Ok(v5::Packet::Disconnect(_)) => res,
-                    res => {
-                        let _none = mem::replace(&mut self.cio, cio);
-                        res
-                    }
-                }
+                self.cio_read_noblock()?;
+                Ok(self.in_packets.pop_front().unwrap())
             }
         }
     }
 
+    /// Write a single packet on the connectio, block until a packet is available.
     pub fn write(&mut self, packet: v5::Packet) -> io::Result<()> {
         self.try_read()?;
-
-        self.last_sent = time::Instant::now();
 
         let mut cio = mem::replace(&mut self.cio, ClientIO::None);
         let res = cio.write(self, packet);
         let _none = mem::replace(&mut self.cio, cio);
+
+        self.last_sent = time::Instant::now();
         res
     }
 
+    /// Same as [Self::write], but does not block. Application must be prepared to
+    /// handle [io::ErrorKind::WouldBlock], and [io::ErrorKind::Interrupted]
     pub fn write_noblock(&mut self) -> io::Result<()> {
         self.try_read()?;
-
-        self.last_sent = time::Instant::now();
 
         let mut cio = mem::replace(&mut self.cio, ClientIO::None);
         let res = cio.write_noblock(self);
         let _none = mem::replace(&mut self.cio, cio);
+
+        self.last_sent = time::Instant::now();
         res
     }
 
@@ -486,6 +513,50 @@ impl Client {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(()),
             Err(err) => Err(err),
+        }
+    }
+
+    fn cio_read(&mut self) -> io::Result<()> {
+        let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+        let res = cio.read(self);
+        let _none = mem::replace(&mut self.cio, cio);
+
+        self.in_packets.push_back(res?);
+
+        self.last_rcvd = time::Instant::now();
+        Ok(())
+    }
+
+    fn cio_read_noblock(&mut self) -> io::Result<()> {
+        let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+        let res = cio.read_noblock(self);
+        let _none = mem::replace(&mut self.cio, cio);
+
+        self.in_packets.push_back(res?);
+
+        self.last_rcvd = time::Instant::now();
+        Ok(())
+    }
+
+    fn cio_read_sub_ack(&mut self, sub: &v5::Subscribe) -> io::Result<v5::SubAck> {
+        loop {
+            let pkt = {
+                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
+                let res = cio.read(self);
+                let _none = mem::replace(&mut self.cio, cio);
+                res?
+            };
+
+            match pkt {
+                v5::Packet::SubAck(sa) if sa.packet_id == sub.packet_id => break Ok(sa),
+                v5::Packet::SubAck(sa) => warn!(
+                    "sub-ack mismatch in packet_id {} != {}",
+                    sa.packet_id, sub.packet_id
+                ),
+                pkt => self.in_packets.push_back(pkt),
+            }
+
+            self.last_rcvd = time::Instant::now();
         }
     }
 }
@@ -506,6 +577,15 @@ impl Client {
             }
             ClientIO::None => unreachable!(),
         }
+    }
+
+    fn next_packet_id(&mut self) -> u16 {
+        let packet_id = self.packet_id;
+        self.packet_id = match self.packet_id.wrapping_add(1) {
+            0 => 1,
+            n => n,
+        };
+        packet_id
     }
 }
 
