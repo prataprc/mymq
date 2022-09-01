@@ -78,7 +78,7 @@ impl SubscriptionOpt {
 
 /// RetainForwardRule part of Subscription option defined by MQTT spec.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RetainForwardRule {
     OnEverySubscribe = 0,
     OnNewSubscribe = 1,
@@ -352,7 +352,7 @@ impl Packetize for SubscribeProperties {
 
             match property {
                 SubscriptionIdentifier(VarU32(0)) => {
-                    err!(ProtocolError, code: ProtocolError, "{} subcr_ide:0", PP)?;
+                    err!(ProtocolError, code: ProtocolError, "{} subcr_id:0", PP)?;
                 }
                 SubscriptionIdentifier(val) => props.subscription_id = Some(val),
                 UserProp(val) => props.user_properties.push(val),

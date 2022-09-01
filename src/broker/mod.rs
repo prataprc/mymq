@@ -2,6 +2,8 @@
 
 use std::{mem, net, path, sync::mpsc};
 
+use crate::v5;
+
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
 
@@ -90,6 +92,10 @@ pub trait Hostable {
 /// Trait implemented by [Shard].
 pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
+}
+
+pub struct RouteIO {
+    pub pkts_in: QueueStatus<v5::Packet>,
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`

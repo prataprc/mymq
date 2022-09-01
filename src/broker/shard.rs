@@ -133,8 +133,8 @@ pub struct ActiveLoop {
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::cc_topic_filters
     cc_topic_filters: SubscribedTrie,
-    /// MVCC clone of Cluster::cc_retained_messages
-    cc_retained_messages: RetainedTrie,
+    /// MVCC clone of Cluster::cc_retained_topics
+    cc_retained_topics: RetainedTrie,
 
     /// statistics
     stats: Stats,
@@ -252,7 +252,7 @@ pub struct SpawnArgs {
     pub cluster: Cluster,
     pub flusher: Flusher,
     pub cc_topic_filters: SubscribedTrie,
-    pub cc_retained_messages: RetainedTrie,
+    pub cc_retained_topics: RetainedTrie,
 }
 
 impl Shard {
@@ -307,7 +307,7 @@ impl Shard {
 
                 shard_queues: BTreeMap::default(),
                 cc_topic_filters: args.cc_topic_filters,
-                cc_retained_messages: args.cc_retained_messages,
+                cc_retained_topics: args.cc_retained_topics,
 
                 stats: Stats::default(),
                 app_tx: app_tx.clone(),
@@ -1322,7 +1322,7 @@ impl Shard {
 
         mem::drop(active_loop.shard_queues);
         mem::drop(active_loop.cc_topic_filters);
-        mem::drop(active_loop.cc_retained_messages);
+        mem::drop(active_loop.cc_retained_topics);
 
         let mut new_sessions = BTreeMap::default();
         for (client_id, sess) in active_loop.sessions.into_iter() {
@@ -1519,6 +1519,15 @@ impl Shard {
     pub fn as_topic_filters(&self) -> &SubscribedTrie {
         match &self.inner {
             Inner::MainActive(ActiveLoop { cc_topic_filters, .. }) => cc_topic_filters,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    pub fn as_retained_topics(&self) -> &RetainedTrie {
+        match &self.inner {
+            Inner::MainActive(ActiveLoop { cc_retained_topics, .. }) => {
+                cc_retained_topics
+            }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

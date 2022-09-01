@@ -462,12 +462,15 @@ impl Session {
 
     // return suback and retained-messages if any.
     fn rx_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
+        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
         let subscription_id: Option<u32> = match &sub.properties {
             Some(props) => props.subscription_id.clone().map(|x| *x),
             None => None,
         };
 
         let mut return_codes = Vec::with_capacity(sub.filters.len());
+        let mut msgs = Vec::default();
+
         for filter in sub.filters.iter() {
             let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
             let subscription = v5::Subscription {
@@ -476,7 +479,7 @@ impl Session {
                 client_id: self.client_id.clone(),
                 shard_id: shard.shard_id,
                 subscription_id: subscription_id,
-                qos,
+                qos: cmp::min(server_qos, qos),
                 no_local,
                 retain_as_published,
                 retain_forward_rule: rfr,
@@ -486,12 +489,36 @@ impl Session {
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
 
-            self.state
+            let is_replace = self
+                .state
                 .as_mut_subscriptions()
-                .insert(filter.topic_filter.clone(), subscription);
+                .insert(filter.topic_filter.clone(), subscription.clone())
+                .is_some();
 
-            let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
-            let rc = match cmp::min(server_qos, qos) {
+            let _rpubls = match rfr {
+                v5::RetainForwardRule::OnEverySubscribe => {
+                    shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
+                }
+                v5::RetainForwardRule::OnNewSubscribe if !is_replace => {
+                    shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
+                }
+                v5::RetainForwardRule::OnNewSubscribe => Vec::default(),
+                v5::RetainForwardRule::Never => Vec::default(),
+            };
+            //let rmsgs: Vec<Message> = rpubls
+            //    .into_iter()
+            //    .map(|p| {
+            //        p.retain = true;
+            //        p.qos = cmp::min(p.qos, subscription.qos),
+            //        if matches!(p.qos, v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce) {
+            //            p.packet_id = self.incr_packet_id();
+            //        }
+            //        Message: v5::Packet::Publish(p)
+            //    })
+            //    .collect();
+            //msgs.extend(rmsgs.into_iter());
+
+            let rc = match subscription.qos {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
                 v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
                 v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
@@ -504,8 +531,9 @@ impl Session {
             properties: None,
             return_codes,
         };
+        msgs.insert(0, Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) });
 
-        Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
+        Ok(msgs)
     }
 
     fn rx_disconnect(
@@ -563,6 +591,10 @@ impl Session {
 impl Session {
     pub fn incr_out_seqno(&mut self, msg: &mut Message) {
         self.state.incr_out_seqno(msg)
+    }
+
+    pub fn incr_packet_id(&mut self) {
+        self.state.incr_packet_id();
     }
 
     // Handle PUBLISH QoS-0
@@ -736,6 +768,16 @@ impl SessionState {
         }
     }
 
+    fn incr_packet_id(&mut self) -> Option<PacketID> {
+        let next_packet_id = match self {
+            SessionState::Active { next_packet_id, .. } => next_packet_id,
+            _ => unreachable!(),
+        };
+        let packet_id = *next_packet_id;
+        *next_packet_id = next_packet_id.wrapping_add(1);
+        Some(packet_id)
+    }
+
     fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         let (prefix, config, miot_tx, qos0_back_log) = match self {
             SessionState::Active { prefix, config, miot_tx, qos0_back_log, .. } => {
@@ -776,23 +818,18 @@ impl SessionState {
     }
 
     fn out_qos_active(&mut self, msgs: Vec<Message>) -> QueueMsg {
-        let (prefix, config, miot_tx, qos12_unacks, next_packet_id, back_log) = match self
-        {
+        let (prefix, config, qos12_unacks, back_log) = match self {
             SessionState::Active {
-                prefix,
-                config,
-                miot_tx,
-                qos12_unacks,
-                next_packet_id,
-                cs_back_log,
-                ..
-            } => (prefix, config, miot_tx, qos12_unacks, next_packet_id, cs_back_log),
+                prefix, config, qos12_unacks, cs_back_log, ..
+            } => (prefix, config, qos12_unacks, cs_back_log),
             ss => unreachable!("{:?}", ss),
         };
+        let mqtt_pkt_batch_size = config.mqtt_pkt_batch_size;
+        let mqtt_receive_maximum = config.mqtt_receive_maximum;
 
         let m = back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
-        let n = (config.mqtt_pkt_batch_size as usize) * 4;
+        let n = (mqtt_pkt_batch_size as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
@@ -800,19 +837,29 @@ impl SessionState {
             return QueueStatus::Disconnected(Vec::new());
         }
 
-        if qos12_unacks.len() >= usize::from(config.mqtt_receive_maximum) {
+        if qos12_unacks.len() >= usize::from(mqtt_receive_maximum) {
             return QueueStatus::Block(Vec::new());
         }
 
-        for msg in msgs.into_iter() {
-            let packet_id = *next_packet_id;
-            *next_packet_id = next_packet_id.wrapping_add(1);
+        mem::drop(prefix);
+        mem::drop(config);
+        mem::drop(qos12_unacks);
+        mem::drop(back_log);
 
-            let msg = msg.into_packet(Some(packet_id));
-            back_log.insert(msg.to_out_seqno(), msg);
+        for msg in msgs.into_iter() {
+            let packet_id = self.incr_packet_id();
+            let msg = msg.into_packet(packet_id);
+            self.as_back_log().insert(msg.to_out_seqno(), msg);
         }
 
-        let max = usize::try_from(config.mqtt_pkt_batch_size).unwrap();
+        let (prefix, miot_tx, qos12_unacks, back_log) = match self {
+            SessionState::Active {
+                prefix, miot_tx, qos12_unacks, cs_back_log, ..
+            } => (prefix, miot_tx, qos12_unacks, cs_back_log),
+            ss => unreachable!("{:?}", ss),
+        };
+
+        let max = usize::try_from(mqtt_pkt_batch_size).unwrap();
         let mut msgs = Vec::default();
         while msgs.len() < max {
             match back_log.pop_first() {
@@ -1019,6 +1066,13 @@ impl SessionState {
     fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
         match self {
             SessionState::Active { out_acks, .. } => out_acks,
+            ss => unreachable!("{:?}", ss),
+        }
+    }
+
+    fn as_back_log(&mut self) -> &mut BTreeMap<OutSeqno, Message> {
+        match self {
+            SessionState::Active { cs_back_log, .. } => cs_back_log,
             ss => unreachable!("{:?}", ss),
         }
     }

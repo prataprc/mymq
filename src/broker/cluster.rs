@@ -68,7 +68,7 @@ struct RunLoop {
     cc_topic_filters: SubscribedTrie, // key=TopicFilter, val=(client_id, shard_id)
     /// Index of retained messages for each topic-name, across all the sessions, local
     /// to this node.
-    cc_retained_messages: RetainedTrie, // indexed by TopicName.
+    cc_retained_topics: RetainedTrie, // indexed by TopicName.
 
     /// Consensus state.
     state: ClusterState,
@@ -170,7 +170,7 @@ struct SpawnShards<'a> {
     cluster: &'a Cluster,
     flusher_tx: Flusher,
     cc_topic_filters: &'a SubscribedTrie,
-    cc_retained_messages: &'a RetainedTrie,
+    cc_retained_topics: &'a RetainedTrie,
     app_tx: &'a AppTx,
 }
 struct SpawnTicker<'a> {
@@ -239,7 +239,7 @@ impl Cluster {
         let flusher_tx = flusher.to_tx("cluster-spawn");
 
         let cc_topic_filters = SubscribedTrie::default();
-        let cc_retained_messages = RetainedTrie::default();
+        let cc_retained_topics = RetainedTrie::default();
 
         let mut cluster = Cluster {
             name: self.config.name.clone(),
@@ -256,7 +256,7 @@ impl Cluster {
 
                 rebalancer,
                 cc_topic_filters: cc_topic_filters.clone(),
-                cc_retained_messages: cc_retained_messages.clone(),
+                cc_retained_topics: cc_retained_topics.clone(),
 
                 stats: Stats::default(),
 
@@ -288,7 +288,7 @@ impl Cluster {
                 cluster: &cluster,
                 flusher_tx,
                 cc_topic_filters: &cc_topic_filters,
-                cc_retained_messages: &cc_retained_messages,
+                cc_retained_topics: &cc_retained_topics,
                 app_tx: &app_tx,
             };
             let active_shards = Self::spawn_active_shards(args)?;
@@ -333,7 +333,7 @@ impl Cluster {
                     cluster: args.cluster.to_tx("shard"),
                     flusher: args.flusher_tx.to_tx("shard"),
                     cc_topic_filters: args.cc_topic_filters.clone(),
-                    cc_retained_messages: args.cc_retained_messages.clone(),
+                    cc_retained_topics: args.cc_retained_topics.clone(),
                 };
                 let shard = Shard::from_config(args.config, shard_id)?;
                 shard.spawn_active(spawn_args, args.app_tx)?
@@ -587,7 +587,7 @@ impl Cluster {
     fn retain_expires(&mut self, rt: &mut Rt) {
         use crate::timer::TimeoutValue;
 
-        let RunLoop { cc_retained_messages, .. } = match &mut self.inner {
+        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -597,7 +597,7 @@ impl Cluster {
         for item in rt.retain_timer.expired(None).collect::<Vec<Arc<Retain>>>() {
             assert!(item.is_deleted() == false);
 
-            cc_retained_messages.remove(&item.topic_name);
+            cc_retained_topics.remove(&item.topic_name);
 
             match rt.retain_topics.remove(&item.topic_name) {
                 Some(_) => (),
@@ -633,7 +633,7 @@ impl Cluster {
     fn handle_set_retain_topic(&mut self, req: Request, rt: &mut Rt) {
         use crate::timer::TimeoutValue;
 
-        let RunLoop { cc_retained_messages, .. } = match &mut self.inner {
+        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -653,7 +653,7 @@ impl Cluster {
         };
 
         // set this retain message as the latest one.
-        cc_retained_messages.set(&publish.topic_name, publish.clone());
+        cc_retained_topics.set(&publish.topic_name, publish.clone());
 
         // book keeping for message expiry.
         match publish
@@ -670,7 +670,7 @@ impl Cluster {
     fn handle_reset_retain_topic(&mut self, req: Request, rt: &mut Rt) {
         use crate::timer::TimeoutValue;
 
-        let RunLoop { cc_retained_messages, .. } = match &mut self.inner {
+        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -685,7 +685,7 @@ impl Cluster {
             None => (),
         };
 
-        cc_retained_messages.remove(&topic_name);
+        cc_retained_topics.remove(&topic_name);
     }
 
     // Errors - IPCFail,
@@ -766,7 +766,7 @@ impl Cluster {
             flusher,
             active_shards: shards,
             topic_filters: run_loop.cc_topic_filters,
-            retained_messages: run_loop.cc_retained_messages,
+            retained_messages: run_loop.cc_retained_topics,
             retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
             retain_topics: mem::replace(&mut rt.retain_topics, BTreeMap::default()),
             stats: run_loop.stats,
