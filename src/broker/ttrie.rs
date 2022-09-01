@@ -240,7 +240,6 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'b>,
     {
-        let is_wilder = key.is_begin_wild_card();
         let in_levels = key.iter_topic_path();
 
         let root = {
@@ -250,7 +249,8 @@ impl RetainedTrie {
 
         self.stats.lookups.fetch_add(1, SeqCst);
 
-        let (vals, _) = root.match_topic_filter(in_levels, is_wilder);
+        let mut vals = vec![];
+        let _ = root.match_topic_filter(in_levels, &mut vals);
         if !vals.is_empty() {
             self.stats.hits.fetch_add(1, SeqCst);
         }
@@ -365,11 +365,10 @@ impl<V> Node<V> {
         }
     }
 
-    fn subtree_values(&self, is_wilder: bool) -> Vec<V>
+    fn subtree_values(&self, is_wilder: bool, acc: &mut Vec<V>)
     where
         V: Clone,
     {
-        let mut acc = Vec::default();
         match self {
             Node::Root { children } if is_wilder => {
                 // MQTT Spec. 4.7: The Server MUST NOT match Topic Filters starting
@@ -381,24 +380,22 @@ impl<V> Node<V> {
                 for child in children.iter() {
                     let b = child.as_name().as_bytes().first();
                     if !matches!(b, Some(36) /*'$'*/) {
-                        acc.extend(child.subtree_values(false).into_iter());
+                        child.subtree_values(false, acc);
                     }
                 }
             }
             Node::Root { children } => {
                 for child in children.iter() {
-                    acc.extend(child.subtree_values(false).into_iter());
+                    child.subtree_values(false, acc);
                 }
             }
             Node::Child { children, values, .. } => {
                 acc.extend(values.to_vec().into_iter());
                 for child in children.iter() {
-                    acc.extend(child.subtree_values(false).into_iter());
+                    child.subtree_values(false, acc);
                 }
             }
         };
-
-        acc
     }
 
     fn pretty_print(&self, prefix: &str) {
@@ -445,22 +442,6 @@ impl<V> Node<V> {
         }
     }
 
-    // return (first,)
-    // `first` is whether this is the first time a topic is subscribed.
-    fn replace_value(&mut self, value: V) -> bool {
-        match self {
-            Node::Child { values, .. } if values.len() == 0 => {
-                *values = vec![value];
-                true
-            }
-            Node::Child { values, .. } => {
-                *values = vec![value];
-                false
-            }
-            _ => unreachable!(),
-        }
-    }
-
     // return (last, missing)
     // `last` is the last value for this topic.
     fn remove_value(&mut self, value: &V) -> (bool, bool)
@@ -480,9 +461,26 @@ impl<V> Node<V> {
         }
     }
 
+    // return (first,)
+    // `first` is whether this is the first time a topic is subscribed.
+    fn replace_value(&mut self, value: V) -> bool {
+        match self {
+            Node::Child { values, .. } if values.len() == 0 => {
+                *values = vec![value];
+                true
+            }
+            Node::Child { values, .. } => {
+                *values = vec![value];
+                false
+            }
+            _ => unreachable!(),
+        }
+    }
+
     // return (missing,)
     fn remove_topic(&mut self) -> bool {
         match self {
+            Node::Child { values, .. } if values.len() == 0 => true,
             Node::Child { values, .. } if values.len() == 1 => {
                 values.remove(0);
                 false
@@ -691,59 +689,63 @@ impl<V> Node<V> {
     }
 
     // return (optional list of publishes, multi_level)
-    fn match_topic_filter<'a, I>(
-        &self,
-        mut in_levels: I,
-        is_wilder: bool,
-    ) -> (Vec<V>, bool)
+    fn match_topic_filter<'a, I>(&self, mut in_levels: I, acc: &mut Vec<V>) -> bool
     where
         I: Iterator<Item = &'a str> + Clone,
         V: Clone,
     {
-        let in_level = match in_levels.next() {
+        let (in_level, is_plus) = match in_levels.next() {
             None => match self {
-                Node::Root { .. } => return (Vec::default(), false),
-                Node::Child { values, .. } => return (values.to_vec(), false),
+                Node::Root { .. } => return false,
+                Node::Child { values, .. } => {
+                    acc.extend(values.to_vec().into_iter());
+                    return false;
+                }
             },
             Some("#") => match self {
-                Node::Root { .. } => return (self.subtree_values(is_wilder), true),
-                Node::Child { .. } => return (self.subtree_values(false), true),
+                Node::Root { .. } => {
+                    self.subtree_values(true, acc);
+                    return true;
+                }
+                Node::Child { .. } => {
+                    self.subtree_values(false, acc);
+                    return true;
+                }
             },
-            Some(in_level) => in_level,
+            Some("+") => match self {
+                Node::Root { .. } => ("+", true),
+                Node::Child { .. } => ("+", true),
+            },
+            Some(in_level) => (in_level, false),
         };
 
         let children: Box<dyn Iterator<Item = &Arc<Node<V>>>> = match self {
+            Node::Root { children } if is_plus => {
+                Box::new(children.iter().filter(|child| {
+                    !matches!(child.as_name().as_bytes().first(), Some(36) /*'$'*/)
+                }))
+            }
             Node::Root { children } => Box::new(children.iter()),
             Node::Child { children, .. } => Box::new(children.iter()),
         };
 
-        let mut acc = vec![];
-        let mut multi_level = false;
         for child in children {
-            match match_level(in_level, child.as_name()) {
-                Match::All => acc.extend(child.subtree_values(false).into_iter()),
+            let name = child.as_name();
+            match match_level(in_level, name) {
                 Match::True => {
+                    // println!("Match::True {} {} {}", in_level, name, acc.len());
                     let in_levels = in_levels.clone();
-                    multi_level = match child.match_topic_filter(in_levels, is_wilder) {
-                        (values, true) => {
-                            acc.extend(values.into_iter());
-                            multi_level || true
-                        }
-                        (values, false) => {
-                            acc.extend(values.into_iter());
-                            multi_level || false
-                        }
-                    };
+                    child.match_topic_filter(in_levels, acc)
                 }
-                Match::False => (),
-            }
+                Match::False => {
+                    // println!("Match::False {:?} {:?}", in_level, name);
+                    false
+                }
+                Match::All => unreachable!(),
+            };
         }
 
-        if let (true, Node::Child { values, .. }) = (multi_level, self) {
-            acc.extend(values.to_vec().into_iter())
-        }
-
-        (acc, false)
+        false
     }
 }
 
