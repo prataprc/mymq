@@ -491,7 +491,7 @@ impl Session {
                 .insert(filter.topic_filter.clone(), subscription);
 
             let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
-            let rc = match cmp::max(server_qos, qos) {
+            let rc = match cmp::min(server_qos, qos) {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
                 v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
                 v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
@@ -504,21 +504,6 @@ impl Session {
             properties: None,
             return_codes,
         };
-
-        // When a new Non‑shared Subscription is made, the last retained message, if any,
-        // on each matching topic name is sent to the Client as directed by the
-        // Retain Handling Subscription Option. These messages are sent with the RETAIN
-        // flag set to 1. Which retained messages are sent is controlled by the Retain
-        // Handling Subscription Option. At the time of the Subscription:
-        //
-        // * If Retain Handling is set to 0 the Server MUST send the retained messages
-        //   matching the Topic Filter of the subscription to the Client [MQTT-3.3.1-9].
-        // * If Retain Handling is set to 1 then if the subscription did not already
-        //   exist, the Server MUST send all retained message matching the Topic Filter
-        //   of the subscription to the Client, and if the subscription did exist
-        //   the Server MUST NOT send the retained messages. [MQTT-3.3.1-10].
-        // * If Retain Handling is set to 2, the Server MUST NOT send the retained
-        //   messages [MQTT-3.3.1-11].
 
         Ok(vec![Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) }])
     }
