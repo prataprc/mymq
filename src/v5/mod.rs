@@ -155,6 +155,12 @@ pub struct Subscription {
     pub retain_forward_rule: RetainForwardRule,
 }
 
+impl AsRef<TopicFilter> for Subscription {
+    fn as_ref(&self) -> &TopicFilter {
+        &self.topic_filter
+    }
+}
+
 impl PartialEq for Subscription {
     fn eq(&self, other: &Self) -> bool {
         self.topic_filter == other.topic_filter

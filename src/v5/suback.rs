@@ -156,6 +156,14 @@ impl Packetize for SubAck {
 }
 
 impl SubAck {
+    pub fn from_sub(sub: &v5::Subscribe, codes: Vec<SubAckReasonCode>) {
+        SubAck {
+            packet_id: sub.packet_id,
+            properties: None,
+            return_codes: codes,
+        }
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {

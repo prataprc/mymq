@@ -3,7 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::{borrow::Borrow, thread};
 
 use crate::broker::Spinlock;
-use crate::{v5, v5::Subscription, IterTopicPath};
+use crate::{v5, v5::Subscription, IterTopicPath, TopicFilter};
+
+// NOTE: MQTT-Spec-v5. If the Retain Handling option is 0, any existing retained messages
+// matching the Topic Filter MUST be re-sent, but Applicaton Messages MUST NOT be
+// lost due to replacing the Subscription.
 
 /// Type implement a MVCC trie for managing topic-subscriptions.
 ///
@@ -44,7 +48,7 @@ impl SubscribedTrie {
 }
 
 impl SubscribedTrie {
-    pub fn subscribe<'b, K>(&self, key: &'b K, value: Subscription)
+    pub fn subscribe<'b, K>(&self, key: &'b K, val: Subscription) -> Option<Subscription>
     where
         K: IterTopicPath<'b>,
     {
@@ -60,7 +64,7 @@ impl SubscribedTrie {
             }
         };
 
-        self.do_subscribe(key, value)
+        self.do_subscribe(key, val)
     }
 
     pub fn unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
@@ -114,7 +118,7 @@ impl SubscribedTrie {
 }
 
 impl SubscribedTrie {
-    fn do_subscribe<'b, K>(&self, key: &'b K, value: Subscription)
+    fn do_subscribe<'b, K>(&self, key: &'b K, value: Subscription) -> Option<Subscription>
     where
         K: IterTopicPath<'b>,
     {
@@ -125,16 +129,18 @@ impl SubscribedTrie {
             Arc::clone(&inner.root)
         };
 
-        let (root, first, repeat) = root.sub(in_levels, value);
+        let (root, first, replace) = root.sub(in_levels, value);
         if first {
             self.stats.count.fetch_add(1, SeqCst);
         }
-        if repeat {
-            self.stats.repeat.fetch_add(1, SeqCst);
+        if replace.is_some() {
+            self.stats.replace.fetch_add(1, SeqCst);
         }
 
         let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
+
+        replace
     }
 
     fn do_unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
@@ -420,24 +426,36 @@ impl<V> Node<V> {
 }
 
 impl<V> Node<V> {
-    // return (first, repeat)
+    // return (first, replace)
     // `first` is whether this is the first time a topic is subscribed.
-    fn insert_value(&mut self, value: V) -> (bool, bool)
+    fn insert_value(&mut self, value: V) -> (bool, Option<V>)
     where
-        V: Ord,
+        V: Ord + AsRef<TopicFilter>,
     {
+        let topic_filter: &TopicFilter = value.as_ref();
         match self {
+            // TODO: this match arm is redundant, fold it with Err(off) further down.
             Node::Child { values, .. } if values.len() == 0 => {
                 values.push(value);
-                (true, false)
+                (true, None)
             }
-            Node::Child { values, .. } => match values.binary_search(&value) {
-                Err(off) => {
-                    values.insert(off, value);
-                    (false, false)
+            Node::Child { values, .. } => {
+                // MQTT-spec-v5: If a Server receives a SUBSCRIBE packet containing a
+                // Topic Filter that is identical to a Non-shared Subscription's Topic
+                // Filter for the current Session, then it MUST replace that existing
+                // Subscription with a new Subscription.
+                match values.binary_search_by_key(topic_filter, |v| v.as_ref()) {
+                    Ok(off) => {
+                        values.push(value);
+                        let replace = Some(values.swap_remove(off));
+                        (false, replace)
+                    }
+                    Err(off) => {
+                        values.insert(off, value);
+                        (false, None)
+                    }
                 }
-                Ok(_off) => (false, true),
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -492,11 +510,11 @@ impl<V> Node<V> {
 }
 
 impl<V> Node<V> {
-    // return (root, first, repeat)
-    fn sub<'a, K>(&self, mut in_levels: K, value: V) -> (Node<V>, bool, bool)
+    // return (root, first, replace)
+    fn sub<'a, K>(&self, mut in_levels: K, value: V) -> (Node<V>, bool, Option<V>)
     where
         K: Iterator<Item = &'a str>,
-        V: Clone + Ord,
+        V: Clone + Ord + AsRef<TopicFilter>,
     {
         let mut cow_node = self.cow_clone();
 
@@ -516,13 +534,13 @@ impl<V> Node<V> {
                         (child.sub(in_levels, value), off)
                     }
                 };
-                let ((child, first, repeat), off) = r;
+                let ((child, first, replace), off) = r;
                 children.insert(off, Arc::new(child));
-                (cow_node, first, repeat)
+                (cow_node, first, replace)
             }
             None => {
-                let (first, repeat) = cow_node.insert_value(value);
-                (cow_node, first, repeat)
+                let (first, replace) = cow_node.insert_value(value);
+                (cow_node, first, replace)
             }
         }
     }
@@ -781,7 +799,7 @@ pub struct Stats {
     // number of topics in the trie.
     pub count: Arc<AtomicUsize>,
     // number repeated inserts of same topic.
-    pub repeat: Arc<AtomicUsize>,
+    pub replace: Arc<AtomicUsize>,
     // number of missing topics removed.
     pub missing: Arc<AtomicUsize>,
     // total number of matches

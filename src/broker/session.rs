@@ -2,17 +2,17 @@ use log::{debug, error, trace};
 
 use std::{cmp, collections::BTreeMap, fmt, mem, net, result};
 
-use crate::broker::{Config, SubscribedTrie};
+use crate::broker::{Config, RouteIO, SubscribedTrie};
 use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus, Shard};
 
 use crate::{v5, ClientID, PacketID, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type Messages = Vec<Message>;
-type Packets = Vec<v5::Packet>;
 type QueuePkt = QueueStatus<v5::Packet>;
 type QueueMsg = QueueStatus<Message>;
 type OutSeqnos = Vec<OutSeqno>;
+type HandleArgs = (&mut Shard, &mut RouteIO, v5::Packet);
 
 /// Type implement the session for every connected client.
 ///
@@ -31,6 +31,20 @@ pub struct Session {
 
     pub state: SessionState,
     pub stats: Stats,
+}
+
+impl Default for Session {
+    fn default() -> Session {
+        Session {
+            client_id: ClientID::default(),
+            raddr: "0.0.0.0:0".parse().unwrap(),
+            shard_id: u32::default(),
+            prefix: String::default(),
+            config: Config::default(),
+            state: SessionState::None,
+            stats: Stats::default(),
+        }
+    }
 }
 
 pub struct SessionArgsActive {
@@ -53,20 +67,6 @@ pub struct SessionArgsReplica {
 #[derive(Clone, Default)]
 pub struct Stats {
     n_pings: usize,
-}
-
-impl Default for Session {
-    fn default() -> Session {
-        Session {
-            client_id: ClientID::default(),
-            raddr: "0.0.0.0:0".parse().unwrap(),
-            shard_id: u32::default(),
-            prefix: String::default(),
-            config: Config::default(),
-            state: SessionState::None,
-            stats: Stats::default(),
-        }
-    }
 }
 
 // initial = None
@@ -298,7 +298,7 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
-    pub fn route_packets(&mut self, shard: &mut Shard) -> Result<(QueuePkt, OutSeqnos)> {
+    pub fn route_packets(&mut self, shard: &mut Shard) -> Result<RouteIO> {
         let (session_rx, keep_alive) = match &mut self.state {
             SessionState::Active { session_rx, keep_alive, .. } => {
                 (session_rx, keep_alive)
@@ -309,27 +309,31 @@ impl Session {
         let mut down_status = session_rx.try_recvs(&self.prefix);
         mem::drop(session_rx);
 
-        match down_status.take_values() {
+        let mut route_io = RouteIO::default();
+
+        route_io.disconnected = match down_status.take_values() {
             pkts if pkts.len() == 0 => {
                 keep_alive.check_expired()?;
-                Ok((down_status, OutSeqnos::default()))
+                down_status.is_disconnected();
             }
             pkts => {
                 keep_alive.live();
 
-                let (status, out_seqnos) = self.handle_packets(shard, pkts)?;
+                let status = self.handle_packets(shard, route_io, pkts)?;
 
                 if let QueueStatus::Disconnected(_) = down_status {
                     error!("{} downstream-rx disconnect", self.prefix);
-                    Ok((QueueStatus::Disconnected(Vec::new()), out_seqnos))
+                    true
                 } else if let QueueStatus::Disconnected(_) = status {
                     error!("{} downstream-tx disconnect, or a slow client", self.prefix);
-                    Ok((QueueStatus::Disconnected(Vec::new()), out_seqnos))
+                    true
                 } else {
-                    Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
+                    false
                 }
             }
         }
+
+        Ok(route_io)
     }
 
     // handle incoming packet, return Message::ClientAck, if any.
@@ -338,83 +342,55 @@ impl Session {
     fn handle_packets(
         &mut self,
         shard: &mut Shard,
-        pkts: Packets,
-    ) -> Result<(QueuePkt, OutSeqnos)> {
-        let mut acks = Vec::default();
-        let mut out_seqnos = Vec::default();
+        route_io: &mut RouteIO,
+        pkts: Vec<v5::Packet>,
+    ) -> Result<()> {
         // NOTE: packets after DISCONNECT shall be ignored.
         for pkt in pkts.into_iter() {
-            match pkt {
-                v5::Packet::PingReq => {
-                    self.stats.n_pings += 1;
-                    trace!("{} received PingReq", self.prefix);
-                    acks.push(Message::new_ping_resp());
+            match &pkt {
+                v5::Packet::PingReq => self.rx_pingreq((shard, route_io, pkt))?,
+                v5::Packet::Subscribe(_) => self.rx_subscribe((shard, route_io, pkt))?,
+                v5::Packet::UnSubscribe(_) => {
+                    self.rx_unsubscribe((shard, route_io, pkt))?;
                 }
-
-                v5::Packet::Publish(publ) => {
-                    let has_subscrs = self.rx_publish(shard, &publ)?;
-                    match (has_subscrs, publ.qos) {
-                        (_, v5::QoS::AtMostOnce) => (),
-                        (false, _) => {
-                            let puback = v5::Pub::new_pub_ack(publ.packet_id.unwrap());
-                            acks.push(Message::new_pub_ack(puback))
-                        }
-                        (true, v5::QoS::AtLeastOnce) => (),
-                        (true, v5::QoS::ExactlyOnce) => (),
-                    }
-                }
-
-                v5::Packet::PubAck(_puback) => {
-                    // TODO: cleanup qos12_unacks
-                    out_seqnos.push(0);
-                    todo!();
-                }
-                v5::Packet::PubRec(_puback) => todo!(),
-                v5::Packet::PubRel(_puback) => todo!(),
-                v5::Packet::PubComp(_puback) => todo!(),
-
-                v5::Packet::Subscribe(sub) => {
-                    acks.extend(self.rx_subscribe(shard, sub)?.into_iter());
-                }
-
-                v5::Packet::UnSubscribe(_unsub) => todo!(),
-
-                v5::Packet::Disconnect(disconn) => {
-                    let code = {
-                        let code = self.rx_disconnect(shard, &disconn)?;
-                        Some(ReasonCode::try_from(code as u8).unwrap())
-                    };
-                    // TODO handle disconnect with will message
-                    err_disconnect(code)?;
-                }
-
-                v5::Packet::Auth(_auth) => todo!(),
-
-                // CONNECT, CONNACK, SUBACK, UNSUBACK, PINGRESP all lead to errors.
+                v5::Packet::Publish(_) => self.rx_publish((shard, route_io, pkt))?,
+                v5::Packet::PubAck(_) => self.rx_puback((shard, route_io, pkt))?,
+                v5::Packet::PubRec(_) => self.rx_pubrec((shard, route_io, pkt))?,
+                v5::Packet::PubRel(_) => self.rx_pubrel((shard, route_io, pkt))?,
+                v5::Packet::PubComp(_) => self.rx_pubcomp((shard, route_io, pkt))?,
+                v5::Packet::Disconnect(_) => self.rx_disconnect((shard, route_io, pkt))?,
+                v5::Packet::Auth(_) => self.rx_auth((shard, route_io, pkt))?,
+                // Errors
                 v5::Packet::Connect(_) => err_dup_connect(&self.prefix)?,
-                pkt @ v5::Packet::ConnAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                pkt @ v5::Packet::SubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                pkt @ v5::Packet::UnsubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                pkt @ v5::Packet::PingResp => err_invalid_pkt(&self.prefix, &pkt)?,
-            };
+                v5::Packet::ConnAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
+                v5::Packet::SubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
+                v5::Packet::UnsubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
+                v5::Packet::PingResp => err_invalid_pkt(&self.prefix, &pkt)?,
+            }
         }
 
-        match &mut self.state {
-            SessionState::Active { out_acks, .. } => out_acks.extend(acks.into_iter()),
-            ss => unreachable!("{:?}", ss),
-        };
-
-        Ok((QueueStatus::Ok(Vec::new()), out_seqnos))
+        Ok(())
     }
 
-    // return `true` if there where subscribers.
-    fn rx_publish(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<bool> {
-        if publish.qos > v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap() {
+    fn rx_pingreq(&mut self, shard: &mut Shard, route_io: &mut RouteIO) -> Result<()> {
+        self.stats.n_pings += 1;
+        trace!("{} received PingReq", self.prefix);
+        route_io.oug_msgs.push(Message::new_ping_resp());
+    }
+
+    fn rx_publish(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let publish = match pkt {
+            v5::Packet::Publish(publish) => publish,
+            _ => unreachable!(),
+        };
+
+        let server_qos = v5::QoS:try_from(self.config.mqtt_maximum_qos).unwrap();
+        if publish.qos > server_qos {
             err_unsup_qos(&self.prefix, publish.qos)?
         }
 
         if self.state.is_duplicate(&publish) {
-            return Ok(false);
+            return Ok(());
         }
 
         self.book_retain(shard, &publish)?;
@@ -423,7 +399,6 @@ impl Session {
         let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.state.publish_topic_name(&publish)?;
         let subscrs = shard.match_subscribers(&topic_name);
-        let has_subscrs = subscrs.len() > 0;
 
         let ack_needed = match publish.packet_id {
             Some(packet_id) => {
@@ -457,19 +432,70 @@ impl Session {
             shard.route_to_client(subscr.shard_id, msg);
         }
 
-        Ok(has_subscrs)
+        match (subscrs.len(), publish.qos) {
+            (_, v5::QoS::AtMostOnce) => (),
+            (0, _) => {
+                let puback = v5::Pub::new_pub_ack(publish.packet_id.unwrap());
+                route_io.oug_msgs.push(Message::new_pub_ack(puback));
+            }
+            (_, v5::QoS::AtLeastOnce) => (),
+            (_, v5::QoS::ExactlyOnce) => (),
+        }
+
+        Ok(())
     }
 
-    // return suback and retained-messages if any.
-    fn rx_subscribe(&mut self, shard: &Shard, sub: v5::Subscribe) -> Result<Messages> {
+    fn rx_puback(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _puback = match pkt {
+            v5::Packet::PubAck(puback) => puback,
+            _ => unreachable!(),
+        };
+
+        todo!()
+    }
+
+    fn rx_pubrec(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubrec = match pkt {
+            v5::Packet::PubRec(pubrec) => pubrec,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_pubrel(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubrel = match pkt {
+            v5::Packet::PubRel(pubrel) => pubrel,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_pubcomp(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubcomp = match pkt {
+            v5::Packet::PubComp(pubcomp) => pubcomp,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_subscribe(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
         let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
+
+        let sub = match pkt {
+            v5::Packet::Subscribe(sub) => sub,
+            _ => unreachable!(),
+        };
+
         let subscription_id: Option<u32> = match &sub.properties {
             Some(props) => props.subscription_id.clone().map(|x| *x),
             None => None,
         };
 
         let mut return_codes = Vec::with_capacity(sub.filters.len());
-        let mut msgs = Vec::default();
+        let mut retain_msgs = Vec::default();
 
         for filter in sub.filters.iter() {
             let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
@@ -489,34 +515,24 @@ impl Session {
                 .as_topic_filters()
                 .subscribe(&filter.topic_filter, subscription.clone());
 
-            let is_replace = self
+            let is_new_subscribe = self
                 .state
                 .as_mut_subscriptions()
                 .insert(filter.topic_filter.clone(), subscription.clone())
-                .is_some();
+                .is_none();
 
-            let _rpubls = match rfr {
+            let publs = match rfr {
                 v5::RetainForwardRule::OnEverySubscribe => {
                     shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
                 }
-                v5::RetainForwardRule::OnNewSubscribe if !is_replace => {
+                v5::RetainForwardRule::OnNewSubscribe if is_new_subscribe => {
                     shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
                 }
                 v5::RetainForwardRule::OnNewSubscribe => Vec::default(),
                 v5::RetainForwardRule::Never => Vec::default(),
             };
-            //let rmsgs: Vec<Message> = rpubls
-            //    .into_iter()
-            //    .map(|p| {
-            //        p.retain = true;
-            //        p.qos = cmp::min(p.qos, subscription.qos),
-            //        if matches!(p.qos, v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce) {
-            //            p.packet_id = self.incr_packet_id();
-            //        }
-            //        Message: v5::Packet::Publish(p)
-            //    })
-            //    .collect();
-            //msgs.extend(rmsgs.into_iter());
+            publs.msgs.iter_mut().for_each(|p| p.retain = true);
+            retain_msgs.expand(publs.into_iter());
 
             let rc = match subscription.qos {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
@@ -526,22 +542,31 @@ impl Session {
             return_codes.push(rc)
         }
 
-        let sub_ack = v5::SubAck {
-            packet_id: sub.packet_id,
-            properties: None,
-            return_codes,
-        };
-        msgs.insert(0, Message::ClientAck { packet: v5::Packet::SubAck(sub_ack) });
 
-        Ok(msgs)
+        let sub_ack = v5::SubAck::from_sub(&sub, return_codes);
+        retain_msgs.insert(0, Message::new_suback(sub_ack));
+
+        route_io.oug_msgs.extend(retain_msgs.into_iter());
+
+        Ok(())
     }
 
-    fn rx_disconnect(
-        &mut self,
-        _shard: &mut Shard,
-        disconn: &v5::Disconnect,
-    ) -> Result<v5::DisconnReasonCode> {
+    fn rx_unsubscribe(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _unsub = match pkt {
+            v5::Packet::UnSubscribe(unsub) => unsub,
+            _ => unreachable!(),
+        };
+
+        todo!()
+    }
+
+    fn rx_disconnect(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
         use v5::client::DisconnReasonCode::*;
+
+        let disconn = match pkt {
+            v5::Packet::Disconnect(disconn) => disconn,
+            _ => unreachable!(),
+        };
 
         let code = match v5::client::DisconnReasonCode::try_from(disconn.code as u8)? {
             NormalDisconnect => v5::DisconnReasonCode::NormalDisconnect,
@@ -570,7 +595,19 @@ impl Session {
             }
         }
 
-        Ok(code)
+        let code = Some(ReasonCode::try_from(code as u8).unwrap())
+
+        // TODO handle disconnect with will message
+        err_disconnect(code)?;
+    }
+
+    fn rx_auth(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let auth = match pkt {
+            v5::Packet::Auth(auth) => auth,
+            _ => unreachable!(),
+        };
+
+        todo!()
     }
 
     fn book_retain(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
@@ -1008,17 +1045,8 @@ impl SessionState {
             ss => unreachable!("{:?}", ss),
         };
 
-        let ignore_dup = config.mqtt_ignore_duplicate;
         match publish.qos {
             v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce if publish.duplicate => {
-                if ignore_dup {
-                    trace!("{} publish:{} duplicate publish recvd", prefix, publish);
-                    false
-                } else {
-                    true
-                }
-            }
             v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
                 let packet_id = publish.packet_id.unwrap();
                 matches!(inp_qos12.binary_search(&packet_id), Ok(_))

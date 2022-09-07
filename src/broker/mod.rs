@@ -74,6 +74,13 @@ impl<T> QueueStatus<T> {
         assert!(old_values.len() == 0);
         val
     }
+
+    pub fn is_disconnected(&self) -> bool {
+        match self {
+            QueueStatus:Disconnected(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Trait to be implemented by nodes that can host [Cluster] and one or more [Shard].
@@ -94,8 +101,10 @@ pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
 }
 
-pub struct RouteIO {
-    pub pkts_in: QueueStatus<v5::Packet>,
+#[derive(Default)]
+pub enum RouteIO {
+    pub disconnected: bool,
+    pub oug_msgs: Vec<Message>,
 }
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`

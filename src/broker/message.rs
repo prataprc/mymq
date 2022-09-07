@@ -105,6 +105,8 @@ pub enum Message {
     /// UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
     /// PINGRESP- happens for every PINGREQ is handled by this session.
     ClientAck { packet: v5::Packet },
+    /// Retain publish messages.
+    Retain { packet: v5::Packet },
     /// PUBLISH Packets Message::Routed converted to Message::Packet before sending
     /// it downstream.
     Packet {
@@ -202,13 +204,21 @@ impl Message {
     }
 
     /// Create a new Message::ClientAck value.
-    pub fn new_pub_ack(puback: v5::Pub) -> Message {
-        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
+    pub fn new_ping_resp() -> Message {
+        Message::ClientAck { packet: v5::Packet::PingResp }
+    }
+
+    pub fn new_retain_publish(publ: v5::Publish) -> Message {
+        Message::Retain { packet: v5::Packet::Publish(publ) }
+    }
+
+    pub fn new_suback(suback: v5::SubAck) -> Message {
+        Message::ClientAck { packet: v5::Packet::SubAck(suback) }
     }
 
     /// Create a new Message::ClientAck value.
-    pub fn new_ping_resp() -> Message {
-        Message::ClientAck { packet: v5::Packet::PingResp }
+    pub fn new_pub_ack(puback: v5::Pub) -> Message {
+        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
     }
 
     /// Create a new Message::Routed value.
