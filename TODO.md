@@ -23,3 +23,4 @@
   first subscription or an Application Message with that Topic Name. The Server MAY also
   use a security component to authorize particular actions on the topic resource for a
   given Client.
+* Create a Cheatsheet for MQTT protocol.
