@@ -363,6 +363,7 @@ pub enum ErrorKind {
     NoError,
     // general error
     InvalidInput,
+    Fatal,
     // mqtt errors
     MalformedPacket,
     ProtocolError,
@@ -395,6 +396,7 @@ impl fmt::Display for ErrorKind {
             NoError => write!(f, "NoError"),
             // general error
             InvalidInput => write!(f, "InvalidInput"),
+            Fatal => write!(f, "Fatal"),
             // mqtt errors
             ProtocolError => write!(f, "ProtocolError"),
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),

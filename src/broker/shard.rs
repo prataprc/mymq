@@ -101,16 +101,16 @@ pub struct ActiveLoop {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     /// incoming PUBLISH (QoS-1 & 2) packet.
     inp_seqno: InpSeqno,
-    /// Back log of messages that needs to be flushed to other local-shards.
-    /// Message::Routed and Message::LocalAck shall first land here, the order of the
-    /// messages are preserved for each shard.
-    shard_back_log: BTreeMap<u32, Vec<Message>>,
     /// Index of all incoming PUBLISH QoS-1 and QoS-2messages. Happens along with
     /// `shard_back_log`. QoS-0 is not indexed here.
     ///
     /// All entries whose InpSeqno is < min(Timestamp::last_acked) in ack_timestamps
     /// shall be deleted from this index and ACK shall be sent to publishing client.
     index: BTreeMap<InpSeqno, Message>,
+    /// Back log of messages that needs to be flushed to other local-shards.
+    /// Message::Routed and Message::LocalAck shall first land here, the order of the
+    /// messages are preserved for each shard.
+    shard_back_log: BTreeMap<u32, Vec<Message>>,
     /// For N shards in this node, there can be upto be N-1 Timestamp-entries
     /// in this list.
     ///
@@ -623,6 +623,8 @@ impl Shard {
     // return exit status
     fn active_iteration(&mut self, args: &mut ActiveContext) -> Result<bool> {
         let route_io = args.session.route_packets(self)?;
+        // TODO: shard.book_index(publish.qos, msg);
+        // TODO: shard.route_to_client(subscr.shard_id, msg);
         self.send_to_shards();
 
         // Other shards might have routed messages to a session owned by this shard,
@@ -651,7 +653,7 @@ impl Shard {
         // cleanup sessions
         self.clean_failed_sessions();
 
-        Ok(false)
+        Ok(route_id.disconnected)
     }
 
     fn replica_loop(mut self, rx: ThreadRx) -> Self {
@@ -1061,42 +1063,6 @@ impl Shard {
 
 // sub-functions that work for handling incoming publish
 impl Shard {
-    // a. Only one message is sent to a client, even with multiple matches.
-    // b. subscr_qos is maximum of all matching-subscribption.
-    // c. final qos is min(server_qos, publish_qos, subscr_qos)
-    // d. retain if any of the matching-subscription is calling for retain_as_published.
-    // e. no_local is all of the matching-subscription is calling for no_local.
-    pub fn match_subscribers(
-        &self,
-        topic_name: &TopicName,
-    ) -> BTreeMap<ClientID, (v5::Subscription, Vec<u32>)> {
-        // group subscriptions based on client-id.
-        let mut subscrs: BTreeMap<ClientID, (v5::Subscription, Vec<u32>)> =
-            BTreeMap::default();
-
-        for subscr in self.as_topic_filters().match_topic_name(topic_name).into_iter() {
-            match subscrs.get_mut(&subscr.client_id) {
-                Some((oldval, ids)) => {
-                    oldval.no_local &= subscr.no_local;
-                    oldval.retain_as_published |= subscr.retain_as_published;
-                    oldval.qos = cmp::max(oldval.qos, subscr.qos);
-                    if let Some(id) = subscr.subscription_id {
-                        ids.push(id)
-                    }
-                }
-                None => {
-                    let ids = match subscr.subscription_id {
-                        Some(id) => vec![id],
-                        None => vec![],
-                    };
-                    subscrs.insert(subscr.client_id.clone(), (subscr, ids));
-                }
-            }
-        }
-
-        subscrs
-    }
-
     pub fn incr_inp_seqno(&mut self) -> u64 {
         match &mut self.inner {
             Inner::MainActive(ActiveLoop { inp_seqno, .. }) => {
@@ -1108,7 +1074,7 @@ impl Shard {
         }
     }
 
-    pub fn book_index(&mut self, qos: v5::QoS, msg: Message) {
+    pub fn book_index(&mut self, msg: &Message) -> bool {
         let ActiveLoop { index, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),

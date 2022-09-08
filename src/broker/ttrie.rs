@@ -67,7 +67,11 @@ impl SubscribedTrie {
         self.do_subscribe(key, val)
     }
 
-    pub fn unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
+    pub fn unsubscribe<'a, K>(
+        &self,
+        key: &'a K,
+        value: &Subscription,
+    ) -> Option<Subscription>
     where
         K: IterTopicPath<'a>,
     {
@@ -83,7 +87,7 @@ impl SubscribedTrie {
             }
         };
 
-        self.do_unsubscribe(key, value)
+        self.do_unsubscr(key, value)
     }
 
     pub fn match_topic_name<'b, K>(&self, key: &'b K) -> Vec<Subscription>
@@ -143,7 +147,7 @@ impl SubscribedTrie {
         replace
     }
 
-    fn do_unsubscribe<'a, K>(&self, key: &'a K, value: &Subscription)
+    fn do_unsubscr<'a, K>(&self, key: &'a K, val: &Subscription) -> Option<Subscription>
     where
         K: IterTopicPath<'a>,
     {
@@ -154,18 +158,20 @@ impl SubscribedTrie {
             Arc::clone(&inner.root)
         };
 
-        let (root, last, missing) = root.unsub(in_levels, value);
+        let (root, last, rmvalue) = root.unsub(in_levels, val);
         let root = root.unwrap();
 
         if last {
             self.stats.count.fetch_add(1, SeqCst);
         }
-        if missing {
+        if rmvalue.is_none() {
             self.stats.missing.fetch_add(1, SeqCst);
         }
 
         let inner = Inner { root: Arc::new(root) };
         *self.inner.write() = Arc::new(inner);
+
+        rmvalue
     }
 }
 
@@ -460,22 +466,25 @@ impl<V> Node<V> {
         }
     }
 
-    // return (last, missing)
+    // return (last, removed-value)
     // `last` is the last value for this topic.
-    fn remove_value(&mut self, value: &V) -> (bool, bool)
+    fn remove_value(&mut self, value: &V) -> (bool, Option<V>)
     where
-        V: Ord,
+        V: Ord + AsRef<TopicFilter>,
     {
+        let topic_filter: &TopicFilter = value.as_ref();
         match self {
-            Node::Child { values, .. } if values.len() == 0 => (false, true),
-            Node::Child { values, .. } => match values.binary_search(value) {
-                Ok(off) => {
-                    values.remove(off);
-                    (values.len() == 1, false)
+            Node::Child { values, .. } if values.len() == 0 => (false, None),
+            Node::Child { values, .. } => {
+                match values.binary_search_by_key(topic_filter, |v| v.as_ref()) {
+                    Ok(off) => {
+                        let rmvalue = values.remove(off);
+                        (values.len() == 0, Some(rmvalue))
+                    }
+                    Err(_off) => (false, None),
                 }
-                Err(_off) => (values.len() == 1, true),
-            },
-            Node::Root { .. } => unreachable!(),
+            }
+            Node::Root { .. } => (false, None),
         }
     }
 
@@ -545,11 +554,11 @@ impl<V> Node<V> {
         }
     }
 
-    // return (root, last, missing)
-    fn unsub<'a, K>(&self, mut key: K, val: &V) -> (Option<Node<V>>, bool, bool)
+    // return (root, last, removed-value)
+    fn unsub<'a, K>(&self, mut key: K, value: &V) -> (Option<Node<V>>, bool, Option<V>)
     where
         K: Iterator<Item = &'a str>,
-        V: Clone + Ord,
+        V: Clone + Ord + AsRef<TopicFilter>,
     {
         let mut cow_node = self.cow_clone();
 
@@ -560,21 +569,22 @@ impl<V> Node<V> {
                     Node::Child { children, .. } => (false, children),
                 };
                 match children.binary_search_by_key(&ky, |n| n.as_name()) {
-                    Ok(off) => match children.remove(off).unsub(key, val) {
-                        (Some(child), last, miss) => {
+                    Ok(off) => match children.remove(off).unsub(key, value) {
+                        (Some(child), last, rmval) => {
                             children.insert(off, Arc::new(child));
-                            (Some(cow_node), last, miss)
+                            (Some(cow_node), last, rmval)
                         }
-                        (None, last, miss) if is_root => (Some(cow_node), last, miss),
-                        (None, last, miss) if cow_node.is_empty() => (None, last, miss),
-                        (None, last, miss) => (Some(cow_node), last, miss),
+                        (None, last, rmval) if is_root => (Some(cow_node), last, rmval),
+                        (None, last, rmval) if cow_node.is_empty() => (None, last, rmval),
+                        (None, last, rmval) => (Some(cow_node), last, rmval),
                     },
-                    Err(_off) => (Some(cow_node), false, true),
+                    Err(_off) => (Some(cow_node), false, None),
                 }
             }
-            None => match cow_node.remove_value(val) {
-                (last, miss) if cow_node.is_empty() => (None, last, miss),
-                (last, miss) => (Some(cow_node), last, miss),
+            None => match cow_node.remove_value(value) {
+                (last, rmval) if is_root => (Some(cow_node), last, rmval),
+                (last, rmval) if cow_node.is_empty() => (None, last, rmval),
+                (last, rmval) => (Some(cow_node), last, rmval),
             },
         }
     }

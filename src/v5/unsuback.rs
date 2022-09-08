@@ -15,7 +15,7 @@ const PP: &'static str = "Packet::UnsubAck";
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
 pub enum UnsubAckReasonCode {
-    QoS0 = 0x0,
+    Success = 0x0,
     NoSubscriptionExisted = 0x11,
     UnspecifiedError = 0x80,
     ImplementationError = 0x83,
@@ -29,7 +29,7 @@ impl TryFrom<u8> for UnsubAckReasonCode {
 
     fn try_from(value: u8) -> Result<Self> {
         let v = match value {
-            0x00 => UnsubAckReasonCode::QoS0,
+            0x00 => UnsubAckReasonCode::Success,
             0x11 => UnsubAckReasonCode::NoSubscriptionExisted,
             0x80 => UnsubAckReasonCode::UnspecifiedError,
             0x83 => UnsubAckReasonCode::ImplementationError,
@@ -146,6 +146,14 @@ impl Packetize for UnsubAck {
 }
 
 impl UnsubAck {
+    pub fn from_unsub(unsub: &UnSubscribe, codes: Vec<UnsubAckReasonCode>) -> UnsubAck {
+        UnsubAck {
+            packet_id: unsub.packet_id,
+            return_codes: codes,
+            properties: None,
+        }
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {

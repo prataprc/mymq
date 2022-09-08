@@ -107,8 +107,7 @@ pub enum Message {
     ClientAck { packet: v5::Packet },
     /// Retain publish messages.
     Retain { packet: v5::Packet },
-    /// PUBLISH Packets Message::Routed converted to Message::Packet before sending
-    /// it downstream.
+    /// PUBLISH Packets converted from Message::Routed, before sending them downstream.
     Packet {
         out_seqno: OutSeqno,
         packet_id: Option<PacketID>,
@@ -116,8 +115,10 @@ pub enum Message {
     },
 
     // shard boundary
-    /// Incoming PUBLISH packets indexed by shards in Shard::RunLoop::index
-    Index {
+    /// Incoming PUBLISH packets, QoS > 0 indexed by shards in Shard::RunLoop::index
+    ShardIndex {
+        qos: v5::QoS,
+        inp_seqno: InpSeqno,
         src_client_id: ClientID,
         packet_id: PacketID,
     },
@@ -144,7 +145,7 @@ impl fmt::Debug for Message {
         match self {
             Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
             Message::Packet { .. } => write!(f, "Message::Packet"),
-            Message::Index { .. } => write!(f, "Message::Index"),
+            Message::ShardIndex { .. } => write!(f, "Message::ShardIndex"),
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
         }
@@ -174,7 +175,7 @@ impl<'a> Arbitrary<'a> for Message {
                 packet_id: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
             },
-            2 => Message::Index {
+            2 => Message::ShardIndex {
                 src_client_id: uns.arbitrary()?,
                 packet_id: uns.arbitrary()?,
             },
@@ -198,35 +199,49 @@ impl<'a> Arbitrary<'a> for Message {
 }
 
 impl Message {
-    /// Create a new Message::ClientAck value.
+    /// Message::ClientAck value.
     pub fn new_conn_ack(connack: v5::ConnAck) -> Message {
         Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
     }
 
-    /// Create a new Message::ClientAck value.
+    /// Message::ClientAck value.
     pub fn new_ping_resp() -> Message {
         Message::ClientAck { packet: v5::Packet::PingResp }
     }
 
+    /// Message::Retain
     pub fn new_retain_publish(publ: v5::Publish) -> Message {
         Message::Retain { packet: v5::Packet::Publish(publ) }
     }
 
+    /// Message::ClientAck
     pub fn new_suback(suback: v5::SubAck) -> Message {
         Message::ClientAck { packet: v5::Packet::SubAck(suback) }
     }
 
-    /// Create a new Message::ClientAck value.
-    pub fn new_pub_ack(puback: v5::Pub) -> Message {
-        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
+    /// Message::ClientAck
+    pub fn new_unsuback(unsuback: v5::SubAck) -> Message {
+        Message::ClientAck { packet: v5::Packet::UnsubAck(unsuback) }
     }
 
-    /// Create a new Message::Routed value.
+    /// Message::ShardIndex
+    pub fn new_index(id: &ClientID, seq: InpSeqno, pbl: &v5::Publish) -> Option<Message> {
+        let packet_id = pbl.packet_id?;
+        let msg = Message::ShardIndex {
+            qos: pbl.qos,
+            inp_seqno: seq,
+            src_client_id: id.clone(),
+            packet_id,
+        };
+        Some(msg)
+    }
+
+    /// Message::Routed value.
     pub fn new_routed(
         sess: &Session,
         seqno: InpSeqno,
         publish: v5::Publish,
-        client_id: ClientID,
+        target_id: ClientID,
         ack_needed: bool,
     ) -> Message {
         Message::Routed {
@@ -239,8 +254,9 @@ impl Message {
         }
     }
 
-    pub fn new_index(src_client_id: &ClientID, packet_id: PacketID) -> Message {
-        Message::Index { src_client_id: src_client_id.clone(), packet_id }
+    /// Message::ClientAck value.
+    pub fn new_pub_ack(puback: v5::Pub) -> Message {
+        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
     }
 
     pub fn into_packet(self, pktid: Option<PacketID>) -> Message {

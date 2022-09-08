@@ -93,7 +93,7 @@ impl Session {
                 topic_aliases: BTreeMap::default(),
                 subscriptions: BTreeMap::default(),
 
-                inp_qos12: Vec::default(),
+                inc_qos12: Vec::default(),
 
                 out_acks: Vec::default(),
                 qos0_back_log: Vec::default(),
@@ -114,7 +114,7 @@ impl Session {
                 topic_aliases: BTreeMap::default(),
                 subscriptions: BTreeMap::default(),
 
-                inp_qos12: Vec::default(),
+                inc_qos12: Vec::default(),
 
                 out_acks: Vec::default(),
                 qos0_back_log: Vec::default(),
@@ -141,7 +141,7 @@ impl Session {
                 topic_aliases,
                 subscriptions,
 
-                inp_qos12: Vec::default(),
+                inc_qos12: Vec::default(),
 
                 out_acks: Vec::default(),
                 qos0_back_log: Vec::default(),
@@ -162,7 +162,7 @@ impl Session {
                 topic_aliases: BTreeMap::default(),
                 subscriptions: BTreeMap::default(),
 
-                inp_qos12: Vec::default(),
+                inc_qos12: Vec::default(),
 
                 out_acks: Vec::default(),
                 qos0_back_log: Vec::default(),
@@ -298,6 +298,14 @@ impl Session {
 
 // handle incoming packets.
 impl Session {
+    // Returned RouteIO has following message types:
+    // * Message::ClientAck carrying PingResp.
+    // * Message::ClientAck carrying SubAck.
+    // * Message::ClientAck carrying UnsubAck.
+    // * Message::ClientAck carrying PubAck for QoS1.
+    // * Message::Retain carrying retained publish to be sent back to this session.
+    // * Message::ShardIndex to be indexed by shard for QoS > 0, managing ack.
+    // * Message::Routed publish msg one of each subscribing client.
     pub fn route_packets(&mut self, shard: &mut Shard) -> Result<RouteIO> {
         let (session_rx, keep_alive) = match &mut self.state {
             SessionState::Active { session_rx, keep_alive, .. } => {
@@ -347,138 +355,34 @@ impl Session {
     ) -> Result<()> {
         // NOTE: packets after DISCONNECT shall be ignored.
         for pkt in pkts.into_iter() {
+            let args = (shard, route_io, pkt);
             match &pkt {
-                v5::Packet::PingReq => self.rx_pingreq((shard, route_io, pkt))?,
-                v5::Packet::Subscribe(_) => self.rx_subscribe((shard, route_io, pkt))?,
-                v5::Packet::UnSubscribe(_) => {
-                    self.rx_unsubscribe((shard, route_io, pkt))?;
-                }
-                v5::Packet::Publish(_) => self.rx_publish((shard, route_io, pkt))?,
-                v5::Packet::PubAck(_) => self.rx_puback((shard, route_io, pkt))?,
-                v5::Packet::PubRec(_) => self.rx_pubrec((shard, route_io, pkt))?,
-                v5::Packet::PubRel(_) => self.rx_pubrel((shard, route_io, pkt))?,
-                v5::Packet::PubComp(_) => self.rx_pubcomp((shard, route_io, pkt))?,
-                v5::Packet::Disconnect(_) => self.rx_disconnect((shard, route_io, pkt))?,
-                v5::Packet::Auth(_) => self.rx_auth((shard, route_io, pkt))?,
+                v5::Packet::PingReq => self.rx_pingreq(args)?,
+                v5::Packet::Subscribe(_) => self.rx_subscribe(args)?,
+                v5::Packet::UnSubscribe(_) => self.rx_unsubscribe(args)?,
+                v5::Packet::Publish(_) => self.rx_publish(args)?,
+                v5::Packet::PubAck(_) => self.rx_puback(args)?,
+                v5::Packet::PubRec(_) => self.rx_pubrec(args)?,
+                v5::Packet::PubRel(_) => self.rx_pubrel(args)?,
+                v5::Packet::PubComp(_) => self.rx_pubcomp(args)?,
+                v5::Packet::Disconnect(_) => self.rx_disconnect(args)?,
+                v5::Packet::Auth(_) => self.rx_auth(args)?,
                 // Errors
                 v5::Packet::Connect(_) => err_dup_connect(&self.prefix)?,
-                v5::Packet::ConnAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                v5::Packet::SubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                v5::Packet::UnsubAck(_) => err_invalid_pkt(&self.prefix, &pkt)?,
-                v5::Packet::PingResp => err_invalid_pkt(&self.prefix, &pkt)?,
+                v5::Packet::ConnAck(_) => err_invalid_pkt(&self.prefix, &args.2)?,
+                v5::Packet::SubAck(_) => err_invalid_pkt(&self.prefix, &args.2)?,
+                v5::Packet::UnsubAck(_) => err_invalid_pkt(&self.prefix, &args.2)?,
+                v5::Packet::PingResp => err_invalid_pkt(&self.prefix, &args.2)?,
             }
         }
 
         Ok(())
     }
 
-    fn rx_pingreq(&mut self, shard: &mut Shard, route_io: &mut RouteIO) -> Result<()> {
+    fn rx_pingreq(&mut self, _: &mut Shard, route_io: &mut RouteIO) -> Result<()> {
         self.stats.n_pings += 1;
         trace!("{} received PingReq", self.prefix);
         route_io.oug_msgs.push(Message::new_ping_resp());
-    }
-
-    fn rx_publish(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let publish = match pkt {
-            v5::Packet::Publish(publish) => publish,
-            _ => unreachable!(),
-        };
-
-        let server_qos = v5::QoS:try_from(self.config.mqtt_maximum_qos).unwrap();
-        if publish.qos > server_qos {
-            err_unsup_qos(&self.prefix, publish.qos)?
-        }
-
-        if self.state.is_duplicate(&publish) {
-            return Ok(());
-        }
-
-        self.book_retain(shard, &publish)?;
-        self.state.book_qos(&publish)?;
-
-        let inp_seqno = shard.incr_inp_seqno();
-        let topic_name = self.state.publish_topic_name(&publish)?;
-        let subscrs = shard.match_subscribers(&topic_name);
-
-        let ack_needed = match publish.packet_id {
-            Some(packet_id) => {
-                let msg = Message::new_index(&self.client_id, packet_id);
-                shard.book_index(publish.qos, msg);
-                true
-            }
-            None => false,
-        };
-
-        for (id, (subscr, ids)) in subscrs.into_iter() {
-            if subscr.no_local && id == self.client_id {
-                trace!(
-                    "{} topic:{:?} client_id:{:?} skipping as no_local",
-                    self.prefix,
-                    topic_name,
-                    id
-                );
-                continue;
-            }
-
-            let publish = {
-                let mut publish = publish.clone();
-                let retain = subscr.retain_as_published && publish.retain;
-                let qos = subscr.route_qos(&publish, self.config.mqtt_maximum_qos);
-                publish.set_fixed_header(retain, qos, false);
-                publish.set_subscription_ids(ids);
-                publish
-            };
-            let msg = Message::new_routed(self, inp_seqno, publish, id, ack_needed);
-            shard.route_to_client(subscr.shard_id, msg);
-        }
-
-        match (subscrs.len(), publish.qos) {
-            (_, v5::QoS::AtMostOnce) => (),
-            (0, _) => {
-                let puback = v5::Pub::new_pub_ack(publish.packet_id.unwrap());
-                route_io.oug_msgs.push(Message::new_pub_ack(puback));
-            }
-            (_, v5::QoS::AtLeastOnce) => (),
-            (_, v5::QoS::ExactlyOnce) => (),
-        }
-
-        Ok(())
-    }
-
-    fn rx_puback(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let _puback = match pkt {
-            v5::Packet::PubAck(puback) => puback,
-            _ => unreachable!(),
-        };
-
-        todo!()
-    }
-
-    fn rx_pubrec(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let _pubrec = match pkt {
-            v5::Packet::PubRec(pubrec) => pubrec,
-            _ => unreachable!(),
-        };
-
-        todo!();
-    }
-
-    fn rx_pubrel(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let _pubrel = match pkt {
-            v5::Packet::PubRel(pubrel) => pubrel,
-            _ => unreachable!(),
-        };
-
-        todo!();
-    }
-
-    fn rx_pubcomp(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let _pubcomp = match pkt {
-            v5::Packet::PubComp(pubcomp) => pubcomp,
-            _ => unreachable!(),
-        };
-
-        todo!();
     }
 
     fn rx_subscribe(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
@@ -531,8 +435,10 @@ impl Session {
                 v5::RetainForwardRule::OnNewSubscribe => Vec::default(),
                 v5::RetainForwardRule::Never => Vec::default(),
             };
-            publs.msgs.iter_mut().for_each(|p| p.retain = true);
-            retain_msgs.expand(publs.into_iter());
+            retain_msgs.expand(publs.into_iter().map(|mut p| {
+                p.retain = true;
+                Message::new_retain_publish(p)
+            }));
 
             let rc = match subscription.qos {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
@@ -552,15 +458,144 @@ impl Session {
     }
 
     fn rx_unsubscribe(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
-        let _unsub = match pkt {
+        let unsub = match pkt {
             v5::Packet::UnSubscribe(unsub) => unsub,
+            _ => unreachable!(),
+        };
+
+        let mut return_codes = Vec::with_capacity(sub.filters.len());
+
+        for topic_filter in unsub.filters.iter() {
+            let subscription = v5::Subscription::from_filter(topic_filter);
+
+            let res1 = shard
+                .as_topic_filters()
+                .unsubscribe(&topic_filter, &subscription);
+
+            let res2 = self.state.as_mut_subscriptions().remove(&topic_filter);
+            let code = match (&res1, &res2) {
+                (Some(_), Some(_)) => UnsubAckReasonCode::Success,
+                (None, None) => UnsubAckReasonCode::NoSubscriptionExisted,
+                (Some(_), None) => {
+                    let msg = format!("{} filter in trie, not in session", topic_filter);
+                    err_inconsistent_subscription(&self.prefix, &msg)?;
+                    UnsubAckReasonCode::UnspecifiedError
+                }
+                (None, Some(_)) => {
+                    let msg = format!("{} filter in session, not in trie", topic_filter);
+                    err_inconsistent_subscription(&self.prefix, &msg)?;
+                    UnsubAckReasonCode::UnspecifiedError
+                }
+            };
+
+            return_codes.push(code);
+        }
+
+        let unsub_ack = v5::UnsubAck::from_sub(&unsub, return_codes);
+        route_io.oug_msgs.push(Message::new_unsuback(unsub_ack));
+
+        Ok(())
+    }
+
+    fn rx_publish(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let server_qos = v5::QoS:try_from(self.config.mqtt_maximum_qos).unwrap();
+
+        let publish = match pkt {
+            v5::Packet::Publish(publish) => publish,
+            _ => unreachable!(),
+        };
+
+        if publish.qos > server_qos {
+            err_unsup_qos(&self.prefix, publish.qos)?
+        }
+
+        if self.is_duplicate(&publish) {
+            return Ok(());
+        }
+        self.book_qos(&publish)?;
+
+        self.book_retain(shard, &publish)?;
+
+        let inp_seqno = shard.incr_inp_seqno();
+        let topic_name = self.publish_topic_name(&publish)?;
+
+        let msg = Message::new_index(&self.client_id, inp_seqno, &publish);
+        msg.map(|msg| route_io.oug_msgs.push(msg));
+
+        for (target_id, (subscr, ids)) in shard.match_subscribers(&topic_name) {
+            if subscr.no_local && target_id == self.client_id {
+                trace!(
+                    "{} topic:{:?} client_id:{:?} skipping as no_local",
+                    self.prefix,
+                    topic_name,
+                    target_id
+                );
+                continue;
+            }
+
+            let publish = {
+                let mut publish = publish.clone();
+                let retain = subscr.retain_as_published && publish.retain;
+                let qos = subscr.route_qos(&publish, self.config.mqtt_maximum_qos);
+                publish.set_fixed_header(retain, qos, false);
+                publish.set_subscription_ids(ids);
+                publish
+            };
+
+            route_io.oug_msgs.push(
+                Message::new_routed(self, inp_seqno, publish, target_id, imsg.is_some())
+            );
+        }
+
+        match (publish.qos, subscrs.len()) {
+            (v5::QoS::AtMostOnce, _) => (),
+            (_, 0) => {
+                let puback = v5::Pub::new_pub_ack(publish.packet_id.unwrap());
+                route_io.oug_msgs.push(Message::new_pub_ack(puback));
+            }
+            (v5::QoS::AtLeastOnce, _) | (v5::QoS::ExactlyOnce, _) => (),
+        }
+
+        Ok(())
+    }
+
+    fn rx_puback(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _puback = match pkt {
+            v5::Packet::PubAck(puback) => puback,
             _ => unreachable!(),
         };
 
         todo!()
     }
 
-    fn rx_disconnect(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+    fn rx_pubrec(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubrec = match pkt {
+            v5::Packet::PubRec(pubrec) => pubrec,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_pubrel(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubrel = match pkt {
+            v5::Packet::PubRel(pubrel) => pubrel,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_pubcomp(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+        let _pubcomp = match pkt {
+            v5::Packet::PubComp(pubcomp) => pubcomp,
+            _ => unreachable!(),
+        };
+
+        todo!();
+    }
+
+    fn rx_disconnect(&mut self, (_shard, route_io, pkt): HandleArgs) -> Result<()> {
         use v5::client::DisconnReasonCode::*;
 
         let disconn = match pkt {
@@ -601,7 +636,7 @@ impl Session {
         err_disconnect(code)?;
     }
 
-    fn rx_auth(&mut self, (shard, route_io, pkt): HandleArgs) -> Result<()> {
+    fn rx_auth(&mut self, (_shard, route_io, pkt): HandleArgs) -> Result<()> {
         let auth = match pkt {
             v5::Packet::Auth(auth) => auth,
             _ => unreachable!(),
@@ -610,16 +645,94 @@ impl Session {
         todo!()
     }
 
-    fn book_retain(&mut self, shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
+    fn book_retain(&mut self, _shard: &mut Shard, publish: &v5::Publish) -> Result<()> {
         if publish.retain && !self.config.mqtt_retain_available {
             err_unsup_retain(&self.prefix)?;
         } else if publish.retain {
-            if publish.payload.as_ref().map(|x| x.len() == 0).unwrap_or(true) {
-                shard.as_cluster().reset_retain_topic(publish.topic_name.clone())?;
-            } else {
-                shard.as_cluster().set_retain_topic(publish.clone())?;
+            todo!()
+        }
+
+        Ok(())
+    }
+
+    fn publish_topic_name(&mut self, publ: &v5::Publish) -> Result<TopicName> {
+        let (prefix, config, topic_aliases) = match &mut self.state {
+            SessionState::Active { prefix, config, topic_aliases, .. } => {
+                (prefix, config, topic_aliases)
+            }
+            ss => unreachable!("{:?}", ss),
+        };
+
+        let (topic_name, topic_alias) = (publ.as_topic_name(), publ.topic_alias());
+        let server_alias_max = config.mqtt_topic_alias_max();
+
+        let topic_name = match topic_alias {
+            Some(_alias) if server_alias_max.is_none() => {
+                err_unsup_topal(prefix)?;
+                TopicName::default()
+            }
+            Some(alias) if alias > server_alias_max.unwrap() => {
+                err_exceed_topal(prefix, alias, server_alias_max)?;
+                TopicName::default()
+            }
+            Some(alias) if topic_name.len() > 0 => {
+                if let Some(old) = topic_aliases.insert(alias, topic_name.clone()) {
+                    dbg_replace_topal(prefix, alias, &old, topic_name);
+                }
+                topic_name.clone()
+            }
+            Some(alias) => match topic_aliases.get(&alias) {
+                Some(topic_name) => topic_name.clone(),
+                None => {
+                    err_missing_alias(prefix, alias)?;
+                    TopicName::default()
+                }
+            },
+            None if topic_name.len() == 0 => {
+                err_missing_topal(prefix)?;
+                TopicName::default()
+            }
+            None => topic_name.clone(),
+        };
+
+        Ok(topic_name)
+    }
+
+    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
+        let (config, prefix, inc_qos12) = match &self.state {
+            SessionState::Active { config, prefix, inc_qos12, .. } => {
+                (config, prefix, inc_qos12)
+            }
+            ss => unreachable!("{:?}", ss),
+        };
+
+        match publish.qos {
+            v5::QoS::AtMostOnce => false,
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                matches!(inc_qos12.binary_search(&packet_id), Ok(_))
             }
         }
+    }
+
+    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
+        let (prefix, inc_qos12) = match &mut self.state {
+            SessionState::Active { prefix, inc_qos12, .. } => (prefix, inc_qos12),
+            ss => unreachable!("{:?}", ss),
+        };
+
+        match publish.qos {
+            v5::QoS::AtMostOnce => (),
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                if let Err(off) = inc_qos12.binary_search(&packet_id) {
+                    inc_qos12.insert(off, packet_id);
+                } else {
+                    // is_duplicate() would have filtered this path.
+                    unreachable!()
+                }
+            }
+        };
 
         Ok(())
     }
@@ -715,7 +828,7 @@ pub enum SessionState {
         subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
 
         // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
-        inp_qos12: Vec<PacketID>,
+        inc_qos12: Vec<PacketID>,
 
         // Message::ClientAck that needs to be sent to remote client.
         out_acks: Vec<Message>,
@@ -947,9 +1060,9 @@ impl SessionState {
     }
 
     fn out_acks_flush(&mut self) -> QueueStatus<Message> {
-        let (prefix, miot_tx, inp_qos12, out_acks) = match self {
-            SessionState::Active { prefix, miot_tx, inp_qos12, out_acks, .. } => {
-                (prefix, miot_tx, inp_qos12, out_acks)
+        let (prefix, miot_tx, inc_qos12, out_acks) = match self {
+            SessionState::Active { prefix, miot_tx, inc_qos12, out_acks, .. } => {
+                (prefix, miot_tx, inc_qos12, out_acks)
             }
             ss => unreachable!("{:?}", ss),
         };
@@ -958,9 +1071,9 @@ impl SessionState {
             match ack {
                 Message::ClientAck { packet } => match packet {
                     v5::Packet::Publish(publish) => match publish.packet_id {
-                        Some(packet_id) => match inp_qos12.binary_search(&packet_id) {
+                        Some(packet_id) => match inc_qos12.binary_search(&packet_id) {
                             Ok(off) => {
-                                inp_qos12.remove(off);
+                                inc_qos12.remove(off);
                             }
                             Err(_off) => (), // TODO: warning messages
                         },
@@ -990,89 +1103,6 @@ impl SessionState {
         for out_seqno in out_seqnos.into_iter() {
             back_log.remove(&out_seqno);
         }
-    }
-}
-
-impl SessionState {
-    fn publish_topic_name(&mut self, publ: &v5::Publish) -> Result<TopicName> {
-        let (prefix, config, topic_aliases) = match self {
-            SessionState::Active { prefix, config, topic_aliases, .. } => {
-                (prefix, config, topic_aliases)
-            }
-            ss => unreachable!("{:?}", ss),
-        };
-
-        let (topic_name, topic_alias) = (publ.as_topic_name(), publ.topic_alias());
-        let server_alias_max = config.mqtt_topic_alias_max();
-
-        let topic_name = match topic_alias {
-            Some(_alias) if server_alias_max.is_none() => {
-                err_unsup_topal(prefix)?;
-                TopicName::default()
-            }
-            Some(alias) if alias > server_alias_max.unwrap() => {
-                err_exceed_topal(prefix, alias, server_alias_max)?;
-                TopicName::default()
-            }
-            Some(alias) if topic_name.len() > 0 => {
-                if let Some(old) = topic_aliases.insert(alias, topic_name.clone()) {
-                    dbg_replace_topal(prefix, alias, &old, topic_name);
-                }
-                topic_name.clone()
-            }
-            Some(alias) => match topic_aliases.get(&alias) {
-                Some(topic_name) => topic_name.clone(),
-                None => {
-                    err_missing_alias(prefix, alias)?;
-                    TopicName::default()
-                }
-            },
-            None if topic_name.len() == 0 => {
-                err_missing_topal(prefix)?;
-                TopicName::default()
-            }
-            None => topic_name.clone(),
-        };
-
-        Ok(topic_name)
-    }
-
-    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
-        let (config, prefix, inp_qos12) = match self {
-            SessionState::Active { config, prefix, inp_qos12, .. } => {
-                (config, prefix, inp_qos12)
-            }
-            ss => unreachable!("{:?}", ss),
-        };
-
-        match publish.qos {
-            v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                matches!(inp_qos12.binary_search(&packet_id), Ok(_))
-            }
-        }
-    }
-
-    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
-        let (prefix, inp_qos12) = match self {
-            SessionState::Active { prefix, inp_qos12, .. } => (prefix, inp_qos12),
-            ss => unreachable!("{:?}", ss),
-        };
-
-        match publish.qos {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                if let Err(off) = inp_qos12.binary_search(&packet_id) {
-                    inp_qos12.insert(off, packet_id);
-                } else {
-                    error!("{} duplicated qos1-booking", prefix);
-                }
-            }
-        };
-
-        Ok(())
     }
 }
 
@@ -1117,6 +1147,41 @@ fn flush_to_miot(prefix: &str, miot_tx: &mut PktTx, mut msgs: Vec<Message>) -> Q
 
     status.map(msgs)
 }
+
+type PubMatches = BTreeMap<ClientID, (v5::Subscription, Vec<u32>)>;
+
+// a. Only one message is sent to a client, even with multiple matches.
+// b. subscr_qos is maximum of all matching-subscribption.
+// c. final qos is min(server_qos, publish_qos, subscr_qos)
+// d. retain if _any_ of the matching-subscription is calling for retain_as_published.
+// e. no_local if _all_ of the matching-subscription is calling for no_local.
+pub fn match_subscribers(shard: &Shard, topic_name: &TopicName) -> PubMatches {
+    // group subscriptions based on client-id.
+    let mut subscrs: PubMatches = BTreeMap::default();
+
+    for subscr in shard.as_topic_filters().match_topic_name(topic_name).into_iter() {
+        match subscrs.get_mut(&subscr.client_id) {
+            Some((oldval, ids)) => {
+                oldval.no_local &= subscr.no_local;
+                oldval.retain_as_published |= subscr.retain_as_published;
+                oldval.qos = cmp::max(oldval.qos, subscr.qos);
+                if let Some(id) = subscr.subscription_id {
+                    ids.push(id)
+                }
+            }
+            None => {
+                let ids = match subscr.subscription_id {
+                    Some(id) => vec![id],
+                    None => vec![],
+                };
+                subscrs.insert(subscr.client_id.clone(), (subscr, ids));
+            }
+        }
+    }
+
+    subscrs
+}
+
 
 fn err_disconnect(code: Option<ReasonCode>) -> Result<()> {
     Err(Error {
@@ -1175,6 +1240,15 @@ fn err_missing_topal(prefix: &str) -> Result<()> {
         code: TopicNameInvalid,
         "{} alias is ZERO and topic_name is empty",
         prefix
+    )
+}
+
+fn err_inconsistent_subscription(prefix: &str, msg: &str) -> Result<()> {
+    err!(
+        Fatal,
+        code: UnspecifiedError,
+        "{} {}",
+        prefix, msg
     )
 }
 

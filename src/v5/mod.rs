@@ -211,6 +211,12 @@ impl<'a> Arbitrary<'a> for Subscription {
 }
 
 impl Subscription {
+    pub fn from_filter(filter: &TopicFilter) -> Subscription {
+        let mut subscr = Subscription::default();
+        subscr.topic_filter = filter.clone();
+        subscr
+    }
+
     pub fn route_qos(&self, publish: &Publish, mqtt_maximum_qos: u8) -> QoS {
         let server_qos = QoS::try_from(mqtt_maximum_qos).unwrap();
         cmp::min(cmp::min(server_qos, publish.qos), self.qos)
