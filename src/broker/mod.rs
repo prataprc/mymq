@@ -25,9 +25,15 @@ type InpSeqno = u64;
 /// Timestamp list managed at incoming publish, used to track lossless publish to all
 /// subscribed-clients.
 pub struct Timestamp {
-    shard_id: u32,
+    dst_shard_id: u32,
     last_routed: InpSeqno,
     last_acked: InpSeqno,
+}
+
+impl Timestamp {
+    fn new(dst_shard_id: u32, last_routed: InpSeqno) -> Timestamp {
+        Timestamp { dst_shard_id, last_routed, last_acked: 0 }
+    }
 }
 
 /// Return type from methods used to send or receive messages/packets/commands.

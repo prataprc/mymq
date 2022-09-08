@@ -94,11 +94,11 @@ impl Session {
                 subscriptions: BTreeMap::default(),
 
                 inc_qos12: Vec::default(),
+                oug_qos12: BTreeMap::default(),
 
-                out_acks: Vec::default(),
-                qos0_back_log: Vec::default(),
+                oug_acks: Vec::default(),
+                oug_back_log: Vec::default(),
 
-                qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
                 cs_out_seqno: 1,
                 cs_back_log: BTreeMap::default(),
@@ -115,11 +115,11 @@ impl Session {
                 subscriptions: BTreeMap::default(),
 
                 inc_qos12: Vec::default(),
+                oug_qos12: BTreeMap::default(),
 
-                out_acks: Vec::default(),
-                qos0_back_log: Vec::default(),
+                oug_acks: Vec::default(),
+                oug_back_log: Vec::default(),
 
-                qos12_unacks: BTreeMap::default(),
                 next_packet_id: 1,
                 cs_out_seqno,
                 cs_back_log,
@@ -143,10 +143,10 @@ impl Session {
 
                 inc_qos12: Vec::default(),
 
-                out_acks: Vec::default(),
-                qos0_back_log: Vec::default(),
+                oug_acks: Vec::default(),
+                oug_back_log: Vec::default(),
 
-                qos12_unacks: BTreeMap::default(),
+                oug_qos12: BTreeMap::default(),
                 next_packet_id: 1,
                 cs_out_seqno,
                 cs_back_log,
@@ -164,10 +164,10 @@ impl Session {
 
                 inc_qos12: Vec::default(),
 
-                out_acks: Vec::default(),
-                qos0_back_log: Vec::default(),
+                oug_acks: Vec::default(),
+                oug_back_log: Vec::default(),
 
-                qos12_unacks: BTreeMap::default(),
+                oug_qos12: BTreeMap::default(),
                 next_packet_id: 1,
                 cs_out_seqno: 1,
                 cs_back_log: BTreeMap::default(),
@@ -520,6 +520,7 @@ impl Session {
         let topic_name = self.publish_topic_name(&publish)?;
 
         let msg = Message::new_index(&self.client_id, inp_seqno, &publish);
+        let ack_needed = msg.is_some();
         msg.map(|msg| route_io.oug_msgs.push(msg));
 
         for (target_id, (subscr, ids)) in shard.match_subscribers(&topic_name) {
@@ -543,7 +544,7 @@ impl Session {
             };
 
             route_io.oug_msgs.push(
-                Message::new_routed(self, inp_seqno, publish, target_id, imsg.is_some())
+                Message::new_routed(self, inp_seqno, publish, &subscr, ack_needed)
             );
         }
 
@@ -757,13 +758,13 @@ impl Session {
         self.state.out_qos(msgs)
     }
 
-    pub fn out_acks_flush(&mut self) -> QueueStatus<v5::Packet> {
-        let status = self.state.out_acks_flush();
+    pub fn oug_acks_flush(&mut self) -> QueueStatus<v5::Packet> {
+        let status = self.state.oug_acks_flush();
         status.map(vec![])
     }
 
-    pub fn out_acks_publish(&mut self, packet_id: PacketID) {
-        self.state.out_acks_publish(packet_id)
+    pub fn oug_acks_publish(&mut self, packet_id: PacketID) {
+        self.state.oug_acks_publish(packet_id)
     }
 
     pub fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
@@ -786,8 +787,13 @@ impl Session {
     }
 
     #[inline]
-    pub fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
-        self.state.as_mut_out_acks()
+    pub fn as_mut_oug_acks(&mut self) -> &mut Vec<Message> {
+        self.state.as_mut_oug_acks()
+    }
+
+    #[inline]
+    pub fn as_mut_oug_back_log(&mut self) -> &mut Vec<Message> {
+        self.state.as_mut_oug_back_log()
     }
 
     #[inline]
@@ -829,19 +835,19 @@ pub enum SessionState {
 
         // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
         inc_qos12: Vec<PacketID>,
-
         // Message::ClientAck that needs to be sent to remote client.
-        out_acks: Vec<Message>,
-        // outgoing QoS-0 PUBLISH messages.
-        qos0_back_log: Vec<Message>,
-
+        oug_acks: Vec<Message>,
+        // Message::Retain outgoing QoS-0/1/2 Retain-PUBLISH messages.
+        // Message::Packet outgoing QoS-0 PUBLISH messages.
+        oug_back_log: Vec<Message>,
         // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
-        // messages sent to subscribed clients. Entry is deleted from `qos12_unacks`
+        // messages sent to subscribed clients. Entry is deleted from `oug_qos12`
         // when ACK is received for PacketID.
         //
         // Note that length of this collection is only as high as the allowed limit of
         // concurrent PUBLISH specified by client.
-        qos12_unacks: BTreeMap<PacketID, Message>,
+        oug_qos12: BTreeMap<PacketID, Message>,
+
         // This value is incremented for every out-going PUBLISH(qos>0).
         // If index.len() > `receive_maximum`, don't increment this value.
         next_packet_id: PacketID,
@@ -851,7 +857,7 @@ pub enum SessionState {
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
-        /// `qos12_unacks` and after they go through the consensus loop.
+        /// `oug_qos12` and after they go through the consensus loop.
         cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     #[allow(dead_code)]
@@ -865,7 +871,7 @@ pub enum SessionState {
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
-        /// `qos12_unacks` and after they go through the consensus loop.
+        /// `oug_qos12` and after they go through the consensus loop.
         cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     #[allow(dead_code)]
@@ -886,7 +892,7 @@ pub enum SessionState {
         /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
         ///
         /// Entries from this index are deleted after they are removed from
-        /// `qos12_unacks` and after they go through the consensus loop.
+        /// `oug_qos12` and after they go through the consensus loop.
         cs_back_log: BTreeMap<OutSeqno, Message>,
     },
     None,
@@ -929,31 +935,31 @@ impl SessionState {
     }
 
     fn out_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-        let (prefix, config, miot_tx, qos0_back_log) = match self {
-            SessionState::Active { prefix, config, miot_tx, qos0_back_log, .. } => {
-                (prefix, config, miot_tx, qos0_back_log)
+        let (prefix, config, miot_tx, oug_back_log) = match self {
+            SessionState::Active { prefix, config, miot_tx, oug_back_log, .. } => {
+                (prefix, config, miot_tx, oug_back_log)
             }
             ss => unreachable!("{:?}", ss),
         };
 
-        let m = qos0_back_log.len();
+        let m = oug_back_log.len();
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
         let n = (config.mqtt_pkt_batch_size as usize) * 4;
         if m > n {
             // TODO: if back-pressure is increasing due to a slow receiving client,
             // we will have to take drastic steps, like, closing this connection.
-            error!("{} session.qos0_back_log {} pressure > {}", prefix, m, n);
+            error!("{} session.oug_back_log {} pressure > {}", prefix, m, n);
             return QueueStatus::Disconnected(Vec::new());
         }
 
         for msg in msgs.into_iter() {
             let msg = msg.into_packet(None);
-            qos0_back_log.push(msg)
+            oug_back_log.push(msg)
         }
 
-        let back_log = mem::replace(qos0_back_log, vec![]);
+        let back_log = mem::replace(oug_back_log, vec![]);
         let mut status = flush_to_miot(prefix, miot_tx, back_log);
-        let _empty = mem::replace(qos0_back_log, status.take_values());
+        let _empty = mem::replace(oug_back_log, status.take_values());
 
         status
     }
@@ -968,10 +974,10 @@ impl SessionState {
     }
 
     fn out_qos_active(&mut self, msgs: Vec<Message>) -> QueueMsg {
-        let (prefix, config, qos12_unacks, back_log) = match self {
+        let (prefix, config, oug_qos12, back_log) = match self {
             SessionState::Active {
-                prefix, config, qos12_unacks, cs_back_log, ..
-            } => (prefix, config, qos12_unacks, cs_back_log),
+                prefix, config, oug_qos12, cs_back_log, ..
+            } => (prefix, config, oug_qos12, cs_back_log),
             ss => unreachable!("{:?}", ss),
         };
         let mqtt_pkt_batch_size = config.mqtt_pkt_batch_size;
@@ -987,13 +993,13 @@ impl SessionState {
             return QueueStatus::Disconnected(Vec::new());
         }
 
-        if qos12_unacks.len() >= usize::from(mqtt_receive_maximum) {
+        if oug_qos12.len() >= usize::from(mqtt_receive_maximum) {
             return QueueStatus::Block(Vec::new());
         }
 
         mem::drop(prefix);
         mem::drop(config);
-        mem::drop(qos12_unacks);
+        mem::drop(oug_qos12);
         mem::drop(back_log);
 
         for msg in msgs.into_iter() {
@@ -1002,10 +1008,10 @@ impl SessionState {
             self.as_back_log().insert(msg.to_out_seqno(), msg);
         }
 
-        let (prefix, miot_tx, qos12_unacks, back_log) = match self {
+        let (prefix, miot_tx, oug_qos12, back_log) = match self {
             SessionState::Active {
-                prefix, miot_tx, qos12_unacks, cs_back_log, ..
-            } => (prefix, miot_tx, qos12_unacks, cs_back_log),
+                prefix, miot_tx, oug_qos12, cs_back_log, ..
+            } => (prefix, miot_tx, oug_qos12, cs_back_log),
             ss => unreachable!("{:?}", ss),
         };
 
@@ -1018,7 +1024,7 @@ impl SessionState {
             }
         }
         for msg in msgs.clone().into_iter() {
-            qos12_unacks.insert(msg.to_packet_id(), msg);
+            oug_qos12.insert(msg.to_packet_id(), msg);
         }
 
         let mut status = flush_to_miot(prefix, miot_tx, msgs);
@@ -1027,7 +1033,7 @@ impl SessionState {
         for msg in status.take_values().into_iter() {
             let packet_id = msg.to_packet_id();
             back_log.insert(msg.to_out_seqno(), msg);
-            qos12_unacks.remove(&packet_id);
+            oug_qos12.remove(&packet_id);
         }
 
         status
@@ -1049,25 +1055,25 @@ impl SessionState {
         QueueStatus::Ok(Vec::new())
     }
 
-    fn out_acks_publish(&mut self, packet_id: PacketID) {
+    fn oug_acks_publish(&mut self, packet_id: PacketID) {
         match self {
-            SessionState::Active { out_acks, .. } => {
-                out_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
+            SessionState::Active { oug_acks, .. } => {
+                oug_acks.push(Message::new_pub_ack(v5::Pub::new_pub_ack(packet_id)));
             }
             SessionState::Reconnect { .. } => (),
             ss => unreachable!("{:?}", ss),
         }
     }
 
-    fn out_acks_flush(&mut self) -> QueueStatus<Message> {
-        let (prefix, miot_tx, inc_qos12, out_acks) = match self {
-            SessionState::Active { prefix, miot_tx, inc_qos12, out_acks, .. } => {
-                (prefix, miot_tx, inc_qos12, out_acks)
+    fn oug_acks_flush(&mut self) -> QueueStatus<Message> {
+        let (prefix, miot_tx, inc_qos12, oug_acks) = match self {
+            SessionState::Active { prefix, miot_tx, inc_qos12, oug_acks, .. } => {
+                (prefix, miot_tx, inc_qos12, oug_acks)
             }
             ss => unreachable!("{:?}", ss),
         };
 
-        for ack in out_acks.iter() {
+        for ack in oug_acks.iter() {
             match ack {
                 Message::ClientAck { packet } => match packet {
                     v5::Packet::Publish(publish) => match publish.packet_id {
@@ -1086,10 +1092,10 @@ impl SessionState {
         }
 
         let mut status = {
-            let acks = mem::replace(out_acks, Vec::default());
+            let acks = mem::replace(oug_acks, Vec::default());
             flush_to_miot(prefix, miot_tx, acks)
         };
-        let _empty = mem::replace(out_acks, status.take_values());
+        let _empty = mem::replace(oug_acks, status.take_values());
         status
     }
 
@@ -1121,9 +1127,16 @@ impl SessionState {
         }
     }
 
-    fn as_mut_out_acks(&mut self) -> &mut Vec<Message> {
+    fn as_mut_oug_acks(&mut self) -> &mut Vec<Message> {
         match self {
-            SessionState::Active { out_acks, .. } => out_acks,
+            SessionState::Active { oug_acks, .. } => oug_acks,
+            ss => unreachable!("{:?}", ss),
+        }
+    }
+
+    fn as_mut_oug_back_log(&mut self) -> &mut Vec<Message> {
+        match self {
+            SessionState::Active { oug_back_log, .. } => oug_back_log,
             ss => unreachable!("{:?}", ss),
         }
     }

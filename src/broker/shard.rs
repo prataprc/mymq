@@ -520,7 +520,22 @@ impl Threadable for Shard {
 
     fn main_loop(self, rx: ThreadRx) -> Self {
         match &self.inner {
-            Inner::MainActive(_) => self.active_loop(rx),
+            Inner::MainActive(_) => {
+                // this a work around to wire up all the threads without using unsafe.
+                let mut msg_rx = match rx.recv().unwrap() {
+                    (Request::SetMiot(miot, msg_rx), Some(tx)) => {
+                        let active_loop = match &mut self.inner {
+                            Inner::MainActive(active_loop) => active_loop,
+                            inner => unreachable!("{} {:?}", self.prefix, inner),
+                        };
+                        active_loop.miot = miot;
+                        app_fatal!(&self, tx.send(Ok(Response::Ok)));
+                        msg_rx
+                    }
+                    _ => unreachable!(),
+                };
+                self.active_loop(rx, msg_rs);
+            }
             Inner::MainReplica(_) => self.replica_loop(rx),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
@@ -531,29 +546,14 @@ struct ActiveContext<'a> {
     msg_rx: MsgRx,
     inner: Inner,
     session: Session,
-    ack_out_seqnos: BTreeMap<ClientID, Vec<OutSeqno>>,
 }
 
 impl Shard {
-    fn active_loop(mut self, rx: ThreadRx) -> Self {
+    fn active_loop(mut self, rx: ThreadRx, msg_rx: MsgRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
 
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
-
-        // this a work around to wire up all the threads without using unsafe.
-        let mut msg_rx = match rx.recv().unwrap() {
-            (Request::SetMiot(miot, msg_rx), Some(tx)) => {
-                let active_loop = match &mut self.inner {
-                    Inner::MainActive(active_loop) => active_loop,
-                    inner => unreachable!("{} {:?}", self.prefix, inner),
-                };
-                active_loop.miot = miot;
-                app_fatal!(&self, tx.send(Ok(Response::Ok)));
-                msg_rx
-            }
-            _ => unreachable!(),
-        };
 
         let mut events = mio::Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -569,35 +569,37 @@ impl Shard {
                 _exit => (),
             };
 
-            let mut flush_queue: Vec<FailedSession> = Vec::default();
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
-            let mut consume_sessions = match &mut inner {
+            let mut args = ActiveContext { msg_rx, inner, session: Session::default() };
+
+            let mut flush_queue: Vec<FailedSession> = Vec::default();
+            let mut sessions = match &mut inner {
                 Inner::MainActive(ActiveLoop { sessions, .. }) => {
                     mem::replace(sessions, BTreeMap::default());
                 }
                 inner => unreachable!("{} {:?}", self.prefix, inner),
             };
 
-            let mut args = ActiveContext {
-                msg_rx,
-                inner,
-                session: Session::default(),
-                out_seqnos: BTreeMap::default(),
-            };
 
             let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
-            for (client_id, session) in consume_sessions.into_iter() {
+            for (client_id, session) in sessions.into_iter() {
                 args.session = session;
-                match self.active_iteration(&mut args) {
-                    Ok(true) => break,
-                    Ok(false) => (),
-                    Err(err) => todo!(),
+
+                let res = self.active_pre_cs(&mut args);
+
+                if let Ok(true) = &res {
+                    let val = FlushSession { client_id, err: err_disconnected().err() };
+                    flush_queues.push(val)
+                    continue
+                }
+                if let Err(err) = res {
+                    todo!()
                 }
                 sessions1.insert(client_id, args.session);
             }
+
             msg_rx = args.msg_rx;
             inner = args.inner;
-
             match &mut inner {
                 Inner::MainActive(ActiveLoop { sessions, .. }) => {
                     let _empty = mem::replace(sessions, sessions1);
@@ -621,12 +623,15 @@ impl Shard {
     }
 
     // return exit status
-    fn active_iteration(&mut self, args: &mut ActiveContext) -> Result<bool> {
-        let route_io = args.session.route_packets(self)?;
-        // TODO: shard.book_index(publish.qos, msg);
-        // TODO: shard.route_to_client(subscr.shard_id, msg);
-        self.send_to_shards();
+    fn active_pre_cs(&mut self, args: &mut ActiveContext) -> Result<bool> {
+        let mut route_io = args.session.route_packets(self)?;
+        self.book_incoming_messages(&mut args, &mut route_io);
 
+        self.send_to_shards();
+        Ok(route_io.disconnected)
+    }
+
+    fn active_cs(&mut self, args: &mut ActiveContext) {
         // Other shards might have routed messages to a session owned by this shard,
         // we will handle it here and push them down to the socket.
         let mut qos_acks = BTreeMap::<u32, InpSeqno>::default();
@@ -654,6 +659,68 @@ impl Shard {
         self.clean_failed_sessions();
 
         Ok(route_id.disconnected)
+    }
+
+    fn book_incoming_messages(&mut self, args: &mut ActiveContext, rio: &mut RouteIO) {
+        let ActiveLoop { index, shard_back_log, ack_tms, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let oug_msgs = mem::replace(&mut rio.oug_msgs, Vec::with_capacity(n));
+
+        for msg in oug_msgs.into_iter() {
+            match &msg {
+                Message::ClientAck { .. } => {
+                    args.session.as_mut_oug_acks().push(msg);
+                }
+                Message::Retain { .. } => {
+                    args.session.as_mut_oug_back_log().push(msg);
+                }
+                Message::ShardIndex { inp_seqno, qos, .. } => match qos {
+                    v5::QoS::AtMostOnce => (),
+                    v5::QoS::AtLeastOnce => index.insert(*inp_seqno, msg),
+                    v5::QoS::ExactlyOnce => todo!(),
+                },
+                Message::Routed { inp_seqno, dst_shard_id, .. } => {
+                    append_index!(shard_back_log, dst_shard_id, msg);
+
+                    match ack_tms.binary_search_by_key(dst_shard_id, |t| t.shard_id) {
+                        Ok(off) => ack_tms[off].last_routed = *inp_seqno,
+                        Err(off) => {
+                            let t = Timestamp::new(*dst_shard_id, *inp_seqno);
+                            ack_tms.insert(off, t);
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    // Flush outgoing messages, in `shard_back_log` from this shard to other shards.
+    fn send_to_shards(&mut self) {
+        let ActiveLoop { shard_back_log, shard_queues, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let back_log = mem::replace(shard_back_log, BTreeMap::default());
+        for (shard_id, msgs) in back_log.into_iter() {
+            let shard = shard_queues.get_mut(&shard_id).unwrap();
+
+            let mut status = shard.send_messages(msgs);
+            // re-index the remaining messages, may be the other shard is busy.
+            shard_back_log.insert(shard_id, status.take_values());
+
+            match status {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
+                QueueStatus::Disconnected(_) => error!(
+                    "{} shard_id:{} shard-msg-rx has closed",
+                    self.prefix, shard_id
+                ),
+            }
+        }
     }
 
     fn replica_loop(mut self, rx: ThreadRx) -> Self {
@@ -756,34 +823,6 @@ impl Shard {
 
 // Handle incoming messages
 impl Shard {
-    // Flush outgoing messages, in `shard_back_log` from this shard to other shards.
-    fn send_to_shards(&mut self) {
-        let ActiveLoop { shard_back_log, shard_queues, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        let back_log = mem::replace(shard_back_log, BTreeMap::default());
-        for (shard_id, msgs) in back_log.into_iter() {
-            let shard = shard_queues.get_mut(&shard_id).unwrap();
-
-            let mut status = shard.send_messages(msgs);
-            // re-index the remaining messages, may be the other shard is busy.
-            shard_back_log.insert(shard_id, status.take_values());
-
-            match status {
-                QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
-                QueueStatus::Disconnected(_) => {
-                    // TODO: should this be logged at error-level
-                    error!(
-                        "{} shard_id:{} shard-msg-rx has closed",
-                        self.prefix, shard_id
-                    );
-                }
-            }
-        }
-    }
-
     fn clean_failed_sessions(&mut self) {
         let mut flush_queue = {
             let ActiveLoop { flush_queue, .. } = match &mut self.inner {
@@ -1028,7 +1067,7 @@ impl Shard {
                 match index.remove(&seqno).unwrap() {
                     Message::Index { src_client_id, packet_id } => {
                         let session = sessions.get_mut(&src_client_id).unwrap();
-                        session.out_acks_publish(packet_id);
+                        session.oug_acks_publish(packet_id);
                     }
                     _ => unreachable!(),
                 }
@@ -1044,7 +1083,7 @@ impl Shard {
 
         let iter = sessions.iter_mut().filter(|(_, s)| s.is_active());
         for (client_id, session) in iter {
-            if let QueueStatus::Disconnected(_) = session.out_acks_flush() {
+            if let QueueStatus::Disconnected(_) = session.oug_acks_flush() {
                 let err = {
                     let err: Result<()> = err!(
                         SlowClient,
@@ -1071,55 +1110,6 @@ impl Shard {
                 seqno
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-
-    pub fn book_index(&mut self, msg: &Message) -> bool {
-        let ActiveLoop { index, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        match qos {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce => {
-                let inp_seqno = match &msg {
-                    Message::Routed { inp_seqno, .. } => *inp_seqno,
-                    _ => unreachable!(),
-                };
-                index.insert(inp_seqno, msg);
-            }
-            v5::QoS::ExactlyOnce => todo!(),
-        }
-    }
-
-    pub fn route_to_client(&mut self, target_shard_id: u32, msg: Message) {
-        let ActiveLoop { shard_back_log, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        let inp_seqno = match &msg {
-            Message::Routed { inp_seqno, .. } => *inp_seqno,
-            _ => unreachable!(),
-        };
-
-        append_index!(shard_back_log, target_shard_id, msg);
-        self.book_routed_timestamps(target_shard_id, inp_seqno);
-    }
-
-    fn book_routed_timestamps(&mut self, shard_id: u32, inp_seqno: InpSeqno) {
-        let ActiveLoop { ack_timestamps, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        match ack_timestamps.binary_search_by_key(&shard_id, |t| t.shard_id) {
-            Ok(off) => ack_timestamps[off].last_routed = inp_seqno,
-            Err(off) => {
-                let t = Timestamp { shard_id, last_routed: inp_seqno, last_acked: 0 };
-                ack_timestamps[off] = t;
-            }
         }
     }
 
@@ -1209,9 +1199,9 @@ impl Shard {
         {
             let packet = session.success_ack(&connect);
             let msgs = vec![Message::new_conn_ack(packet)];
-            session.as_mut_out_acks().extend(msgs.into_iter());
+            session.as_mut_oug_acks().extend(msgs.into_iter());
 
-            match session.out_acks_flush() {
+            match session.oug_acks_flush() {
                 QueueStatus::Ok(_) => {
                     info!("{} raddr:{} send CONNACK", self.prefix, raddr);
                 }
@@ -1581,4 +1571,8 @@ impl FailedSession {
 
 fn err_session_takeover(prefix: &str, raddr: net::SocketAddr) -> Result<()> {
     err!(SessionTakenOver, code: SessionTakenOver, "{} client {}", prefix, raddr)
+}
+
+fn err_disconnected() -> Result<()> {
+    todo!()
 }

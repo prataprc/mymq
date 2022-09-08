@@ -241,12 +241,12 @@ impl Message {
         sess: &Session,
         seqno: InpSeqno,
         publish: v5::Publish,
-        target_id: ClientID,
+        subscr: v5::Subscription,
         ack_needed: bool,
     ) -> Message {
         Message::Routed {
             src_shard_id: sess.to_shard_id(),
-            client_id,
+            dst_shard_id: subscr.shard_id,
             inp_seqno: seqno,
             out_seqno: 0,
             publish,
