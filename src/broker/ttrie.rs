@@ -450,7 +450,7 @@ impl<V> Node<V> {
                 // Topic Filter that is identical to a Non-shared Subscription's Topic
                 // Filter for the current Session, then it MUST replace that existing
                 // Subscription with a new Subscription.
-                match values.binary_search_by_key(topic_filter, |v| v.as_ref()) {
+                match values.binary_search_by_key(&topic_filter, |v| v.as_ref()) {
                     Ok(off) => {
                         values.push(value);
                         let replace = Some(values.swap_remove(off));
@@ -476,7 +476,7 @@ impl<V> Node<V> {
         match self {
             Node::Child { values, .. } if values.len() == 0 => (false, None),
             Node::Child { values, .. } => {
-                match values.binary_search_by_key(topic_filter, |v| v.as_ref()) {
+                match values.binary_search_by_key(&topic_filter, |v| v.as_ref()) {
                     Ok(off) => {
                         let rmvalue = values.remove(off);
                         (values.len() == 0, Some(rmvalue))
@@ -581,11 +581,17 @@ impl<V> Node<V> {
                     Err(_off) => (Some(cow_node), false, None),
                 }
             }
-            None => match cow_node.remove_value(value) {
-                (last, rmval) if is_root => (Some(cow_node), last, rmval),
-                (last, rmval) if cow_node.is_empty() => (None, last, rmval),
-                (last, rmval) => (Some(cow_node), last, rmval),
-            },
+            None => {
+                let is_root = match &mut cow_node {
+                    Node::Root { .. } => true,
+                    Node::Child { .. } => false,
+                };
+                match cow_node.remove_value(value) {
+                    (last, rmval) if is_root => (Some(cow_node), last, rmval),
+                    (last, rmval) if cow_node.is_empty() => (None, last, rmval),
+                    (last, rmval) => (Some(cow_node), last, rmval),
+                }
+            }
         }
     }
 

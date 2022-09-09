@@ -2,7 +2,7 @@
 
 use std::{mem, net, path, sync::mpsc};
 
-use crate::v5;
+use crate::{v5, ClientID};
 
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
@@ -83,7 +83,7 @@ impl<T> QueueStatus<T> {
 
     pub fn is_disconnected(&self) -> bool {
         match self {
-            QueueStatus:Disconnected(_) => true,
+            QueueStatus::Disconnected(_) => true,
             _ => false,
         }
     }
@@ -107,12 +107,6 @@ pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
 }
 
-#[derive(Default)]
-pub enum RouteIO {
-    pub disconnected: bool,
-    pub oug_msgs: Vec<Message>,
-}
-
 /// Default listen address for MQTT packets: `0.0.0.0:1883`
 pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
     use std::net::{IpAddr, Ipv4Addr};
@@ -121,37 +115,55 @@ pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
     net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }
 
-mod cluster;
-// TODO: mod consensus;
-mod flush;
-mod handshake;
-mod keep_alive;
-mod listener;
-mod message;
-mod miot;
-mod rebalance;
-// TODO: mod rr;
+pub struct SessionArgsActive {
+    pub raddr: net::SocketAddr,
+    pub config: Config,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+    pub miot_tx: PktTx,
+    pub session_rx: PktRx,
+    pub connect: v5::Connect,
+}
+
+pub struct SessionArgsReplica {
+    pub raddr: net::SocketAddr,
+    pub config: Config,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+}
+
 mod config;
+mod flush;
+mod keep_alive;
+mod message;
 mod session;
-mod shard;
 mod socket;
 mod spinlock;
 mod thread;
-mod ticker;
 mod ttrie;
 
-pub use cluster::{Cluster, Node};
+//mod rebalance;
+//mod cluster;
+//mod listener;
+//mod miot;
+//mod handshake;
+//mod ticker;
+//mod shard;
+// TODO: mod consensus;
+// TODO: mod rr;
+
 pub use config::{Config, ConfigNode};
 pub use flush::Flusher;
-pub use handshake::Handshake;
 pub use keep_alive::KeepAlive;
-pub use listener::Listener;
-pub use message::{msg_channel, Message, MsgRx, MsgTx};
-pub use miot::Miot;
+pub use message::{msg_channel, ConsensIO, Message, MsgRx, MsgTx, RouteIO};
 pub use session::Session;
-pub use shard::Shard;
 pub use socket::{pkt_channel, PktRx, PktTx, Socket};
 pub use spinlock::Spinlock;
 pub use thread::{Rx, Thread, Threadable, Tx};
-pub use ticker::Ticker;
 pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
+//pub use cluster::{Cluster, Node};
+//pub use listener::Listener;
+//pub use miot::Miot;
+//pub use handshake::Handshake;
+//pub use ticker::Ticker;
+//pub use shard::Shard;

@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::util::advance;
-use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
+use crate::v5::{FixedHeader, PacketType, Property, PropertyType, Subscribe};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -156,7 +156,7 @@ impl Packetize for SubAck {
 }
 
 impl SubAck {
-    pub fn from_sub(sub: &v5::Subscribe, codes: Vec<SubAckReasonCode>) {
+    pub fn from_sub(sub: &Subscribe, codes: Vec<SubAckReasonCode>) -> SubAck {
         SubAck {
             packet_id: sub.packet_id,
             properties: None,

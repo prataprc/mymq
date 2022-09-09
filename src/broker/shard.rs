@@ -3,12 +3,12 @@ use uuid::Uuid;
 
 use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc};
 
-use crate::broker::session::{self, SessionArgsActive, SessionArgsReplica};
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{message, socket};
+use crate::broker::{message, socket, session};
 use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
 use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
-use crate::broker::{InpSeqno, OutSeqno, PktRx, PktTx, Timestamp};
+use crate::broker::{InpSeqno, OutSeqno, PktRx, PktTx, Timestamp, RouteIO, ConsensIO};
+use crate::broker::{SessionArgsReplica, SessionArgsActive};
 
 use crate::{v5, ClientID, ToJson, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -20,10 +20,10 @@ type Acks = BTreeMap<u32, InpSeqno>;
 
 macro_rules! append_index {
     ($index:expr, $key:expr, $val:expr) => {{
-        match $index.get_mut(&$key) {
+        match $index.get_mut($key) {
             Some(values) => values.push($val),
             None => {
-                $index.insert($key, vec![$val]);
+                $index.insert($key.clone(), vec![$val]);
             }
         }
     }};
@@ -546,6 +546,18 @@ struct ActiveContext<'a> {
     msg_rx: MsgRx,
     inner: Inner,
     session: Session,
+    cons_io: ConsensIO
+}
+
+impl ActiveContext {
+    fn new(msg_rx: MsgRx, inner: Inner) -> ActiveContext {
+        ActiveContext {
+            msg_rx,
+            inner,
+            session: Session::default(),
+            cons_io: ConsensIO::default()
+        }
+    }
 }
 
 impl Shard {
@@ -570,9 +582,9 @@ impl Shard {
             };
 
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
-            let mut args = ActiveContext { msg_rx, inner, session: Session::default() };
+            let mut args = ActiveContext::new(msg_rx, inner);
 
-            let mut flush_queue: Vec<FailedSession> = Vec::default();
+            let mut flush_sessions: Vec<FailedSession> = Vec::default();
             let mut sessions = match &mut inner {
                 Inner::MainActive(ActiveLoop { sessions, .. }) => {
                     mem::replace(sessions, BTreeMap::default());
@@ -589,23 +601,51 @@ impl Shard {
 
                 if let Ok(true) = &res {
                     let val = FlushSession { client_id, err: err_disconnected().err() };
-                    flush_queues.push(val)
+                    flush_sessions.push(val)
                     continue
                 }
                 if let Err(err) = res {
-                    todo!()
+                    flush_sessions.push(FlushSession { client_id, err });
+                    continue
                 }
+
                 sessions1.insert(client_id, args.session);
             }
 
-            msg_rx = args.msg_rx;
-            inner = args.inner;
+            if self.active_cs(&mut args) {
+                let val = FlushSession { client_id, err: err_disconnected().err() };
+                flush_sessions.push(val)
+                continue
+            }
+
+            let mut sessions2: BTreeMap<ClientID, Session> = BTreeMap::default();
+            for (client_id, session) in sessions.into_iter() {
+                args.session = session;
+
+                let res = self.active_post_cs(args);
+
+                if let Ok(true) = &res {
+                    let val = FlushSession { client_id, err: err_disconnected().err() };
+                    flush_sessions.push(val)
+                    continue
+                }
+                if let Err(err) = res {
+                    flush_sessions.push(FlushSession { client_id, err });
+                    continue
+                }
+
+                session2.insert(client_id, args.session);
+            }
+
             match &mut inner {
                 Inner::MainActive(ActiveLoop { sessions, .. }) => {
-                    let _empty = mem::replace(sessions, sessions1);
+                    let _empty = mem::replace(sessions, sessions2);
                 }
                 inner => unreachable!("{} {:?}", self.prefix, inner),
             };
+
+            msg_rx = args.msg_rx;
+            inner = args.inner;
             let _init = mem::replace(&mut self.inner, inner);
 
             // wake up miot every time shard wakes up
@@ -631,21 +671,34 @@ impl Shard {
         Ok(route_io.disconnected)
     }
 
-    fn active_cs(&mut self, args: &mut ActiveContext) {
+    // return exit-status
+    fn active_cs(&mut self, args: &mut ActiveContext) -> bool {
+        let mut disconnected = false;
+        let client_id = args.session.as_client_id().clone();
+
         // Other shards might have routed messages to a session owned by this shard,
         // we will handle it here and push them down to the socket.
-        let mut qos_acks = BTreeMap::<u32, InpSeqno>::default();
-        let mut status = self.out_messages(msg_rx, &mut qos_acks);
-        let qos_msgs = status.take_values(); // QoS-1 and QoS2 messages.
-        if let QueueStatus::Disconnected(_) = status {
-            error!("{:?} cascading shutdown via out_messages", self.prefix);
-            return Ok(true);
+        args.cons_io = self.rx_messages(args);
+
+        let oug_qos0 = args.cons_io.remove(&client_id);
+        if let Some(msgs) = oug_qos0 {
+            disconnected = args.session.oug_qos0(msgs).is_disconnected();
         }
 
-        // TODO: replicate ack_out_seqnos and qos_msgs in consensus loop
+        // TODO: replicate relevant fields of cons_io in the consensus loop.
         // TODO: fetch msgs from consensus loop and start commiting.
-        let ack_out_seqnos = ack_out_seqnos;
-        let qos_msgs = qos_msgs;
+
+        disconnected
+    }
+
+    // return session exit status
+    fn active_post_cs(&mut self, args: &mut ActiveContext) -> Result<bool> {
+        let client_id = args.session.as_client_id().clone();
+
+        let oug_qos12 = args.cons_io.remove(&client_id);
+        if let Some(msgs) = oug_qos12 {
+            args.session.oug_qos12(msgs)
+        }
 
         self.commit_acks(ack_out_seqnos);
         self.commit_messages(qos_msgs, &mut qos_acks);
@@ -662,10 +715,11 @@ impl Shard {
     }
 
     fn book_incoming_messages(&mut self, args: &mut ActiveContext, rio: &mut RouteIO) {
-        let ActiveLoop { index, shard_back_log, ack_tms, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
+        let ActiveLoop { index, shard_back_log, ack_timestamps, .. } =
+            match &mut self.inner {
+                Inner::MainActive(active_loop) => active_loop,
+                inner => unreachable!("{} {:?}", self.prefix, inner),
+            };
 
         let oug_msgs = mem::replace(&mut rio.oug_msgs, Vec::with_capacity(n));
 
@@ -674,8 +728,11 @@ impl Shard {
                 Message::ClientAck { .. } => {
                     args.session.as_mut_oug_acks().push(msg);
                 }
-                Message::Retain { .. } => {
+                Message::Retain { publish } if publish.is_qos0() => {
                     args.session.as_mut_oug_back_log().push(msg);
+                }
+                Message::Retain { publish } => {
+                    args.session.as_mut_cs_oug_back_log().push(msg);
                 }
                 Message::ShardIndex { inp_seqno, qos, .. } => match qos {
                     v5::QoS::AtMostOnce => (),
@@ -685,11 +742,13 @@ impl Shard {
                 Message::Routed { inp_seqno, dst_shard_id, .. } => {
                     append_index!(shard_back_log, dst_shard_id, msg);
 
-                    match ack_tms.binary_search_by_key(dst_shard_id, |t| t.shard_id) {
-                        Ok(off) => ack_tms[off].last_routed = *inp_seqno,
+                    match
+                        ack_timestamps.binary_search_by_key(dst_shard_id, |t| t.shard_id)
+                    {
+                        Ok(off) => ack_timestamps[off].last_routed = *inp_seqno,
                         Err(off) => {
                             let t = Timestamp::new(*dst_shard_id, *inp_seqno);
-                            ack_tms.insert(off, t);
+                            ack_timestamps.insert(off, t);
                         }
                     }
                 }
@@ -716,13 +775,109 @@ impl Shard {
             match status {
                 QueueStatus::Ok(_) | QueueStatus::Block(_) => (),
                 QueueStatus::Disconnected(_) => error!(
-                    "{} shard_id:{} shard-msg-rx has closed",
+                    "{} shard_id:{} fatal !! shard-msg-rx has closed",
                     self.prefix, shard_id
                 ),
             }
         }
     }
 
+    fn rx_messages(&mut self, args: &mut ActiveContext) -> ConsensIO {
+        let ActiveLoop { ack_timestamps, .. } = match &mut args.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let mut cons_io = ConsensIO::default();
+
+        // receive messages targeting all the sessions hosted in this shard.
+        let mut status = args.msg_rx.try_recvs();
+
+        for mut msg in status.take_values().into_iter() {
+            match &msg {
+                Message::LocalAck { shard_id, last_acked } => {
+                    match ack_timestamps.binary_search_by_key(shard_id, |t| t.shard_id) {
+                        Ok(off) => ack_timestamps[off].last_acked = last_acked,
+                        Err(_) => unreachable!(),
+                    }
+                }
+                Message::Routed { client_id, publish, ..  } if publish.is_qos0() => {
+                    append_index!(cons_io.oug_qos0, client_id, msg);
+                }
+                Message::Routed { client_id, publish, ..  } => {
+                    append_index!(cons_io.oug_qos12, client_id, msg);
+                }
+                _ => unreachable!(),
+            };
+        }
+
+        Ok(cons_io)
+    }
+
+    // replicated messages comming from consensus loop, commit them.
+    // acknowldegments for outgoing PUBLISH QoS-1 & QoS-2
+    fn commit_acks(&mut self, ack_out_seqnos: BTreeMap<ClientID, Vec<OutSeqno>>) {
+        let ActiveLoop { sessions, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        for (client_id, out_seqnos) in ack_out_seqnos.into_iter() {
+            if let Some(session) = sessions.get_mut(&client_id) {
+                session.commit_acks(out_seqnos);
+            }
+        }
+    }
+
+    fn commit_messages(&mut self, qos_msgs: Vec<Message>, acks: &mut Acks) {
+        match &self.inner {
+            Inner::MainActive { .. } => self.commit_messages_active(qos_msgs, acks),
+            Inner::MainReplica { .. } => self.commit_messages_replica(qos_msgs, acks),
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    // replicated messages comming from consensus loop, commit them.
+    // Message::Routed, QoS-1 & QoS-2
+    fn commit_messages_active(&mut self, msgs: Vec<Message>, acks: &mut Acks) {
+        let mut qos_msgs = BTreeMap::<ClientID, Vec<Message>>::default();
+        for msg in msgs.into_iter() {
+            match &msg {
+                Message::Routed { src_shard_id, client_id, inp_seqno, .. } => {
+                    acks.insert(*src_shard_id, *inp_seqno);
+                    append_index!(qos_msgs, client_id, msg);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let ActiveLoop { sessions, flush_queue, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        for (client_id, msgs) in qos_msgs.into_iter() {
+            if let Some(session) = sessions.get_mut(&client_id) {
+                if let QueueStatus::Disconnected(_) = session.out_qos(msgs) {
+                    let err = {
+                        let err: Result<()> = err!(
+                            SlowClient,
+                            code: UnspecifiedError,
+                            "{} client_id:{}",
+                            self.prefix,
+                            *client_id
+                        );
+                        err.unwrap_err()
+                    };
+                    flush_queue.push(FailedSession::new(client_id.clone(), err))
+                }
+            }
+        }
+    }
+
+}
+
+impl Shard {
     fn replica_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
         use std::time;
@@ -860,165 +1015,12 @@ impl Shard {
 
 // Handle out-going messages
 impl Shard {
-    // Receive messages for this shard, flush qos0 messages downstream and return
-    // qos12_msgs
-    fn out_messages(&mut self, msg_rx: &MsgRx, acks: &mut Acks) -> QueueStatus<Message> {
-        // receive messages targeting all the sessions.
-        let mut status = msg_rx.try_recvs();
-
-        let mut qos0_msgs = BTreeMap::<ClientID, Vec<Message>>::default();
-        let mut qos12_msgs: Vec<Message> = Vec::default();
-        for mut msg in status.take_values().into_iter() {
-            let ActiveLoop { sessions, .. } = match &mut self.inner {
-                Inner::MainActive(active_loop) => active_loop,
-                inner => unreachable!("{} {:?}", self.prefix, inner),
-            };
-            let cid = msg.as_client_id();
-            match sessions.get_mut(cid) {
-                Some(session) if session.is_active() => session.incr_out_seqno(&mut msg),
-                Some(session) => error!(
-                    "{} client_id:{} msg-rx session is {:?}",
-                    self.prefix, **cid, session.state,
-                ),
-                None => {
-                    error!("{} client_id:{} msg-rx session is gone", self.prefix, **cid,)
-                }
-            }
-
-            match &msg {
-                Message::LocalAck { shard_id, last_acked } => {
-                    self.book_acked_timestamps(*shard_id, *last_acked);
-                    continue;
-                }
-                Message::Routed {
-                    src_shard_id,
-                    client_id,
-                    inp_seqno,
-                    publish,
-                    ack_needed,
-                    ..
-                } => {
-                    if publish.qos == v5::QoS::AtMostOnce {
-                        if *ack_needed {
-                            acks.insert(*src_shard_id, *inp_seqno);
-                        }
-                        append_index!(qos0_msgs, client_id.clone(), msg);
-                    } else {
-                        qos12_msgs.push(msg)
-                    }
-                }
-                _ => unreachable!(),
-            };
-        }
-
-        self.out_qos0(qos0_msgs);
-
-        status.set_values(qos12_msgs);
-        status
-    }
-
-    fn out_qos0(&mut self, qos0_msgs: BTreeMap<ClientID, Vec<Message>>) {
-        let ActiveLoop { sessions, flush_queue, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        for (client_id, msgs) in qos0_msgs.into_iter() {
-            match sessions.get_mut(&client_id) {
-                Some(session) if session.is_active() => {
-                    if let QueueStatus::Disconnected(_) = session.out_qos0(msgs) {
-                        let err = {
-                            let err: Result<()> = err!(
-                                SlowClient,
-                                code: UnspecifiedError,
-                                "{} client_id:{}",
-                                self.prefix,
-                                *client_id
-                            );
-                            err.unwrap_err()
-                        };
-                        flush_queue.push(FailedSession::new(client_id, err));
-                    }
-                }
-                Some(session) => error!(
-                    "{} client_id:{} msg-rx session is {:?}",
-                    self.prefix, *client_id, session.state,
-                ),
-                None => error!(
-                    "{} client_id:{} msg-rx session is gone",
-                    self.prefix, *client_id,
-                ),
-            }
-        }
-    }
-
-    // replicated messages comming from consensus loop, commit them.
-    // acknowldegments for outgoing PUBLISH QoS-1 & QoS-2
-    fn commit_acks(&mut self, ack_out_seqnos: BTreeMap<ClientID, Vec<OutSeqno>>) {
-        let ActiveLoop { sessions, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        for (client_id, out_seqnos) in ack_out_seqnos.into_iter() {
-            if let Some(session) = sessions.get_mut(&client_id) {
-                session.commit_acks(out_seqnos);
-            }
-        }
-    }
-
-    fn commit_messages(&mut self, qos_msgs: Vec<Message>, acks: &mut Acks) {
-        match &self.inner {
-            Inner::MainActive { .. } => self.commit_messages_active(qos_msgs, acks),
-            Inner::MainReplica { .. } => self.commit_messages_replica(qos_msgs, acks),
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-
-    // replicated messages comming from consensus loop, commit them.
-    // Message::Routed, QoS-1 & QoS-2
-    fn commit_messages_active(&mut self, msgs: Vec<Message>, acks: &mut Acks) {
-        let mut qos_msgs = BTreeMap::<ClientID, Vec<Message>>::default();
-        for msg in msgs.into_iter() {
-            match &msg {
-                Message::Routed { src_shard_id, client_id, inp_seqno, .. } => {
-                    acks.insert(*src_shard_id, *inp_seqno);
-                    append_index!(qos_msgs, client_id.clone(), msg);
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        let ActiveLoop { sessions, flush_queue, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        for (client_id, msgs) in qos_msgs.into_iter() {
-            if let Some(session) = sessions.get_mut(&client_id) {
-                if let QueueStatus::Disconnected(_) = session.out_qos(msgs) {
-                    let err = {
-                        let err: Result<()> = err!(
-                            SlowClient,
-                            code: UnspecifiedError,
-                            "{} client_id:{}",
-                            self.prefix,
-                            *client_id
-                        );
-                        err.unwrap_err()
-                    };
-                    flush_queue.push(FailedSession::new(client_id.clone(), err))
-                }
-            }
-        }
-    }
-
     fn commit_messages_replica(&mut self, msgs: Vec<Message>, _acks: &mut Acks) {
         let mut qos_msgs = BTreeMap::<ClientID, Vec<Message>>::default();
         for msg in msgs.into_iter() {
             match &msg {
                 Message::Routed { client_id, .. } => {
-                    append_index!(qos_msgs, client_id.clone(), msg);
+                    append_index!(qos_msgs, client_id, msg);
                 }
                 _ => unreachable!(),
             }
@@ -1045,7 +1047,7 @@ impl Shard {
         let shard_id = self.shard_id;
         for (target_shard_id, inp_seqno) in qos_acks.into_iter() {
             let msg = Message::LocalAck { shard_id, last_acked: inp_seqno };
-            append_index!(shard_back_log, target_shard_id, msg);
+            append_index!(shard_back_log, &target_shard_id, msg);
         }
     }
 
@@ -1110,18 +1112,6 @@ impl Shard {
                 seqno
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-
-    fn book_acked_timestamps(&mut self, shard_id: u32, last_acked: InpSeqno) {
-        let ActiveLoop { ack_timestamps, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        match ack_timestamps.binary_search_by_key(&shard_id, |t| t.shard_id) {
-            Ok(off) => ack_timestamps[off].last_acked = last_acked,
-            Err(_) => unreachable!(),
         }
     }
 }

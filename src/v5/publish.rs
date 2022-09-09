@@ -273,6 +273,10 @@ impl Publish {
         &self.topic_name
     }
 
+    pub fn is_qos0(&self) -> bool {
+        self.qos == QoS::AtMostOnce
+    }
+
     pub fn topic_alias(&self) -> Option<u16> {
         match &self.properties {
             Some(props) => props.topic_alias,

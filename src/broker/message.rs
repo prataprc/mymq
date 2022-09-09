@@ -3,14 +3,23 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use log::{error, warn};
 
 use std::sync::{mpsc, Arc};
-use std::{fmt, result};
+use std::{collections::BTreeMap, fmt, result};
 
-#[allow(unused_imports)]
-use crate::broker::{Cluster, Shard};
-
-use crate::broker::{InpSeqno, OutSeqno, QueueStatus, Session};
+use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};
+
+#[derive(Default)]
+pub struct RouteIO {
+    pub disconnected: bool,
+    pub oug_msgs: Vec<Message>,
+}
+
+#[derive(Default)]
+pub struct ConsensIO {
+    pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
+    pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
+}
 
 /// Type implement the tx-handle for a message-queue.
 #[derive(Clone)]
@@ -106,8 +115,9 @@ pub enum Message {
     /// PINGRESP- happens for every PINGREQ is handled by this session.
     ClientAck { packet: v5::Packet },
     /// Retain publish messages.
-    Retain { packet: v5::Packet },
-    /// PUBLISH Packets converted from Message::Routed, before sending them downstream.
+    Retain { publish: v5::Publish },
+    /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
+    /// sending them downstream.
     Packet {
         out_seqno: OutSeqno,
         packet_id: Option<PacketID>,
@@ -117,19 +127,19 @@ pub enum Message {
     // shard boundary
     /// Incoming PUBLISH packets, QoS > 0 indexed by shards in Shard::RunLoop::index
     ShardIndex {
-        qos: v5::QoS,
-        inp_seqno: InpSeqno,
         src_client_id: ClientID,
+        inp_seqno: InpSeqno,
         packet_id: PacketID,
+        qos: v5::QoS,
     },
 
     // round-trip
     /// Incoming PUBLISH Packets received from clients and routed to other local sessions.
     Routed {
         src_shard_id: u32,    // sending shard-id
+        dst_shard_id: u32,    // receiving shard-id
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
-        out_seqno: OutSeqno,  // updated by the receiving session, at a later time.
         publish: v5::Publish, // publish packet, as received from publishing client
         ack_needed: bool,
     },
@@ -144,6 +154,7 @@ impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
+            Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::Packet { .. } => write!(f, "Message::Packet"),
             Message::ShardIndex { .. } => write!(f, "Message::ShardIndex"),
             Message::Routed { .. } => write!(f, "Message::Routed"),
@@ -199,76 +210,59 @@ impl<'a> Arbitrary<'a> for Message {
 }
 
 impl Message {
-    /// Message::ClientAck value.
     pub fn new_conn_ack(connack: v5::ConnAck) -> Message {
         Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
     }
 
-    /// Message::ClientAck value.
-    pub fn new_ping_resp() -> Message {
-        Message::ClientAck { packet: v5::Packet::PingResp }
-    }
-
-    /// Message::Retain
-    pub fn new_retain_publish(publ: v5::Publish) -> Message {
-        Message::Retain { packet: v5::Packet::Publish(publ) }
-    }
-
-    /// Message::ClientAck
     pub fn new_suback(suback: v5::SubAck) -> Message {
         Message::ClientAck { packet: v5::Packet::SubAck(suback) }
     }
 
-    /// Message::ClientAck
-    pub fn new_unsuback(unsuback: v5::SubAck) -> Message {
+    pub fn new_unsuback(unsuback: v5::UnsubAck) -> Message {
         Message::ClientAck { packet: v5::Packet::UnsubAck(unsuback) }
     }
 
-    /// Message::ShardIndex
-    pub fn new_index(id: &ClientID, seq: InpSeqno, pbl: &v5::Publish) -> Option<Message> {
-        let packet_id = pbl.packet_id?;
-        let msg = Message::ShardIndex {
-            qos: pbl.qos,
-            inp_seqno: seq,
-            src_client_id: id.clone(),
-            packet_id,
-        };
-        Some(msg)
-    }
-
-    /// Message::Routed value.
-    pub fn new_routed(
-        sess: &Session,
-        seqno: InpSeqno,
-        publish: v5::Publish,
-        subscr: v5::Subscription,
-        ack_needed: bool,
-    ) -> Message {
-        Message::Routed {
-            src_shard_id: sess.to_shard_id(),
-            dst_shard_id: subscr.shard_id,
-            inp_seqno: seqno,
-            out_seqno: 0,
-            publish,
-            ack_needed,
-        }
-    }
-
-    /// Message::ClientAck value.
     pub fn new_pub_ack(puback: v5::Pub) -> Message {
         Message::ClientAck { packet: v5::Packet::PubAck(puback) }
     }
 
-    pub fn into_packet(self, pktid: Option<PacketID>) -> Message {
-        match self {
-            Message::Routed { out_seqno, mut publish, .. } => {
-                if let Some(packet_id) = pktid {
-                    publish.set_packet_id(packet_id);
-                }
-                Message::Packet { out_seqno, packet_id: pktid, publish }
-            }
+    pub fn new_ping_resp() -> Message {
+        Message::ClientAck { packet: v5::Packet::PingResp }
+    }
+
+    pub fn new_retain_publish(publish: v5::Publish) -> Message {
+        Message::Retain { publish }
+    }
+
+    pub fn new_index(id: &ClientID, seq: InpSeqno, p: &v5::Publish) -> Option<Message> {
+        let packet_id = p.packet_id?;
+        let msg = Message::ShardIndex {
+            src_client_id: id.clone(),
+            inp_seqno: seq,
+            packet_id,
+            qos: p.qos,
+        };
+        Some(msg)
+    }
+
+    pub fn new_routed() -> Message {
+        todo!() // directly constructed
+    }
+
+    pub fn new_local_ack(shard_id: u32, last_acked: InpSeqno) -> Message {
+        Message::LocalAck { shard_id, last_acked }
+    }
+
+    pub fn into_packet(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {
+        let mut publish = match self {
+            Message::Routed { publish, .. } => publish,
+            Message::Retain { publish } => publish,
             _ => unreachable!(),
+        };
+        if let Some(packet_id) = pktid {
+            publish.set_packet_id(packet_id);
         }
+        Message::Packet { out_seqno, packet_id: pktid, publish }
     }
 
     pub fn to_v5_packet(&self) -> v5::Packet {
@@ -281,7 +275,6 @@ impl Message {
 
     pub fn to_out_seqno(&self) -> OutSeqno {
         match self {
-            Message::Routed { out_seqno, .. } => *out_seqno,
             Message::Packet { out_seqno, .. } => *out_seqno,
             _ => unreachable!(),
         }

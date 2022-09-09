@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::util::advance;
-use crate::v5::{FixedHeader, PacketType, Property, PropertyType};
+use crate::v5::{FixedHeader, PacketType, Property, PropertyType, UnSubscribe};
 use crate::{Blob, Packetize, UserProperty, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
