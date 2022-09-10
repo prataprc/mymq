@@ -9,6 +9,10 @@ use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};
 
+// Message::ClientAck carrying PingResp
+// Message::Subscribe
+// Message::UnSubscribe
+// Message::Retain
 #[derive(Default)]
 pub struct RouteIO {
     pub disconnected: bool,
@@ -19,6 +23,8 @@ pub struct RouteIO {
 pub struct ConsensIO {
     pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
     pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
+    pub oug_subs: BTreeMap<ClientID, Vec<Message>>,
+    pub oug_unsubs: BTreeMap<ClientID, Vec<Message>>,
 }
 
 /// Type implement the tx-handle for a message-queue.
@@ -106,16 +112,6 @@ impl MsgRx {
 #[derive(Clone, Eq, PartialEq)]
 pub enum Message {
     // session boundary
-    /// Acknowledgement packets to remote client, connected to this session.
-    ///
-    /// CONNACK - happens during add_session.
-    /// PUBACK  - happens after QoS-1 and QoS-2 messaegs are replicated.
-    /// SUBACK  - happens after SUBSCRIBE is commited to [Cluster].
-    /// UNSUBACK- happens after UNSUBSCRIBE is committed to [Cluster].
-    /// PINGRESP- happens for every PINGREQ is handled by this session.
-    ClientAck { packet: v5::Packet },
-    /// Retain publish messages.
-    Retain { publish: v5::Publish },
     /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
     /// sending them downstream.
     Packet {
@@ -125,6 +121,17 @@ pub enum Message {
     },
 
     // shard boundary
+    /// Retain publish messages.
+    Retain { publish: v5::Publish },
+    /// CONNACK  - happens during add_session.
+    /// PINGRESP - happens for every PINGREQ is handled by this session.
+    /// SUBACK   - happens after SUBSCRIBE is commited to [Shard].
+    /// UNSUBACK - happens after UNSUBSCRIBE is commited to [Shard].
+    ClientAck { packet: v5::Packet },
+    /// Consensus Loop.
+    Subscribe { sub: v5::Subscribe },
+    /// Consensus Loop.
+    UnSubscribe { unsub: v5::UnSubscribe },
     /// Incoming PUBLISH packets, QoS > 0 indexed by shards in Shard::RunLoop::index
     ShardIndex {
         src_client_id: ClientID,
@@ -154,8 +161,10 @@ impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
-            Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::Packet { .. } => write!(f, "Message::Packet"),
+            Message::Subscribe { .. } => write!(f, "Message::Subscribe"),
+            Message::UnSubscribe { .. } => write!(f, "Message::UnSubscribe"),
+            Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::ShardIndex { .. } => write!(f, "Message::ShardIndex"),
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
@@ -166,9 +175,9 @@ impl fmt::Debug for Message {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Message {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let val = match uns.arbitrary::<u8>()? % 5 {
+        let val = match uns.arbitrary::<u8>()? % 8 {
             0 => Message::ClientAck {
-                packet: match uns.arbitrary::<u8>()? % 9 {
+                packet: match uns.arbitrary::<u8>()? % 8 {
                     0 => v5::Packet::ConnAck(uns.arbitrary()?),
                     1 => v5::Packet::PubAck(uns.arbitrary()?),
                     2 => v5::Packet::PubRec(uns.arbitrary()?),
@@ -177,7 +186,6 @@ impl<'a> Arbitrary<'a> for Message {
                     5 => v5::Packet::SubAck(uns.arbitrary()?),
                     6 => v5::Packet::UnsubAck(uns.arbitrary()?),
                     7 => v5::Packet::PingResp,
-                    8 => v5::Packet::Auth(uns.arbitrary()?),
                     _ => unreachable!(),
                 },
             },
@@ -186,11 +194,14 @@ impl<'a> Arbitrary<'a> for Message {
                 packet_id: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
             },
-            2 => Message::ShardIndex {
+            2 => Message::Subscribe { sub: uns.arbitrary()? },
+            3 => Message::UnSubscribe { unsub: uns.arbitrary()? },
+            4 => Message::Retain { publish: uns.arbitrary()? },
+            5 => Message::ShardIndex {
                 src_client_id: uns.arbitrary()?,
                 packet_id: uns.arbitrary()?,
             },
-            3 => Message::Routed {
+            6 => Message::Routed {
                 src_shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
@@ -198,7 +209,7 @@ impl<'a> Arbitrary<'a> for Message {
                 publish: uns.arbitrary()?,
                 ack_needed: uns.arbitrary()?,
             },
-            4 => Message::LocalAck {
+            7 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,
                 last_acked: uns.arbitrary()?,
             },
@@ -228,6 +239,14 @@ impl Message {
 
     pub fn new_ping_resp() -> Message {
         Message::ClientAck { packet: v5::Packet::PingResp }
+    }
+
+    pub fn new_sub(sub: v5::Subscribe) -> Message {
+        Message::Subscribe { sub }
+    }
+
+    pub fn new_unsub(unsub: v5::UnSubscribe) -> Message {
+        Message::UnSubscribe { unsub }
     }
 
     pub fn new_retain_publish(publish: v5::Publish) -> Message {

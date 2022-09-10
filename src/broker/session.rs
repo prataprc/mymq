@@ -44,6 +44,17 @@ impl Default for SessionState {
     }
 }
 
+impl fmt::Debug for SessionState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            SessionState::Active(_) => write!(f, "SessionState::Active"),
+            SessionState::Reconnect(_) => write!(f, "SessionState::Reconnect"),
+            SessionState::Replica(_) => write!(f, "SessionState::Replica"),
+            SessionState::None => write!(f, "SessionState::None"),
+        }
+    }
+}
+
 pub struct Common {
     prefix: String,
     config: Config,
@@ -58,6 +69,8 @@ pub struct Common {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
     /// every outgoing publish packet.
     cs_oug_seqno: OutSeqno,
+    /// Message::Subscribe message.
+    /// Message::Unsubscribe message.
     /// Message::Retain outgoing QoS-1/2 Retain-PUBLISH messages.
     /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
     ///
@@ -181,17 +194,6 @@ impl Deref for Reconnect {
 impl DerefMut for Reconnect {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.common
-    }
-}
-
-impl fmt::Debug for SessionState {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        match self {
-            SessionState::Active(_) => write!(f, "SessionState::Active"),
-            SessionState::Reconnect(_) => write!(f, "SessionState::Reconnect"),
-            SessionState::Replica(_) => write!(f, "SessionState::Replica"),
-            SessionState::None => write!(f, "SessionState::None"),
-        }
     }
 }
 
@@ -448,9 +450,6 @@ impl Session {
 // handle incoming packets.
 impl Session {
     // Returned RouteIO has following message types:
-    // * Message::ClientAck carrying PingResp.
-    // * Message::ClientAck carrying SubAck.
-    // * Message::ClientAck carrying UnsubAck.
     // * Message::ClientAck carrying PubAck for QoS1.
     // * Message::Retain carrying retained publish to be sent back to this session.
     // * Message::ShardIndex to be indexed by shard for QoS > 0, managing ack.
@@ -537,44 +536,18 @@ impl Session {
     where
         S: Shard,
     {
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
-
         let sub = match pkt {
             v5::Packet::Subscribe(sub) => sub,
             _ => unreachable!(),
         };
 
-        let subscription_id: Option<u32> = match &sub.properties {
-            Some(props) => props.subscription_id.clone().map(|x| *x),
-            None => None,
-        };
-
-        let mut return_codes = Vec::with_capacity(sub.filters.len());
-        let mut retain_msgs = Vec::default();
+        let mut retain_msgs = vec![Message::new_sub(sub.clone())];
 
         for filter in sub.filters.iter() {
-            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
-            let subscription = v5::Subscription {
-                topic_filter: filter.topic_filter.clone(),
+            let (rfr, _retain_as_published, _no_local, _qos) = filter.opt.unwrap();
 
-                client_id: self.client_id.clone(),
-                shard_id: self.shard_id,
-                subscription_id: subscription_id,
-                qos: cmp::min(server_qos, qos),
-                no_local,
-                retain_as_published,
-                retain_forward_rule: rfr,
-            };
-
-            shard
-                .as_topic_filters()
-                .subscribe(&filter.topic_filter, subscription.clone());
-
-            let is_new_subscribe = self
-                .state
-                .as_mut_subscriptions()
-                .insert(filter.topic_filter.clone(), subscription.clone())
-                .is_none();
+            let is_new_subscribe =
+                self.state.as_mut_subscriptions().get(&filter.topic_filter).is_none();
 
             let publs = match rfr {
                 v5::RetainForwardRule::OnEverySubscribe => {
@@ -591,62 +564,22 @@ impl Session {
                 p.retain = true;
                 Message::new_retain_publish(p)
             }));
-
-            let rc = match subscription.qos {
-                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
-                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
-                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
-            };
-            return_codes.push(rc)
         }
-
-        let sub_ack = v5::SubAck::from_sub(&sub, return_codes);
-        retain_msgs.insert(0, Message::new_suback(sub_ack));
 
         route_io.oug_msgs.extend(retain_msgs.into_iter());
 
         Ok(())
     }
 
-    fn rx_unsubscribe<S>(&mut self, (shard, route_io, pkt): HandleArgs<S>) -> Result<()>
+    fn rx_unsubscribe<S>(&mut self, (_s, route_io, pkt): HandleArgs<S>) -> Result<()>
     where
         S: Shard,
     {
-        use v5::UnsubAckReasonCode;
-
         let unsub = match pkt {
             v5::Packet::UnSubscribe(unsub) => unsub,
             _ => unreachable!(),
         };
-
-        let mut return_codes = Vec::with_capacity(unsub.filters.len());
-
-        for tf in unsub.filters.iter() {
-            let subscription = v5::Subscription::from_filter(tf);
-
-            let res1 = shard.as_topic_filters().unsubscribe(tf, &subscription);
-
-            let res2 = self.state.as_mut_subscriptions().remove(&tf);
-            let code = match (&res1, &res2) {
-                (Some(_), Some(_)) => UnsubAckReasonCode::Success,
-                (None, None) => UnsubAckReasonCode::NoSubscriptionExisted,
-                (Some(_), None) => {
-                    let msg = format!("{:?} filter in trie, not in session", tf);
-                    err_inconsistent_subscription(&self.prefix, &msg)?;
-                    UnsubAckReasonCode::UnspecifiedError
-                }
-                (None, Some(_)) => {
-                    let msg = format!("{:?} filter in session, not in trie", tf);
-                    err_inconsistent_subscription(&self.prefix, &msg)?;
-                    UnsubAckReasonCode::UnspecifiedError
-                }
-            };
-
-            return_codes.push(code);
-        }
-
-        let unsub_ack = v5::UnsubAck::from_unsub(&unsub, return_codes);
-        route_io.oug_msgs.push(Message::new_unsuback(unsub_ack));
+        route_io.oug_msgs.push(Message::new_unsub(unsub));
 
         Ok(())
     }
@@ -920,36 +853,224 @@ impl Session {
     }
 }
 
-//impl Session {
-//    pub fn incr_oug_seqno(&mut self, msg: &mut Message) {
-//        self.state.incr_oug_seqno(msg)
-//    }
-//
-//    pub fn incr_packet_id(&mut self) {
-//        self.state.incr_packet_id();
-//    }
-//
-//    pub fn oug_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-//        self.state.oug_qos0(msgs)
-//    }
-//
-//    pub fn oug_qos12(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-//        self.state.oug_qos12(msgs)
-//    }
-//
-//    pub fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
-//        self.state.commit_acks(out_seqnos)
-//    }
-//
-//    pub fn oug_acks_flush(&mut self) -> QueueStatus<v5::Packet> {
-//        let status = self.state.oug_acks_flush();
-//        status.map(vec![])
-//    }
-//
-//    pub fn oug_acks_publish(&mut self, packet_id: PacketID) {
-//        self.state.oug_acks_publish(packet_id)
-//    }
-//}
+impl Session {
+    pub fn handle_subs<S>(&mut self, shard: &mut S, msgs: Vec<Message>) -> Result<()>
+    where
+        S: Shard,
+    {
+        for msg in msgs.into_iter() {
+            self.handle_sub(shard, msg)?
+        }
+
+        Ok(())
+    }
+
+    fn handle_sub<S>(&mut self, shard: &mut S, msg: Message) -> Result<()>
+    where
+        S: Shard,
+    {
+        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
+
+        let sub = match msg {
+            Message::Subscribe { sub } => sub,
+            _ => unreachable!(),
+        };
+
+        let subscription_id: Option<u32> = match &sub.properties {
+            Some(props) => props.subscription_id.clone().map(|x| *x),
+            None => None,
+        };
+
+        let mut return_codes = Vec::with_capacity(sub.filters.len());
+
+        for filter in sub.filters.iter() {
+            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
+            let subscription = v5::Subscription {
+                topic_filter: filter.topic_filter.clone(),
+
+                client_id: self.client_id.clone(),
+                shard_id: self.shard_id,
+                subscription_id: subscription_id,
+                qos: cmp::min(server_qos, qos),
+                no_local,
+                retain_as_published,
+                retain_forward_rule: rfr,
+            };
+
+            let args = (filter.topic_filter.clone(), &subscription);
+            self.state.handle_sub(shard, args)?;
+
+            let rc = match subscription.qos {
+                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
+                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
+                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
+            };
+            return_codes.push(rc)
+        }
+
+        match &self.state {
+            SessionState::Active(_) => {
+                let msg = Message::new_suback(v5::SubAck::from_sub(&sub, return_codes));
+                self.state.push_oug_acks(msg)?;
+            }
+            _ => (),
+        }
+
+        Ok(())
+    }
+
+    pub fn handle_unsubs<S>(&mut self, shard: &mut S, msgs: Vec<Message>) -> Result<()>
+    where
+        S: Shard,
+    {
+        for msg in msgs.into_iter() {
+            self.handle_sub(shard, msg)?
+        }
+
+        Ok(())
+    }
+
+    fn handle_unsub<S>(&mut self, shard: &mut S, msg: Message) -> Result<()>
+    where
+        S: Shard,
+    {
+        let unsub = match msg {
+            Message::UnSubscribe { unsub } => unsub,
+            _ => unreachable!(),
+        };
+
+        let mut rcodes = Vec::with_capacity(unsub.filters.len());
+
+        for filter in unsub.filters.iter() {
+            let mut subscription = v5::Subscription::default();
+            subscription.topic_filter = filter.clone();
+            subscription.client_id = self.client_id.clone();
+
+            let code = self.state.handle_unsub(shard, subscription)?;
+            rcodes.push(code);
+        }
+
+        match &self.state {
+            SessionState::Active(_) => {
+                let msg = Message::new_unsuback(v5::UnsubAck::from_unsub(&unsub, rcodes));
+                self.state.push_oug_acks(msg)?;
+            }
+            _ => (),
+        }
+
+        Ok(())
+    }
+
+    //    pub fn incr_oug_seqno(&mut self, msg: &mut Message) {
+    //        self.state.incr_oug_seqno(msg)
+    //    }
+    //
+    //    pub fn incr_packet_id(&mut self) {
+    //        self.state.incr_packet_id();
+    //    }
+    //
+    //    pub fn oug_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+    //        self.state.oug_qos0(msgs)
+    //    }
+    //
+    //    pub fn oug_qos12(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
+    //        self.state.oug_qos12(msgs)
+    //    }
+    //
+    //    pub fn commit_acks(&mut self, out_seqnos: Vec<OutSeqno>) {
+    //        self.state.commit_acks(out_seqnos)
+    //    }
+    //
+    //    pub fn oug_acks_flush(&mut self) -> QueueStatus<v5::Packet> {
+    //        let status = self.state.oug_acks_flush();
+    //        status.map(vec![])
+    //    }
+    //
+    //    pub fn oug_acks_publish(&mut self, packet_id: PacketID) {
+    //        self.state.oug_acks_publish(packet_id)
+    //    }
+}
+
+type HandleSubArgs<'a> = (TopicFilter, &'a v5::Subscription);
+
+impl SessionState {
+    fn handle_sub<'a, S>(&mut self, shard: &mut S, args: HandleSubArgs<'a>) -> Result<()>
+    where
+        S: Shard,
+    {
+        let (topic_filter, subscr) = args;
+
+        match self {
+            SessionState::Active(active) => {
+                active.cs_subscriptions.insert(topic_filter.clone(), subscr.clone());
+                match shard.as_topic_filters().subscribe(&topic_filter, subscr.clone()) {
+                    Some(old_subscr) => trace!(
+                        "{} topic_filter:{:?} client_id:{:?}",
+                        active.prefix,
+                        topic_filter,
+                        old_subscr.client_id
+                    ),
+                    None => (),
+                }
+            }
+            SessionState::Replica(replica) => {
+                replica.cs_subscriptions.insert(topic_filter.clone(), subscr.clone());
+            }
+            ss => unreachable!("{:?}", ss),
+        }
+
+        Ok(())
+    }
+
+    fn handle_unsub<'a, S>(
+        &mut self,
+        shard: &mut S,
+        subr: v5::Subscription,
+    ) -> Result<v5::UnsubAckReasonCode>
+    where
+        S: Shard,
+    {
+        use v5::UnsubAckReasonCode;
+
+        let filter = &subr.topic_filter;
+        let code = match self {
+            SessionState::Active(active) => {
+                let res1 = shard.as_topic_filters().unsubscribe(filter, &subr);
+                let res2 = active.cs_subscriptions.remove(filter);
+                match (&res1, &res2) {
+                    (Some(_), Some(_)) => UnsubAckReasonCode::Success,
+                    (None, None) => UnsubAckReasonCode::NoSubscriptionExisted,
+                    (Some(_), None) => {
+                        let msg = format!("{:?} filter in trie, not in session", filter);
+                        err_inconsistent_subscription(&active.prefix, &msg)?;
+                        UnsubAckReasonCode::UnspecifiedError
+                    }
+                    (None, Some(_)) => {
+                        let msg = format!("{:?} filter in session, not in trie", filter);
+                        err_inconsistent_subscription(&active.prefix, &msg)?;
+                        UnsubAckReasonCode::UnspecifiedError
+                    }
+                }
+            }
+            SessionState::Replica(replica) => {
+                replica.cs_subscriptions.remove(filter);
+                UnsubAckReasonCode::Success
+            }
+            ss => unreachable!("{:?}", ss),
+        };
+
+        Ok(code)
+    }
+
+    fn push_oug_acks(&mut self, msg: Message) -> Result<()> {
+        match self {
+            SessionState::Active(active) => active.oug_acks.push(msg),
+            ss => unreachable!("{:?}", ss),
+        }
+
+        Ok(())
+    }
+}
 
 //impl SessionState {
 //    fn incr_oug_seqno(&mut self, msg: &mut Message) {

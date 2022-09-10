@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::{borrow::Borrow, thread};
 
 use crate::broker::Spinlock;
-use crate::{v5, v5::Subscription, IterTopicPath, TopicFilter};
+use crate::{v5, v5::Subscription, ClientID, IterTopicPath};
 
 // NOTE: MQTT-Spec-v5. If the Retain Handling option is 0, any existing retained messages
 // matching the Topic Filter MUST be re-sent, but Applicaton Messages MUST NOT be
@@ -122,6 +122,7 @@ impl SubscribedTrie {
 }
 
 impl SubscribedTrie {
+    // return previous subscription for `key` owned by `client-id`.
     fn do_subscribe<'b, K>(&self, key: &'b K, value: Subscription) -> Option<Subscription>
     where
         K: IterTopicPath<'b>,
@@ -436,9 +437,9 @@ impl<V> Node<V> {
     // `first` is whether this is the first time a topic is subscribed.
     fn insert_value(&mut self, value: V) -> (bool, Option<V>)
     where
-        V: Ord + AsRef<TopicFilter>,
+        V: Ord + AsRef<ClientID>,
     {
-        let topic_filter: &TopicFilter = value.as_ref();
+        let client_id: &ClientID = value.as_ref();
         match self {
             // TODO: this match arm is redundant, fold it with Err(off) further down.
             Node::Child { values, .. } if values.len() == 0 => {
@@ -450,7 +451,7 @@ impl<V> Node<V> {
                 // Topic Filter that is identical to a Non-shared Subscription's Topic
                 // Filter for the current Session, then it MUST replace that existing
                 // Subscription with a new Subscription.
-                match values.binary_search_by_key(&topic_filter, |v| v.as_ref()) {
+                match values.binary_search_by_key(&client_id, |v| v.as_ref()) {
                     Ok(off) => {
                         values.push(value);
                         let replace = Some(values.swap_remove(off));
@@ -470,13 +471,13 @@ impl<V> Node<V> {
     // `last` is the last value for this topic.
     fn remove_value(&mut self, value: &V) -> (bool, Option<V>)
     where
-        V: Ord + AsRef<TopicFilter>,
+        V: Ord + AsRef<ClientID>,
     {
-        let topic_filter: &TopicFilter = value.as_ref();
+        let client_id: &ClientID = value.as_ref();
         match self {
             Node::Child { values, .. } if values.len() == 0 => (false, None),
             Node::Child { values, .. } => {
-                match values.binary_search_by_key(&topic_filter, |v| v.as_ref()) {
+                match values.binary_search_by_key(&client_id, |v| v.as_ref()) {
                     Ok(off) => {
                         let rmvalue = values.remove(off);
                         (values.len() == 0, Some(rmvalue))
@@ -523,7 +524,7 @@ impl<V> Node<V> {
     fn sub<'a, K>(&self, mut in_levels: K, value: V) -> (Node<V>, bool, Option<V>)
     where
         K: Iterator<Item = &'a str>,
-        V: Clone + Ord + AsRef<TopicFilter>,
+        V: Clone + Ord + AsRef<ClientID>,
     {
         let mut cow_node = self.cow_clone();
 
@@ -558,7 +559,7 @@ impl<V> Node<V> {
     fn unsub<'a, K>(&self, mut key: K, value: &V) -> (Option<Node<V>>, bool, Option<V>)
     where
         K: Iterator<Item = &'a str>,
-        V: Clone + Ord + AsRef<TopicFilter>,
+        V: Clone + Ord + AsRef<ClientID>,
     {
         let mut cow_node = self.cow_clone();
 
