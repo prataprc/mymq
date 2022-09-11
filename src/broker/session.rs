@@ -69,10 +69,7 @@ pub struct Common {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
     /// every outgoing publish packet.
     cs_oug_seqno: OutSeqno,
-    /// Message::Subscribe message.
-    /// Message::Unsubscribe message.
-    /// Message::Retain outgoing QoS-1/2 Retain-PUBLISH messages.
-    /// Message::Packet outgoing PUBLISH > QoS-0, first land here.
+    /// Message::Packet outgoing PUBLISH > QoS-1/2, first land here.
     ///
     /// Entries from this index are deleted after they are removed from
     /// `oug_retry_qos12` and after they go through the consensus loop.
@@ -105,7 +102,6 @@ pub struct Active {
     inc_qos12: Vec<PacketID>,
     // Message::ClientAck that needs to be sent to remote client.
     oug_acks: Vec<Message>,
-    // Message::Retain outgoing QoS-0 Retain-PUBLISH messages.
     // Message::Packet outgoing QoS-0 PUBLISH messages.
     oug_back_log: Vec<Message>,
     // This value is incremented for every out-going PUBLISH(qos>0).
@@ -603,7 +599,6 @@ impl Session {
             return Ok(());
         }
         self.book_qos(&publish)?;
-
         self.book_retain(&publish)?;
 
         let inp_seqno = shard.incr_inp_seqno();
@@ -649,11 +644,12 @@ impl Session {
 
         match (publish.qos, n_subscrs) {
             (v5::QoS::AtMostOnce, _) => (),
-            (_, 0) => {
+            (v5::QoS::AtLeastOnce, 0) => {
                 let puback = v5::Pub::new_pub_ack(publish.packet_id.unwrap());
                 route_io.oug_msgs.push(Message::new_pub_ack(puback));
             }
-            (v5::QoS::AtLeastOnce, _) | (v5::QoS::ExactlyOnce, _) => (),
+            (v5::QoS::AtLeastOnce, _) => (),
+            (v5::QoS::ExactlyOnce, _) => todo!(),
         }
 
         Ok(())
@@ -762,6 +758,43 @@ impl Session {
         todo!()
     }
 
+    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
+        let active = match &self.state {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        match publish.qos {
+            v5::QoS::AtMostOnce => false,
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                matches!(active.inc_qos12.binary_search(&packet_id), Ok(_))
+            }
+        }
+    }
+
+    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
+        let active = match &mut self.state {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        match publish.qos {
+            v5::QoS::AtMostOnce => (),
+            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                let packet_id = publish.packet_id.unwrap();
+                if let Err(off) = active.inc_qos12.binary_search(&packet_id) {
+                    active.inc_qos12.insert(off, packet_id);
+                } else {
+                    // is_duplicate() would have filtered this path.
+                    unreachable!()
+                }
+            }
+        };
+
+        Ok(())
+    }
+
     fn book_retain(&mut self, publish: &v5::Publish) -> Result<()> {
         if publish.retain && !self.config.mqtt_retain_available {
             err_unsup_retain(&self.prefix)?;
@@ -814,58 +847,30 @@ impl Session {
 
         Ok(topic_name)
     }
-
-    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
-        let active = match &self.state {
-            SessionState::Active(active) => active,
-            ss => unreachable!("{:?}", ss),
-        };
-
-        match publish.qos {
-            v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                matches!(active.inc_qos12.binary_search(&packet_id), Ok(_))
-            }
-        }
-    }
-
-    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
-        let active = match &mut self.state {
-            SessionState::Active(active) => active,
-            ss => unreachable!("{:?}", ss),
-        };
-
-        match publish.qos {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                if let Err(off) = active.inc_qos12.binary_search(&packet_id) {
-                    active.inc_qos12.insert(off, packet_id);
-                } else {
-                    // is_duplicate() would have filtered this path.
-                    unreachable!()
-                }
-            }
-        };
-
-        Ok(())
-    }
 }
 
 impl Session {
-    pub fn handle_subs<S>(&mut self, shard: &mut S, msgs: Vec<Message>) -> Result<()>
+    pub fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        self.state.extend_oug_acks(msgs)
+    }
+
+    pub fn tx_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        self.state.extend_oug_back_log(msgs)
+    }
+
+    pub fn commit_subs<S>(&mut self, s: &mut S, msgs: Vec<Message>) -> Result<QueueMsg>
     where
         S: Shard,
     {
+        let mut ack_msgs = Vec::default();
         for msg in msgs.into_iter() {
-            self.handle_sub(shard, msg)?
+            ack_msgs.push(self.commit_sub(s, msg)?);
         }
-
-        Ok(())
+        // ack_msgs is Message::ClientAck carrying sub-ack
+        Ok(self.state.extend_oug_acks(ack_msgs))
     }
 
-    fn handle_sub<S>(&mut self, shard: &mut S, msg: Message) -> Result<()>
+    fn commit_sub<S>(&mut self, shard: &mut S, msg: Message) -> Result<Message>
     where
         S: Shard,
     {
@@ -898,7 +903,7 @@ impl Session {
             };
 
             let args = (filter.topic_filter.clone(), &subscription);
-            self.state.handle_sub(shard, args)?;
+            self.state.commit_sub(shard, args)?;
 
             let rc = match subscription.qos {
                 v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
@@ -910,27 +915,25 @@ impl Session {
 
         match &self.state {
             SessionState::Active(_) => {
-                let msg = Message::new_suback(v5::SubAck::from_sub(&sub, return_codes));
-                self.state.push_oug_acks(msg)?;
+                Ok(Message::new_suback(v5::SubAck::from_sub(&sub, return_codes)))
             }
-            _ => (),
+            ss => unreachable!("{:?}", ss),
         }
-
-        Ok(())
     }
 
-    pub fn handle_unsubs<S>(&mut self, shard: &mut S, msgs: Vec<Message>) -> Result<()>
+    pub fn commit_unsubs<S>(&mut self, s: &mut S, msgs: Vec<Message>) -> Result<QueueMsg>
     where
         S: Shard,
     {
+        let mut ack_msgs = Vec::default();
         for msg in msgs.into_iter() {
-            self.handle_sub(shard, msg)?
+            ack_msgs.push(self.commit_unsub(s, msg)?)
         }
-
-        Ok(())
+        // ack_msgs is Message::ClientAck carrying unsub-ack
+        Ok(self.state.extend_oug_acks(ack_msgs))
     }
 
-    fn handle_unsub<S>(&mut self, shard: &mut S, msg: Message) -> Result<()>
+    fn commit_unsub<S>(&mut self, shard: &mut S, msg: Message) -> Result<Message>
     where
         S: Shard,
     {
@@ -946,19 +949,16 @@ impl Session {
             subscription.topic_filter = filter.clone();
             subscription.client_id = self.client_id.clone();
 
-            let code = self.state.handle_unsub(shard, subscription)?;
+            let code = self.state.commit_unsub(shard, subscription)?;
             rcodes.push(code);
         }
 
         match &self.state {
             SessionState::Active(_) => {
-                let msg = Message::new_unsuback(v5::UnsubAck::from_unsub(&unsub, rcodes));
-                self.state.push_oug_acks(msg)?;
+                Ok(Message::new_unsuback(v5::UnsubAck::from_unsub(&unsub, rcodes)))
             }
-            _ => (),
+            ss => unreachable!("{:?}", ss),
         }
-
-        Ok(())
     }
 
     //    pub fn incr_oug_seqno(&mut self, msg: &mut Message) {
@@ -967,10 +967,6 @@ impl Session {
     //
     //    pub fn incr_packet_id(&mut self) {
     //        self.state.incr_packet_id();
-    //    }
-    //
-    //    pub fn oug_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-    //        self.state.oug_qos0(msgs)
     //    }
     //
     //    pub fn oug_qos12(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
@@ -994,7 +990,7 @@ impl Session {
 type HandleSubArgs<'a> = (TopicFilter, &'a v5::Subscription);
 
 impl SessionState {
-    fn handle_sub<'a, S>(&mut self, shard: &mut S, args: HandleSubArgs<'a>) -> Result<()>
+    fn commit_sub<'a, S>(&mut self, shard: &mut S, args: HandleSubArgs<'a>) -> Result<()>
     where
         S: Shard,
     {
@@ -1022,7 +1018,7 @@ impl SessionState {
         Ok(())
     }
 
-    fn handle_unsub<'a, S>(
+    fn commit_unsub<'a, S>(
         &mut self,
         shard: &mut S,
         subr: v5::Subscription,
@@ -1062,13 +1058,54 @@ impl SessionState {
         Ok(code)
     }
 
-    fn push_oug_acks(&mut self, msg: Message) -> Result<()> {
-        match self {
-            SessionState::Active(active) => active.oug_acks.push(msg),
+    fn extend_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        let active = match self {
+            SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
+        };
+
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let m = active.oug_acks.len();
+        let n = (active.config.mqtt_pkt_batch_size as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} oug_acks {} pressure > {}", active.prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
         }
 
-        Ok(())
+        active.oug_acks.extend(msgs.into_iter());
+
+        let oug_acks = mem::replace(&mut active.oug_acks, vec![]);
+        let mut status = flush_to_miot(&active.prefix, &active.miot_tx, oug_acks);
+        let _empty = mem::replace(&mut active.oug_acks, status.take_values());
+
+        status
+    }
+
+    fn extend_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        let active = match self {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let m = active.oug_back_log.len();
+        let n = (active.config.mqtt_pkt_batch_size as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} oug_back_log {} pressure > {}", active.prefix, m, n);
+            return QueueStatus::Disconnected(Vec::new());
+        }
+
+        active.oug_back_log.extend(msgs.into_iter());
+
+        let oug_back_log = mem::replace(&mut active.oug_back_log, vec![]);
+        let mut status = flush_to_miot(&active.prefix, &active.miot_tx, oug_back_log);
+        let _empty = mem::replace(&mut active.oug_back_log, status.take_values());
+
+        status
     }
 }
 
@@ -1095,36 +1132,6 @@ impl SessionState {
 //        let packet_id = *next_packet_id;
 //        *next_packet_id = next_packet_id.wrapping_add(1);
 //        Some(packet_id)
-//    }
-//
-//    fn oug_qos0(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
-//        let (prefix, config, miot_tx, oug_back_log) = match self {
-//            SessionState::Active { prefix, config, miot_tx, oug_back_log, .. } => {
-//                (prefix, config, miot_tx, oug_back_log)
-//            }
-//            ss => unreachable!("{:?}", ss),
-//        };
-//
-//        let m = oug_back_log.len();
-//        // TODO: separate back-log limit from mqtt_pkt_batch_size.
-//        let n = (config.mqtt_pkt_batch_size as usize) * 4;
-//        if m > n {
-//            // TODO: if back-pressure is increasing due to a slow receiving client,
-//            // we will have to take drastic steps, like, closing this connection.
-//            error!("{} session.oug_back_log {} pressure > {}", prefix, m, n);
-//            return QueueStatus::Disconnected(Vec::new());
-//        }
-//
-//        for msg in msgs.into_iter() {
-//            let msg = msg.into_packet(None);
-//            oug_back_log.push(msg)
-//        }
-//
-//        let back_log = mem::replace(oug_back_log, vec![]);
-//        let mut status = flush_to_miot(prefix, miot_tx, back_log);
-//        let _empty = mem::replace(oug_back_log, status.take_values());
-//
-//        status
 //    }
 //
 //    fn oug_qos12(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
@@ -1308,7 +1315,7 @@ impl SessionState {
     }
 }
 
-fn flush_to_miot(prefix: &str, miot_tx: &mut PktTx, mut msgs: Vec<Message>) -> QueueMsg {
+fn flush_to_miot(prefix: &str, miot_tx: &PktTx, mut msgs: Vec<Message>) -> QueueMsg {
     let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
     let mut status = miot_tx.try_sends(&prefix, pkts);
     let pkts = status.take_values();

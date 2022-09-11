@@ -16,27 +16,24 @@ pub struct PktTx {
     miot_id: u32, // packet queue for shard/miot is same for both.
     tx: mpsc::SyncSender<v5::Packet>, // shard/miot incoming packet queue.
     waker: Arc<mio::Waker>, // shard/miot waker
-    count: usize,
 }
 
 impl Drop for PktTx {
     fn drop(&mut self) {
-        if self.count > 0 {
-            match self.waker.wake() {
-                Ok(()) => (),
-                Err(err) => error!("waking shard/miot-{} err:{}", self.miot_id, err),
-            }
+        match self.waker.wake() {
+            Ok(()) => (),
+            Err(err) => error!("waking shard/miot-{} err:{}", self.miot_id, err),
         }
     }
 }
 
 impl PktTx {
-    pub fn try_sends(&mut self, prefix: &str, pkts: Vec<v5::Packet>) -> QueuePkt {
+    pub fn try_sends(&self, prefix: &str, pkts: Vec<v5::Packet>) -> QueuePkt {
         let mut iter = pkts.into_iter();
         loop {
             match iter.next() {
                 Some(pkt) => match self.tx.try_send(pkt) {
-                    Ok(()) => self.count += 1,
+                    Ok(()) => (),
                     Err(mpsc::TrySendError::Full(pkt)) => {
                         let mut pkts: Vec<v5::Packet> = Vec::from_iter(iter);
                         pkts.insert(0, pkt);
@@ -360,7 +357,7 @@ impl Socket {
 /// When PktTx is dropped, thread will be woken up using `waker`.
 pub fn pkt_channel(miot_id: u32, size: usize, waker: Arc<mio::Waker>) -> (PktTx, PktRx) {
     let (tx, rx) = mpsc::sync_channel(size);
-    let pkt_tx = PktTx { miot_id, tx, waker, count: usize::default() };
+    let pkt_tx = PktTx { miot_id, tx, waker };
     let pkt_rx = PktRx { pkt_batch_size: size, rx };
 
     (pkt_tx, pkt_rx)

@@ -9,13 +9,16 @@ use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};
 
-// Message::ClientAck carrying PingResp
-// Message::Subscribe
-// Message::UnSubscribe
-// Message::Retain
 #[derive(Default)]
 pub struct RouteIO {
     pub disconnected: bool,
+    // Message::ClientAck carrying PingResp
+    // Message::ClientAck carrying PubAck
+    // Message::Retain
+    // Message::Subscribe
+    // Message::UnSubscribe
+    // Message::ShardIndex
+    // Message::Routed
     pub oug_msgs: Vec<Message>,
 }
 
@@ -125,6 +128,7 @@ pub enum Message {
     Retain { publish: v5::Publish },
     /// CONNACK  - happens during add_session.
     /// PINGRESP - happens for every PINGREQ is handled by this session.
+    /// PubAck - happens for every PINGREQ is handled by this session.
     /// SUBACK   - happens after SUBSCRIBE is commited to [Shard].
     /// UNSUBACK - happens after UNSUBSCRIBE is commited to [Shard].
     ClientAck { packet: v5::Packet },
