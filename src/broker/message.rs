@@ -114,24 +114,15 @@ impl MsgRx {
 /// Message is a unit of communication between shards hosted on the same node.
 #[derive(Clone, Eq, PartialEq)]
 pub enum Message {
-    // session boundary
-    /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
-    /// sending them downstream.
-    Packet {
-        out_seqno: OutSeqno,
-        packet_id: Option<PacketID>,
-        publish: v5::Publish,
-    },
-
     // shard boundary
-    /// Retain publish messages.
-    Retain { publish: v5::Publish },
     /// CONNACK  - happens during add_session.
     /// PINGRESP - happens for every PINGREQ is handled by this session.
-    /// PubAck - happens for every PINGREQ is handled by this session.
+    /// PUBACK   - happens for every PINGREQ is handled by this session.
     /// SUBACK   - happens after SUBSCRIBE is commited to [Shard].
     /// UNSUBACK - happens after UNSUBSCRIBE is commited to [Shard].
     ClientAck { packet: v5::Packet },
+    /// Retain publish messages.
+    Retain { publish: v5::Publish },
     /// Consensus Loop.
     Subscribe { sub: v5::Subscribe },
     /// Consensus Loop.
@@ -158,6 +149,15 @@ pub enum Message {
     LocalAck {
         shard_id: u32,        // shard sending the acknowledgement
         last_acked: InpSeqno, // from publishing-shard.
+    },
+
+    // session boundary
+    /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
+    /// sending them downstream.
+    Packet {
+        out_seqno: OutSeqno,
+        packet_id: Option<PacketID>,
+        publish: v5::Publish,
     },
 }
 
@@ -306,20 +306,7 @@ impl Message {
     pub fn to_packet_id(&self) -> PacketID {
         match self {
             Message::Packet { packet_id: Some(packet_id), .. } => *packet_id,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn as_client_id(&self) -> &ClientID {
-        match self {
-            Message::Routed { client_id, .. } => client_id,
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn to_qos(&self) -> v5::QoS {
-        match self {
-            Message::Routed { publish, .. } => publish.qos.clone(),
+            Message::ShardIndex { packet_id, .. } => *packet_id,
             _ => unreachable!(),
         }
     }

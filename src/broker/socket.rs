@@ -230,7 +230,7 @@ impl Socket {
 
     // QueueStatus shall not carry any packets
     pub fn send_upstream(&mut self, prefix: &str) -> QueueStatus<v5::Packet> {
-        let mut session_tx = self.rd.session_tx.clone(); // shard woken when dropped
+        let session_tx = self.rd.session_tx.clone(); // shard woken when dropped
 
         let pkts: Vec<v5::Packet> =
             mem::replace(&mut self.rd.packets, VecDeque::default()).into();

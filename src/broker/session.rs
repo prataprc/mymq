@@ -98,8 +98,9 @@ pub struct Active {
     miot_tx: PktTx,        // Outbound channel to Miot thread.
     session_rx: PktRx,     // Inbound channel from Miot thread.
 
-    // Sorted list of QoS-1 & QoS-2 PacketID for managing incoming duplicate publish.
-    inc_qos12: Vec<PacketID>,
+    // Sorted list of QoS-1 & QoS-2, SUB, UNSUB packet_id for managing incoming
+    // duplicate publish and/or  Subscribe and UnSubscribe packets
+    inc_packet_ids: Vec<PacketID>,
     // Message::ClientAck that needs to be sent to remote client.
     oug_acks: Vec<Message>,
     // Message::Packet outgoing QoS-0 PUBLISH messages.
@@ -127,7 +128,7 @@ impl From<SessionArgsActive> for Active {
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
 
-            inc_qos12: Vec::default(),
+            inc_packet_ids: Vec::default(),
             oug_acks: Vec::default(),
             oug_back_log: Vec::default(),
             next_packet_id: 1,
@@ -532,6 +533,11 @@ impl Session {
     where
         S: Shard,
     {
+        if self.is_duplicate(&pkt) {
+            return Ok(());
+        }
+        self.book_packet_id(&pkt)?;
+
         let sub = match pkt {
             v5::Packet::Subscribe(sub) => sub,
             _ => unreachable!(),
@@ -571,6 +577,11 @@ impl Session {
     where
         S: Shard,
     {
+        if self.is_duplicate(&pkt) {
+            return Ok(());
+        }
+        self.book_packet_id(&pkt)?;
+
         let unsub = match pkt {
             v5::Packet::UnSubscribe(unsub) => unsub,
             _ => unreachable!(),
@@ -584,6 +595,11 @@ impl Session {
     where
         S: Shard,
     {
+        if self.is_duplicate(&pkt) {
+            return Ok(());
+        }
+        self.book_packet_id(&pkt)?;
+
         let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
 
         let publish = match pkt {
@@ -595,10 +611,6 @@ impl Session {
             err_unsup_qos(&self.prefix, publish.qos)?
         }
 
-        if self.is_duplicate(&publish) {
-            return Ok(());
-        }
-        self.book_qos(&publish)?;
         self.book_retain(&publish)?;
 
         let inp_seqno = shard.incr_inp_seqno();
@@ -758,39 +770,66 @@ impl Session {
         todo!()
     }
 
-    fn is_duplicate(&self, publish: &v5::Publish) -> bool {
+    fn is_duplicate(&self, pkt: &v5::Packet) -> bool {
         let active = match &self.state {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
         };
 
-        match publish.qos {
-            v5::QoS::AtMostOnce => false,
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                matches!(active.inc_qos12.binary_search(&packet_id), Ok(_))
+        match pkt {
+            v5::Packet::Publish(publish) => match publish.qos {
+                v5::QoS::AtMostOnce => false,
+                v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                    let packet_id = publish.packet_id.unwrap();
+                    matches!(active.inc_packet_ids.binary_search(&packet_id), Ok(_))
+                }
+            },
+            v5::Packet::Subscribe(sub) => {
+                let packet_id = sub.packet_id;
+                matches!(active.inc_packet_ids.binary_search(&packet_id), Ok(_))
             }
+            v5::Packet::UnSubscribe(unsub) => {
+                let packet_id = unsub.packet_id;
+                matches!(active.inc_packet_ids.binary_search(&packet_id), Ok(_))
+            }
+            pkt => unreachable!("{:?} packet type", pkt.to_packet_type()),
         }
     }
 
-    fn book_qos(&mut self, publish: &v5::Publish) -> Result<()> {
+    fn book_packet_id(&mut self, pkt: &v5::Packet) -> Result<()> {
         let active = match &mut self.state {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
         };
 
-        match publish.qos {
-            v5::QoS::AtMostOnce => (),
-            v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
-                let packet_id = publish.packet_id.unwrap();
-                if let Err(off) = active.inc_qos12.binary_search(&packet_id) {
-                    active.inc_qos12.insert(off, packet_id);
+        match pkt {
+            v5::Packet::Publish(publish) => match publish.qos {
+                v5::QoS::AtMostOnce => (),
+                v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                    let packet_id = publish.packet_id.unwrap();
+                    if let Err(off) = active.inc_packet_ids.binary_search(&packet_id) {
+                        active.inc_packet_ids.insert(off, packet_id);
+                    } else {
+                        unreachable!() // is_duplicate() would have filtered this path.
+                    }
+                }
+            },
+            v5::Packet::Subscribe(sub) => {
+                if let Err(off) = active.inc_packet_ids.binary_search(&sub.packet_id) {
+                    active.inc_packet_ids.insert(off, sub.packet_id);
                 } else {
-                    // is_duplicate() would have filtered this path.
-                    unreachable!()
+                    unreachable!() // is_duplicate() would have filtered this path.
                 }
             }
-        };
+            v5::Packet::UnSubscribe(unsub) => {
+                if let Err(off) = active.inc_packet_ids.binary_search(&unsub.packet_id) {
+                    active.inc_packet_ids.insert(off, unsub.packet_id);
+                } else {
+                    unreachable!() // is_duplicate() would have filtered this path.
+                }
+            }
+            pkt => unreachable!("{:?} packet type", pkt.to_packet_type()),
+        }
 
         Ok(())
     }
@@ -851,11 +890,11 @@ impl Session {
 
 impl Session {
     pub fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
-        self.state.extend_oug_acks(msgs)
+        self.state.tx_oug_acks(msgs)
     }
 
     pub fn tx_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
-        self.state.extend_oug_back_log(msgs)
+        self.state.tx_oug_back_log(msgs)
     }
 
     pub fn commit_subs<S>(&mut self, s: &mut S, msgs: Vec<Message>) -> Result<QueueMsg>
@@ -867,7 +906,7 @@ impl Session {
             ack_msgs.push(self.commit_sub(s, msg)?);
         }
         // ack_msgs is Message::ClientAck carrying sub-ack
-        Ok(self.state.extend_oug_acks(ack_msgs))
+        Ok(self.state.tx_oug_acks(ack_msgs))
     }
 
     fn commit_sub<S>(&mut self, shard: &mut S, msg: Message) -> Result<Message>
@@ -930,7 +969,7 @@ impl Session {
             ack_msgs.push(self.commit_unsub(s, msg)?)
         }
         // ack_msgs is Message::ClientAck carrying unsub-ack
-        Ok(self.state.extend_oug_acks(ack_msgs))
+        Ok(self.state.tx_oug_acks(ack_msgs))
     }
 
     fn commit_unsub<S>(&mut self, shard: &mut S, msg: Message) -> Result<Message>
@@ -959,6 +998,10 @@ impl Session {
             }
             ss => unreachable!("{:?}", ss),
         }
+    }
+
+    pub fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
+        self.state.commit_cs_oug_back_log(msgs)
     }
 
     //    pub fn incr_oug_seqno(&mut self, msg: &mut Message) {
@@ -1058,7 +1101,7 @@ impl SessionState {
         Ok(code)
     }
 
-    fn extend_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
+    fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
@@ -1077,13 +1120,24 @@ impl SessionState {
         active.oug_acks.extend(msgs.into_iter());
 
         let oug_acks = mem::replace(&mut active.oug_acks, vec![]);
-        let mut status = flush_to_miot(&active.prefix, &active.miot_tx, oug_acks);
+        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, oug_acks);
         let _empty = mem::replace(&mut active.oug_acks, status.take_values());
+
+        for packet_id in ids.into_iter() {
+            match active.inc_packet_ids.binary_search(&packet_id) {
+                Ok(off) => {
+                    active.inc_packet_ids.remove(off);
+                }
+                Err(_off) => {
+                    error!("{} packet_id:{} not booked", active.prefix, packet_id)
+                }
+            }
+        }
 
         status
     }
 
-    fn extend_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
+    fn tx_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
@@ -1102,10 +1156,17 @@ impl SessionState {
         active.oug_back_log.extend(msgs.into_iter());
 
         let oug_back_log = mem::replace(&mut active.oug_back_log, vec![]);
-        let mut status = flush_to_miot(&active.prefix, &active.miot_tx, oug_back_log);
+        let (ids, mut status) =
+            flush_to_miot(&active.prefix, &active.miot_tx, oug_back_log);
         let _empty = mem::replace(&mut active.oug_back_log, status.take_values());
 
+        debug_assert!(ids.len() == 0);
+
         status
+    }
+
+    fn commit_cs_oug_back_log(&mut self, _msgs: Vec<Message>) -> QueueMsg {
+        todo!()
     }
 }
 
@@ -1232,39 +1293,6 @@ impl SessionState {
 //        }
 //    }
 //
-//    fn oug_acks_flush(&mut self) -> QueueStatus<Message> {
-//        let (prefix, miot_tx, inc_qos12, oug_acks) = match self {
-//            SessionState::Active { prefix, miot_tx, inc_qos12, oug_acks, .. } => {
-//                (prefix, miot_tx, inc_qos12, oug_acks)
-//            }
-//            ss => unreachable!("{:?}", ss),
-//        };
-//
-//        for ack in oug_acks.iter() {
-//            match ack {
-//                Message::ClientAck { packet } => match packet {
-//                    v5::Packet::Publish(publish) => match publish.packet_id {
-//                        Some(packet_id) => match inc_qos12.binary_search(&packet_id) {
-//                            Ok(off) => {
-//                                inc_qos12.remove(off);
-//                            }
-//                            Err(_off) => (), // TODO: warning messages
-//                        },
-//                        None => (),
-//                    },
-//                    _ => (),
-//                },
-//                msg => unreachable!("{:?}", msg),
-//            }
-//        }
-//
-//        let mut status = {
-//            let acks = mem::replace(oug_acks, Vec::default());
-//            flush_to_miot(prefix, miot_tx, acks)
-//        };
-//        let _empty = mem::replace(oug_acks, status.take_values());
-//        status
-//    }
 //}
 //
 //impl SessionState {
@@ -1315,16 +1343,32 @@ impl SessionState {
     }
 }
 
-fn flush_to_miot(prefix: &str, miot_tx: &PktTx, mut msgs: Vec<Message>) -> QueueMsg {
+// Flush `Message::ClientAck` and `Message::Packet` downstream
+fn flush_to_miot(
+    prefix: &str,
+    miot_tx: &PktTx,
+    mut msgs: Vec<Message>,
+) -> (Vec<PacketID>, QueueMsg) {
     let pkts: Vec<v5::Packet> = msgs.iter().map(|m| m.to_v5_packet()).collect();
     let mut status = miot_tx.try_sends(&prefix, pkts);
     let pkts = status.take_values();
 
     let m = msgs.len();
     let n = pkts.len();
-    msgs.drain(..(m - n));
 
-    status.map(msgs)
+    let mut packet_ids = Vec::default();
+    for msg in msgs.drain(..(m - n)) {
+        if let Message::ClientAck { packet } = msg {
+            match packet {
+                v5::Packet::PubAck(puback) => packet_ids.push(puback.packet_id),
+                v5::Packet::SubAck(suback) => packet_ids.push(suback.packet_id),
+                v5::Packet::UnsubAck(unsuback) => packet_ids.push(unsuback.packet_id),
+                _ => (),
+            }
+        }
+    }
+
+    (packet_ids, status.map(msgs))
 }
 
 type PubMatches = BTreeMap<ClientID, (v5::Subscription, Vec<u32>)>;
