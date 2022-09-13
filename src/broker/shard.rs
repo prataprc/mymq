@@ -585,65 +585,9 @@ impl Shard {
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
             let mut args = ActiveContext::new(msg_rx, inner);
 
-            let mut fail_sessions: Vec<FailSession> = Vec::default();
-            let sessions = match &mut args.inner {
-                Inner::MainActive(ActiveLoop { sessions, .. }) => {
-                    mem::replace(sessions, BTreeMap::default())
-                }
-                inner => unreachable!("{} {:?}", self.prefix, inner),
-            };
-
-            let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
-            for (client_id, session) in sessions.into_iter() {
-                let _empty_session = mem::replace(&mut args.session, session);
-                let res = self.active_pre_cs(&mut args);
-                let session = mem::replace(&mut args.session, _empty_session);
-
-                if let Ok(true) = &res {
-                    let val = FailSession { session, err: err_disconnected().err() };
-                    fail_sessions.push(val);
-                    continue;
-                }
-                if let Err(err) = res {
-                    fail_sessions.push(FailSession { session, err: Some(err) });
-                    continue;
-                }
-                sessions1.insert(client_id, session);
-            }
-
-            // TODO uncomment the following
-            //if self.active_cs(&mut args) {
-            //    let val = FailSession { client_id, err: err_disconnected().err() };
-            //    fail_sessions.push(val);
-            //    continue;
-            //}
-
-            let mut sessions2: BTreeMap<ClientID, Session> = BTreeMap::default();
-            for (client_id, session) in sessions1.into_iter() {
-                let _empty_session = mem::replace(&mut args.session, session);
-                // TODO: uncomment the following two blocks
-                //let res = self.active_post_cs(&mut args);
-                let session = mem::replace(&mut args.session, _empty_session);
-
-                //if let Ok(true) = &res {
-                //    let val = FailSession { session, err: err_disconnected().err() };
-                //    fail_sessions.push(val);
-                //    continue;
-                //}
-                //if let Err(err) = res {
-                //    fail_sessions.push(FailSession { session, err });
-                //    continue;
-                //}
-
-                sessions2.insert(client_id, session);
-            }
-
-            match &mut args.inner {
-                Inner::MainActive(ActiveLoop { sessions, .. }) => {
-                    let _empty = mem::replace(sessions, sessions2);
-                }
-                inner => unreachable!("{} {:?}", self.prefix, inner),
-            };
+            self.active_pre_cs(&mut args);
+            self.active_cs(&mut args);
+            self.active_post_cs(&mut args);
 
             msg_rx = args.msg_rx;
             inner = args.inner;
@@ -663,57 +607,125 @@ impl Shard {
         self
     }
 
-    // return exit status
-    fn active_pre_cs(&mut self, args: &mut ActiveContext) -> Result<bool> {
-        let mut route_io = args.session.route_packets(self)?;
-        self.book_incoming_messages(args, &mut route_io);
+    fn active_pre_cs(&mut self, args: &mut ActiveContext) {
+        let sessions = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, BTreeMap::default())
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
 
-        self.send_to_shards();
-        Ok(route_io.disconnected)
+        let mut fail_sessions: Vec<FailSession> = Vec::default();
+        let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
+        for (client_id, session) in sessions.into_iter() {
+            let _empty_session = mem::replace(&mut args.session, session);
+            match args.session.route_packets(self) {
+                Ok(mut route_io) if route_io.disconnected => {
+                    let session = mem::replace(&mut args.session, _empty_session);
+                    let val = FailSession { session, err: err_disconnected().err() };
+                    fail_sessions.push(val);
+                }
+                Ok(mut route_io) => {
+                    self.book_incoming_messages(args, &mut route_io);
+                    self.send_to_shards();
+
+                    let session = mem::replace(&mut args.session, _empty_session);
+                    sessions1.insert(client_id, session);
+                }
+                Err(err) => {
+                    let session = mem::replace(&mut args.session, _empty_session);
+                    fail_sessions.push(FailSession { session, err: Some(err) });
+                    continue;
+                }
+            };
+        }
+
+        self.clean_failed_sessions(fail_sessions);
+        let _empty = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, sessions1)
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
     }
 
-    //// return exit-status
-    //fn active_cs(&mut self, args: &mut ActiveContext) -> bool {
-    //    let mut disconnected = false;
-    //    let client_id = args.session.as_client_id().clone();
+    fn active_cs(&mut self, args: &mut ActiveContext) {
+        let sessions = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, BTreeMap::default())
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
 
-    //    // Other shards might have routed messages to a session owned by this shard,
-    //    // we will handle it here and push them down to the socket.
-    //    args.cons_io = self.rx_messages(args);
+        let mut fail_sessions: Vec<FailSession> = Vec::default();
+        let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
+        for (client_id, session) in sessions.into_iter() {
+            let _empty_session = mem::replace(&mut args.session, session);
 
-    //    let oug_qos0 = args.cons_io.remove(&client_id);
-    //    if let Some(msgs) = oug_qos0 {
-    //        disconnected = args.session.oug_qos0(msgs).is_disconnected();
-    //    }
+            //let mut disconnected = false;
+            //let client_id = args.session.as_client_id().clone();
+            //// Other shards might have routed messages to a session owned by this shard,
+            //// we will handle it here and push them down to the socket.
+            //args.cons_io = self.rx_messages(args);
+            //let oug_qos0 = args.cons_io.remove(&client_id);
+            //if let Some(msgs) = oug_qos0 {
+            //    disconnected = args.session.oug_qos0(msgs).is_disconnected();
+            //}
 
-    //    // TODO: replicate relevant fields of cons_io in the consensus loop.
-    //    // TODO: fetch msgs from consensus loop and start commiting.
+            let session = mem::replace(&mut args.session, _empty_session);
+            sessions1.insert(client_id, session);
+        }
 
-    //    disconnected
-    //}
+        // TODO: replicate relevant fields of cons_io in the consensus loop.
+        // TODO: fetch msgs from consensus loop and start commiting.
 
-    //// return session exit status
-    //fn active_post_cs(&mut self, args: &mut ActiveContext) -> Result<bool> {
-    //    let client_id = args.session.as_client_id().clone();
+        self.clean_failed_sessions(fail_sessions);
+        let _empty = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, sessions1)
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+    }
 
-    //    let oug_qos12 = args.cons_io.remove(&client_id);
-    //    if let Some(msgs) = oug_qos12 {
-    //        args.session.oug_qos12(msgs)
-    //    }
+    fn active_post_cs(&mut self, args: &mut ActiveContext) {
+        let sessions = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, BTreeMap::default())
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
 
-    //    self.commit_acks(ack_out_seqnos);
-    //    self.commit_messages(qos_msgs, &mut qos_acks);
-    //    self.out_acks_publish();
-    //    self.out_acks_flush();
+        let mut fail_sessions: Vec<FailSession> = Vec::default();
+        let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
+        for (client_id, session) in sessions.into_iter() {
+            let _empty_session = mem::replace(&mut args.session, session);
 
-    //    self.return_local_acks(qos_acks);
-    //    self.send_to_shards();
+            //let oug_qos12 = args.cons_io.remove(&client_id);
+            //if let Some(msgs) = oug_qos12 {
+            //    args.session.oug_qos12(msgs)
+            //}
 
-    //    // cleanup sessions
-    //    self.clean_failed_sessions();
+            //self.commit_acks(ack_out_seqnos);
+            //self.commit_messages(qos_msgs, &mut qos_acks);
+            //self.out_acks_publish();
+            //self.out_acks_flush();
 
-    //    Ok(route_id.disconnected)
-    //}
+            //self.return_local_acks(qos_acks);
+            //self.send_to_shards();
+
+            let session = mem::replace(&mut args.session, _empty_session);
+            sessions1.insert(client_id, session);
+        }
+
+        self.clean_failed_sessions(fail_sessions);
+        let _empty = match &mut args.inner {
+            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+                mem::replace(sessions, sessions1)
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+    }
 
     fn book_incoming_messages(&mut self, args: &mut ActiveContext, rio: &mut RouteIO) {
         let ActiveLoop { index, shard_back_log, ack_timestamps, .. } =
