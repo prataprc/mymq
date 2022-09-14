@@ -73,7 +73,7 @@ pub struct Common {
     ///
     /// Entries from this index are deleted after they are removed from
     /// `oug_retry_qos12` and after they go through the consensus loop.
-    cs_oug_back_log: BTreeMap<OutSeqno, Message>,
+    cs_oug_back_log: Vec<Message>,
 }
 
 impl Default for Common {
@@ -84,7 +84,7 @@ impl Default for Common {
             topic_aliases: BTreeMap::default(),
             cs_subscriptions: BTreeMap::default(),
             cs_oug_seqno: 1,
-            cs_oug_back_log: BTreeMap::default(),
+            cs_oug_back_log: Vec::default(),
         }
     }
 }
@@ -104,13 +104,13 @@ pub struct Active {
     // Message::ClientAck that needs to be sent to remote client.
     oug_acks: Vec<Message>,
     // Message::Packet outgoing QoS-0 PUBLISH messages.
-    // Message::Packet outgoing QoS-0/1/2 Retain messages.
+    // Message::Packet outgoing QoS-0 Retain messages.
     oug_back_log: Vec<Message>,
     // This value is incremented for every out-going PUBLISH(qos>0).
     // If index.len() > `receive_maximum`, don't increment this value.
     next_packet_id: PacketID,
-    // Message::Packet outgoing QoS-0 PUBLISH messages.
-    // Message::Packet outgoing QoS-0/1/2 Retain messages.
+    // Message::Packet outgoing QoS-1/2 PUBLISH messages.
+    // Message::Packet outgoing QoS-1/2 Retain messages.
     //
     // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
     // messages sent to subscribed clients. Entry is deleted from `oug_retry_qos12`
@@ -256,7 +256,7 @@ impl Session {
                     mem::replace(&mut replica.cs_subscriptions, BTreeMap::default());
                 active.cs_oug_seqno = replica.cs_oug_seqno;
                 active.cs_oug_back_log =
-                    mem::replace(&mut replica.cs_oug_back_log, BTreeMap::default());
+                    mem::replace(&mut replica.cs_oug_back_log, Vec::default());
                 SessionState::Active(active)
             }
             SessionState::Reconnect(mut reconnect) => {
@@ -266,7 +266,7 @@ impl Session {
                     mem::replace(&mut reconnect.cs_subscriptions, BTreeMap::default());
                 active.cs_oug_seqno = reconnect.cs_oug_seqno;
                 active.cs_oug_back_log =
-                    mem::replace(&mut reconnect.cs_oug_back_log, BTreeMap::default());
+                    mem::replace(&mut reconnect.cs_oug_back_log, Vec::default());
                 SessionState::Active(active)
             }
         };
@@ -302,7 +302,7 @@ impl Session {
                     mem::replace(&mut reconnect.cs_subscriptions, BTreeMap::default());
                 replica.cs_oug_seqno = reconnect.cs_oug_seqno;
                 replica.cs_oug_back_log =
-                    mem::replace(&mut reconnect.cs_oug_back_log, BTreeMap::default());
+                    mem::replace(&mut reconnect.cs_oug_back_log, Vec::default());
                 SessionState::Replica(replica)
             }
             ss => unreachable!("{:?}", ss),
@@ -339,7 +339,7 @@ impl Session {
                         cs_oug_seqno: active.cs_oug_seqno,
                         cs_oug_back_log: mem::replace(
                             &mut active.cs_oug_back_log,
-                            BTreeMap::default(),
+                            Vec::default(),
                         ),
                     },
                 };
@@ -1022,7 +1022,7 @@ impl Session {
         }
     }
 
-    pub fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
+    pub fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
         self.state.commit_cs_oug_back_log(msgs)
     }
 
@@ -1207,8 +1207,32 @@ impl SessionState {
         Ok(code)
     }
 
-    fn commit_cs_oug_back_log(&mut self, _msgs: Vec<Message>) -> QueueMsg {
-        todo!()
+    fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
+        let active = match self {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let m = active.cs_oug_back_log.len();
+        let n = (active.config.mqtt_pkt_batch_size as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} cs_oug_back_log {} pressure > {}", active.prefix, m, n);
+            return Ok(QueueStatus::Disconnected(Vec::new()));
+        }
+
+        active.cs_oug_back_log.extend(msgs.into_iter());
+
+        let cs_oug_back_log = mem::replace(&mut active.cs_oug_back_log, vec![]);
+        let (ids, mut status) =
+            flush_to_miot(&active.prefix, &active.miot_tx, cs_oug_back_log);
+        let _empty = mem::replace(&mut active.cs_oug_back_log, status.take_values());
+
+        debug_assert!(ids.len() == 0);
+
+        Ok(status)
     }
 
     fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
@@ -1375,13 +1399,6 @@ impl SessionState {
     fn as_mut_oug_back_log(&mut self) -> &mut Vec<Message> {
         match self {
             SessionState::Active(active) => &mut active.oug_back_log,
-            ss => unreachable!("{:?}", ss),
-        }
-    }
-
-    fn as_mut_cs_oug_back_log(&mut self) -> &mut BTreeMap<OutSeqno, Message> {
-        match self {
-            SessionState::Active(active) => &mut active.cs_oug_back_log,
             ss => unreachable!("{:?}", ss),
         }
     }

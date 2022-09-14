@@ -15,7 +15,6 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
-type Acks = BTreeMap<u32, InpSeqno>;
 
 macro_rules! append_index {
     ($index:expr, $key:expr, $val:expr) => {{
@@ -708,18 +707,57 @@ impl Shard {
         for (client_id, session) in sessions.into_iter() {
             let _empty_session = mem::replace(&mut args.session, session);
 
-            //let oug_qos12 = args.cons_io.remove(&client_id);
-            //if let Some(msgs) = oug_qos12 {
-            //    args.session.oug_qos12(msgs)
-            //}
+            let subs = match args.cons_io.oug_subs.remove(&client_id) {
+                Some(subs) => subs,
+                None => Vec::default(),
+            };
+            let unsubs = match args.cons_io.oug_unsubs.remove(&client_id) {
+                Some(unsubs) => unsubs,
+                None => Vec::default(),
+            };
+            let oug_qos12 = match args.cons_io.oug_subs.remove(&client_id) {
+                Some(oug_qos12) => oug_qos12,
+                None => Vec::default(),
+            };
 
-            //self.commit_acks(ack_out_seqnos);
-            //self.commit_messages(qos_msgs, &mut qos_acks);
-            //self.out_acks_publish();
-            //self.out_acks_flush();
+            let (disconnected, err) = match args.session.commit_subs(self, subs) {
+                Ok(status) => (status.is_disconnected(), None),
+                Err(err) => (true, Some(err)),
+            };
 
-            let session = mem::replace(&mut args.session, _empty_session);
-            sessions1.insert(client_id, session);
+            let (disconnected, err) = if !disconnected {
+                match args.session.commit_unsubs(self, unsubs) {
+                    Ok(status) => (status.is_disconnected(), None),
+                    Err(err) => (true, Some(err)),
+                }
+            } else {
+                (disconnected, err)
+            };
+
+            let (disconnected, err) = if !disconnected {
+                let mut msgs = Vec::default();
+                for msg in oug_qos12.into_iter() {
+                    let (out_seqno, packet_id) = args.session.incr_oug_qos12();
+                    msgs.push(msg.into_packet(out_seqno, Some(packet_id)));
+                }
+                match args.session.book_oug_qos12(msgs.clone()) {
+                    Ok(()) => match args.session.commit_cs_oug_back_log(msgs) {
+                        Ok(status) => (status.is_disconnected(), None),
+                        Err(err) => (true, Some(err)),
+                    },
+                    Err(err) => (true, Some(err)),
+                }
+            } else {
+                (disconnected, err)
+            };
+
+            if disconnected {
+                let session = mem::replace(&mut args.session, _empty_session);
+                fail_sessions.push(FailSession { session, err });
+            } else {
+                let session = mem::replace(&mut args.session, _empty_session);
+                sessions1.insert(client_id, session);
+            }
         }
 
         self.clean_failed_sessions(fail_sessions);
@@ -801,9 +839,13 @@ impl Shard {
         let status = args.session.tx_oug_back_log(oug_qos0);
         rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
 
-        args.session.book_oug_qos12(oug_qos12.clone()).unwrap();
-        let status = args.session.tx_oug_back_log(oug_qos12);
-        rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
+        rio.disconnected = match args.session.book_oug_qos12(oug_qos12.clone()) {
+            Ok(()) => {
+                let status = args.session.tx_oug_back_log(oug_qos12);
+                matches!(status, QueueStatus::Disconnected(_))
+            }
+            Err(_err) => true,
+        };
     }
 
     // Flush outgoing messages, in `shard_back_log` from this shard to other shards.
@@ -868,7 +910,7 @@ impl Shard {
     }
 
     fn return_local_acks(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
-        let ActiveLoop { shard_back_log, shard_queues, .. } = match &mut args.inner {
+        let ActiveLoop { shard_back_log, .. } = match &mut args.inner {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -885,21 +927,6 @@ impl Shard {
             }
         }
     }
-
-    //// replicated messages comming from consensus loop, commit them.
-    //// acknowldegments for outgoing PUBLISH QoS-1 & QoS-2
-    //fn commit_acks(&mut self, ack_out_seqnos: BTreeMap<ClientID, Vec<OutSeqno>>) {
-    //    let ActiveLoop { sessions, .. } = match &mut self.inner {
-    //        Inner::MainActive(active_loop) => active_loop,
-    //        inner => unreachable!("{} {:?}", self.prefix, inner),
-    //    };
-
-    //    for (client_id, out_seqnos) in ack_out_seqnos.into_iter() {
-    //        if let Some(session) = sessions.get_mut(&client_id) {
-    //            session.commit_acks(out_seqnos);
-    //        }
-    //    }
-    //}
 
     //fn commit_messages(&mut self, qos_msgs: Vec<Message>, acks: &mut Acks) {
     //    match &self.inner {
@@ -1604,12 +1631,6 @@ impl Shard {
 struct FailSession {
     session: Session,
     err: Option<Error>,
-}
-
-impl FailSession {
-    fn new(session: Session, err: Error) -> FailSession {
-        FailSession { session, err: Some(err) }
-    }
 }
 
 fn err_session_takeover(prefix: &str, raddr: net::SocketAddr) -> Result<()> {
