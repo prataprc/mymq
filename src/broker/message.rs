@@ -13,20 +13,29 @@ use crate::{v5, ClientID, PacketID};
 pub struct RouteIO {
     pub disconnected: bool,
     // Message::ClientAck carrying PingResp
-    // Message::ClientAck carrying PubAck
-    // Message::Retain
-    // Message::Subscribe
-    // Message::UnSubscribe
-    // Message::ShardIndex
-    // Message::Routed
+    // Message::{Subscribe, Retain, UnSubscribe, ShardIndex, Routed}
+    // Message::ClientAck carrying PubAck for QoS1
     pub oug_msgs: Vec<Message>,
+    pub cons_io: ConsensIO,
+}
+
+impl RouteIO {
+    pub fn reset_session(mut self) -> Self {
+        self.disconnected = false;
+        self.oug_msgs.truncate(0);
+        self
+    }
 }
 
 #[derive(Default)]
 pub struct ConsensIO {
+    // Message::Routed
     pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
+    // Message::Routed
     pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
+    // Message::Subscribe
     pub oug_subs: BTreeMap<ClientID, Vec<Message>>,
+    // Message::UnSubscribe
     pub oug_unsubs: BTreeMap<ClientID, Vec<Message>>,
 }
 
@@ -143,7 +152,7 @@ pub enum Message {
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
         publish: v5::Publish, // publish packet, as received from publishing client
-        ack_needed: bool,
+        ack_needed: bool,     // TODO: is this needed ?
     },
     /// Message that is periodically published by a session to other local shards.
     LocalAck {
@@ -229,18 +238,6 @@ impl Message {
         Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
     }
 
-    pub fn new_suback(suback: v5::SubAck) -> Message {
-        Message::ClientAck { packet: v5::Packet::SubAck(suback) }
-    }
-
-    pub fn new_unsuback(unsuback: v5::UnsubAck) -> Message {
-        Message::ClientAck { packet: v5::Packet::UnsubAck(unsuback) }
-    }
-
-    pub fn new_pub_ack(puback: v5::Pub) -> Message {
-        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
-    }
-
     pub fn new_ping_resp() -> Message {
         Message::ClientAck { packet: v5::Packet::PingResp }
     }
@@ -249,12 +246,12 @@ impl Message {
         Message::Subscribe { sub }
     }
 
-    pub fn new_unsub(unsub: v5::UnSubscribe) -> Message {
-        Message::UnSubscribe { unsub }
-    }
-
     pub fn new_retain_publish(publish: v5::Publish) -> Message {
         Message::Retain { publish }
+    }
+
+    pub fn new_unsub(unsub: v5::UnSubscribe) -> Message {
+        Message::UnSubscribe { unsub }
     }
 
     pub fn new_index(id: &ClientID, seq: InpSeqno, p: &v5::Publish) -> Option<Message> {
@@ -266,6 +263,18 @@ impl Message {
             qos: p.qos,
         };
         Some(msg)
+    }
+
+    pub fn new_suback(suback: v5::SubAck) -> Message {
+        Message::ClientAck { packet: v5::Packet::SubAck(suback) }
+    }
+
+    pub fn new_unsuback(unsuback: v5::UnsubAck) -> Message {
+        Message::ClientAck { packet: v5::Packet::UnsubAck(unsuback) }
+    }
+
+    pub fn new_pub_ack(puback: v5::Pub) -> Message {
+        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
     }
 
     pub fn new_routed() -> Message {

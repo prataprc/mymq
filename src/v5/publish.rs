@@ -273,8 +273,14 @@ impl Publish {
         &self.topic_name
     }
 
+    #[inline]
     pub fn is_qos0(&self) -> bool {
         self.qos == QoS::AtMostOnce
+    }
+
+    #[inline]
+    pub fn is_qos12(&self) -> bool {
+        !self.is_qos0()
     }
 
     pub fn topic_alias(&self) -> Option<u16> {
