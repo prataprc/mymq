@@ -29,14 +29,15 @@ impl RouteIO {
 
 #[derive(Default)]
 pub struct ConsensIO {
+    pub oug_seqno: BTreeMap<ClientID, OutSeqno>,
     // Message::Routed
     pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
-    // Message::Routed
-    pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
     // Message::Subscribe
     pub oug_subs: BTreeMap<ClientID, Vec<Message>>,
     // Message::UnSubscribe
     pub oug_unsubs: BTreeMap<ClientID, Vec<Message>>,
+    // Message::Routed
+    pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
 }
 
 /// Type implement the tx-handle for a message-queue.
@@ -254,15 +255,14 @@ impl Message {
         Message::UnSubscribe { unsub }
     }
 
-    pub fn new_index(id: &ClientID, seq: InpSeqno, p: &v5::Publish) -> Option<Message> {
+    pub fn new_index(id: &ClientID, s: InpSeqno, p: &v5::Publish) -> Option<Message> {
         let packet_id = p.packet_id?;
-        let msg = Message::ShardIndex {
+        Some(Message::ShardIndex {
             src_client_id: id.clone(),
-            inp_seqno: seq,
+            inp_seqno: s,
             packet_id,
             qos: p.qos,
-        };
-        Some(msg)
+        })
     }
 
     pub fn new_suback(suback: v5::SubAck) -> Message {
