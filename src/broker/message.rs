@@ -153,7 +153,6 @@ pub enum Message {
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
         publish: v5::Publish, // publish packet, as received from publishing client
-        ack_needed: bool,     // TODO: is this needed ?
     },
     /// Message that is periodically published by a session to other local shards.
     LocalAck {
@@ -213,15 +212,16 @@ impl<'a> Arbitrary<'a> for Message {
             4 => Message::Retain { publish: uns.arbitrary()? },
             5 => Message::ShardIndex {
                 src_client_id: uns.arbitrary()?,
+                inp_seqno: uns.arbitrary()?,
                 packet_id: uns.arbitrary()?,
+                qos: uns.arbitrary()?,
             },
             6 => Message::Routed {
                 src_shard_id: uns.arbitrary()?,
+                dst_shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
-                out_seqno: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
-                ack_needed: uns.arbitrary()?,
             },
             7 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,

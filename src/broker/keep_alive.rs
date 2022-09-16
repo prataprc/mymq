@@ -8,7 +8,7 @@ pub struct KeepAlive {
     pub prefix: String,
     pub keep_alive: Option<u16>,
     pub interval: Option<u16>,
-    alive_at: time::Instant,
+    pub alive_at: time::Instant,
 }
 
 impl KeepAlive {

@@ -631,15 +631,11 @@ impl Session {
         let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.publish_topic_name(&publish)?;
 
-        let ack_needed = match publish.is_qos12() {
-            true => {
-                route_io.oug_msgs.push(
-                    Message::new_index(&self.client_id, inp_seqno, &publish).unwrap(),
-                );
-                true
-            }
-            false => false,
-        };
+        if publish.is_qos12() {
+            route_io
+                .oug_msgs
+                .push(Message::new_index(&self.client_id, inp_seqno, &publish).unwrap());
+        }
 
         let mut n_subscrs = 0;
         let publ_qos = cmp::min(server_qos, publish.qos);
@@ -669,7 +665,6 @@ impl Session {
                 client_id: subscr.client_id.clone(),
                 inp_seqno,
                 publish,
-                ack_needed,
             });
 
             n_subscrs += 1;
