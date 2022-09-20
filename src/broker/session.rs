@@ -1,13 +1,13 @@
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 
 use std::ops::{Deref, DerefMut};
-use std::{cmp, collections::BTreeMap, fmt, mem, net, result};
+use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc};
 
 use crate::broker::{Config, InpSeqno, RetainedTrie, RouteIO, SubscribedTrie};
 use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus};
 use crate::broker::{SessionArgsActive, SessionArgsReplica};
 
-use crate::{v5, ClientID, PacketID, TopicFilter, TopicName};
+use crate::{v5, ClientID, PacketID, Timer, TimerEntry, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type QueueMsg = QueueStatus<Message>;
@@ -118,7 +118,8 @@ pub struct Active {
     //
     // Note that length of this collection is only as high as the allowed limit of
     // concurrent PUBLISH specified by client.
-    oug_retry_qos12: BTreeMap<PacketID, Message>,
+    oug_retry_qos12: BTreeMap<PacketID, Arc<TimerEntry<Message>>>,
+    oug_retry_timer: Timer<Arc<TimerEntry<Message>>>,
 }
 
 impl From<SessionArgsActive> for Active {
@@ -137,6 +138,7 @@ impl From<SessionArgsActive> for Active {
             oug_back_log: Vec::default(),
             next_packet_id: 1,
             oug_retry_qos12: BTreeMap::default(),
+            oug_retry_timer: Timer::default(),
         }
     }
 }
@@ -404,16 +406,6 @@ impl Session {
             SessionState::Active(active) => &active.connect,
             ss => unreachable!("{} {:?}", self.prefix, ss),
         }
-    }
-
-    #[inline]
-    pub fn as_mut_oug_acks(&mut self) -> &mut Vec<Message> {
-        self.state.as_mut_oug_acks()
-    }
-
-    #[inline]
-    pub fn as_mut_oug_back_log(&mut self) -> &mut Vec<Message> {
-        self.state.as_mut_oug_back_log()
     }
 
     #[inline]
@@ -1026,12 +1018,16 @@ impl Session {
         }
     }
 
+    pub fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
+        self.state.book_oug_qos12(msgs)
+    }
+
     pub fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
         self.state.commit_cs_oug_back_log(msgs)
     }
 
-    pub fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
-        self.state.book_oug_qos12(msgs)
+    pub fn retry_publish(&mut self) -> Result<QueueMsg> {
+        self.state.retry_publish()
     }
 }
 
@@ -1116,9 +1112,8 @@ impl SessionState {
 
         active.oug_back_log.extend(msgs.into_iter());
 
-        let oug_back_log = mem::replace(&mut active.oug_back_log, vec![]);
-        let (ids, mut status) =
-            flush_to_miot(&active.prefix, &active.miot_tx, oug_back_log);
+        let msgs = mem::replace(&mut active.oug_back_log, vec![]);
+        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, msgs);
         let _empty = mem::replace(&mut active.oug_back_log, status.take_values());
 
         debug_assert!(ids.len() == 0);
@@ -1194,6 +1189,36 @@ impl SessionState {
         Ok(code)
     }
 
+    fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
+        let active = match self {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
+
+        for msg in msgs.into_iter() {
+            match &msg {
+                Message::Packet { packet_id: Some(packet_id), .. } => {
+                    let packet_id = *packet_id;
+                    let te1 = TimerEntry::new(retry_interval, msg);
+                    let te2 = Arc::clone(&te1);
+                    if let Some(_) = active.oug_retry_qos12.insert(packet_id, te1) {
+                        err!(
+                            Fatal,
+                            code: ImplementationError,
+                            "packet_id:{} duplicate in oug_retry_qos12",
+                            packet_id
+                        )?;
+                    }
+                    active.oug_retry_timer.add_timeout(retry_interval, te2);
+                }
+                msg => unreachable!("{:?}", msg),
+            }
+        }
+
+        Ok(())
+    }
+
     fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
         let active = match self {
             SessionState::Active(active) => active,
@@ -1212,9 +1237,8 @@ impl SessionState {
 
         active.cs_oug_back_log.extend(msgs.into_iter());
 
-        let cs_oug_back_log = mem::replace(&mut active.cs_oug_back_log, vec![]);
-        let (ids, mut status) =
-            flush_to_miot(&active.prefix, &active.miot_tx, cs_oug_back_log);
+        let msgs = mem::replace(&mut active.cs_oug_back_log, vec![]);
+        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, msgs);
         let _empty = mem::replace(&mut active.cs_oug_back_log, status.take_values());
 
         debug_assert!(ids.len() == 0);
@@ -1222,30 +1246,33 @@ impl SessionState {
         Ok(status)
     }
 
-    fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
+    fn retry_publish(&mut self) -> Result<QueueMsg> {
+        use crate::TimeoutValue;
+
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
         };
+        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
 
-        for msg in msgs.into_iter() {
-            match &msg {
-                Message::Packet { packet_id: Some(packet_id), .. } => {
-                    let packet_id = *packet_id;
-                    if let Some(_) = active.oug_retry_qos12.insert(packet_id, msg) {
-                        err!(
-                            Fatal,
-                            code: ImplementationError,
-                            "packet_id:{} duplicate in oug_retry_qos12",
-                            packet_id
-                        )?;
-                    }
+        let mut msgs = Vec::default();
+        for te2 in active.oug_retry_timer.expired(None) {
+            let packet_id = te2.value.to_packet_id();
+            match active.oug_retry_qos12.remove(&packet_id) {
+                Some(te1) if te1.is_deleted() => (),
+                Some(te1) => {
+                    msgs.push(te1.value.clone());
+                    active.oug_retry_timer.add_timeout(retry_interval, te2);
+                    active.oug_retry_qos12.insert(packet_id, te1);
                 }
-                msg => unreachable!("{:?}", msg),
+                None => warn!(
+                    "{} publish from oug_retry_timer is not found in oug_retry_qos12",
+                    active.prefix
+                ),
             }
         }
 
-        Ok(())
+        self.commit_cs_oug_back_log(msgs)
     }
 }
 
@@ -1253,20 +1280,6 @@ impl SessionState {
     fn as_mut_subscriptions(&mut self) -> &mut BTreeMap<TopicFilter, v5::Subscription> {
         match self {
             SessionState::Active(active) => &mut active.cs_subscriptions,
-            ss => unreachable!("{:?}", ss),
-        }
-    }
-
-    fn as_mut_oug_acks(&mut self) -> &mut Vec<Message> {
-        match self {
-            SessionState::Active(active) => &mut active.oug_acks,
-            ss => unreachable!("{:?}", ss),
-        }
-    }
-
-    fn as_mut_oug_back_log(&mut self) -> &mut Vec<Message> {
-        match self {
-            SessionState::Active(active) => &mut active.oug_back_log,
             ss => unreachable!("{:?}", ss),
         }
     }

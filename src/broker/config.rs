@@ -158,6 +158,9 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_IGNORE_DUPLICATE]
     /// * **Mutable**: No
     pub mqtt_ignore_duplicate: bool,
+
+    /// MQTT interval between publish retry for QoS-1/2 messages, in seconds.
+    pub mqtt_publish_retry_interval: u32,
 }
 
 impl Default for Config {
@@ -183,6 +186,7 @@ impl Default for Config {
             mqtt_retain_available: Self::DEF_MQTT_RETAIN_AVAILABLE,
             mqtt_topic_alias_max: Some(Self::DEF_MQTT_TOPIC_ALIAS_MAX),
             mqtt_ignore_duplicate: Self::DEF_MQTT_IGNORE_DUPLICATE,
+            mqtt_publish_retry_interval: Self::DEF_MQTT_PUBLISH_RETRY_INTERVAL,
         }
     }
 }
@@ -280,6 +284,12 @@ impl TryFrom<toml::Value> for Config {
                     t,
                     mqtt_ignore_duplicate,
                     def,
+                    as_integer().map(|b| b.to_string())
+                );
+                config_field!(
+                    t,
+                    mqtt_publish_retry_interval,
+                    def,
                     as_bool().map(|b| b.to_string())
                 );
 
@@ -292,6 +302,8 @@ impl TryFrom<toml::Value> for Config {
             }
             None => (),
         };
+
+        def.num_shards = u32::try_from(util::ceil_power_of_2(def.num_shards)).unwrap();
 
         Ok(def)
     }
@@ -322,6 +334,8 @@ impl Config {
     pub const DEF_MQTT_TOPIC_ALIAS_MAX: u16 = 65535;
     /// Refer to [Config::mqtt_ignore_duplicate]
     pub const DEF_MQTT_IGNORE_DUPLICATE: bool = true;
+    /// Refer to [Config::mqtt_publish_retry_interval]
+    pub const DEF_MQTT_PUBLISH_RETRY_INTERVAL: u32 = 5; // in seconds
 
     /// Construct a new configuration from a file located by `loc`.
     pub fn from_file<P>(loc: P) -> Result<Config>

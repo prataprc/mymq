@@ -1,6 +1,7 @@
 //! Module implement differential timer.
 
-use std::{fmt, mem, time};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::{fmt, mem, result, sync::Arc, time};
 
 /// Trait to be implemented by values that are managed by [Timer].
 pub trait TimeoutValue {
@@ -230,34 +231,33 @@ impl<T> Titem<T> {
     }
 }
 
-#[cfg(any(feature = "fuzzy", test))]
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-#[cfg(any(feature = "fuzzy", test))]
-use std::{result, sync::Arc};
-
-#[cfg(any(feature = "fuzzy", test))]
-pub struct TimerEntry {
-    pub value: u32,
+pub struct TimerEntry<T> {
+    pub value: T,
     pub secs: u64,
     pub deleted: AtomicBool,
 }
 
-#[cfg(any(feature = "fuzzy", test))]
-impl fmt::Display for TimerEntry {
+impl<T> fmt::Display for TimerEntry<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         let deleted = self.deleted.load(SeqCst);
         let secs = time::Duration::from_secs(self.secs);
-        write!(f, "TimerEntry<{},{:?},{}>", self.value, secs, deleted)
+        write!(f, "TimerEntry<{:?},{}>", secs, deleted)
     }
 }
 
-#[cfg(any(feature = "fuzzy", test))]
-impl TimeoutValue for Arc<TimerEntry> {
+impl<T> TimeoutValue for Arc<TimerEntry<T>> {
     fn delete(&self) {
         self.deleted.store(true, SeqCst)
     }
 
     fn is_deleted(&self) -> bool {
         self.deleted.load(SeqCst)
+    }
+}
+
+impl<T> TimerEntry<T> {
+    pub fn new(secs: u64, value: T) -> Arc<TimerEntry<T>> {
+        let val = TimerEntry { secs, value, deleted: AtomicBool::new(false) };
+        Arc::new(val)
     }
 }

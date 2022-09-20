@@ -137,7 +137,7 @@ pub enum Message {
     Subscribe { sub: v5::Subscribe },
     /// Consensus Loop.
     UnSubscribe { unsub: v5::UnSubscribe },
-    /// Incoming PUBLISH packets, QoS > 0 indexed by shards in Shard::RunLoop::index
+    /// Incoming PUBLISH packets, QoS > 0 are indexed in the shard instance.
     ShardIndex {
         src_client_id: ClientID,
         inp_seqno: InpSeqno,
@@ -305,17 +305,10 @@ impl Message {
         }
     }
 
-    pub fn to_out_seqno(&self) -> OutSeqno {
-        match self {
-            Message::Packet { out_seqno, .. } => *out_seqno,
-            _ => unreachable!(),
-        }
-    }
-
     pub fn to_packet_id(&self) -> PacketID {
         match self {
-            Message::Packet { packet_id: Some(packet_id), .. } => *packet_id,
             Message::ShardIndex { packet_id, .. } => *packet_id,
+            Message::Packet { packet_id: Some(packet_id), .. } => *packet_id,
             _ => unreachable!(),
         }
     }

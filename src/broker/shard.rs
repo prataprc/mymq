@@ -590,7 +590,7 @@ impl Shard {
             self.active_cs(&mut args, &mut cons_io);
             self.return_local_acks(&mut args, &mut cons_io);
             self.active_post_cs(&mut args, &mut cons_io);
-            self.inc_publish_ack(&mut args);
+            self.inc_publish_ack(&mut args); // send acks for incoming packets
 
             msg_rx = args.msg_rx;
             inner = args.inner;
@@ -752,6 +752,15 @@ impl Shard {
                 (disconnected, err)
             };
 
+            let (disconnected, err) = if !disconnected {
+                match args.session.retry_publish() {
+                    Ok(status) => (status.is_disconnected(), None),
+                    Err(err) => (true, Some(err)),
+                }
+            } else {
+                (disconnected, err)
+            };
+
             if disconnected {
                 let session = mem::replace(&mut args.session, _empty_session);
                 fail_sessions.push(FailSession { session, err });
@@ -781,8 +790,8 @@ impl Shard {
         let oug_msgs = mem::replace(&mut rio.oug_msgs, Vec::with_capacity(n));
 
         let mut oug_acks = Vec::default();
-        let mut oug_qos0 = Vec::default();
-        let mut oug_qos12 = Vec::default();
+        let mut oug_retain0 = Vec::default();
+        let mut oug_retain12 = Vec::default();
 
         for msg in oug_msgs.into_iter() {
             match &msg {
@@ -794,11 +803,11 @@ impl Shard {
                 }
                 Message::Retain { publish } if publish.is_qos0() => {
                     let out_seqno = args.session.incr_oug_qos0();
-                    oug_qos0.push(msg.into_packet(out_seqno, None));
+                    oug_retain0.push(msg.into_packet(out_seqno, None));
                 }
                 Message::Retain { .. } => {
                     let (out_seqno, packet_id) = args.session.incr_oug_qos12();
-                    oug_qos12.push(msg.into_packet(out_seqno, Some(packet_id)));
+                    oug_retain12.push(msg.into_packet(out_seqno, Some(packet_id)));
                 }
                 Message::Subscribe { .. } => {
                     let client_id = &args.session.client_id;
@@ -837,12 +846,12 @@ impl Shard {
         let status = args.session.tx_oug_acks(oug_acks);
         rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
 
-        let status = args.session.tx_oug_back_log(oug_qos0);
+        let status = args.session.tx_oug_back_log(oug_retain0);
         rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
 
-        rio.disconnected = match args.session.book_oug_qos12(oug_qos12.clone()) {
+        rio.disconnected = match args.session.book_oug_qos12(oug_retain12.clone()) {
             Ok(()) => {
-                let status = args.session.tx_oug_back_log(oug_qos12);
+                let status = args.session.tx_oug_back_log(oug_retain12);
                 matches!(status, QueueStatus::Disconnected(_))
             }
             Err(_err) => true,
@@ -916,17 +925,26 @@ impl Shard {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
+        let mut acks = vec![0; self.config.num_shards as usize];
         for (_client_id, oug_qos12) in cons_io.oug_qos12.iter() {
             for msg in oug_qos12.iter() {
                 match msg {
                     Message::Routed { src_shard_id, inp_seqno, .. } => {
-                        let msg = Message::new_local_ack(*src_shard_id, *inp_seqno);
-                        append_index!(shard_back_log, src_shard_id, msg);
+                        acks[*src_shard_id as usize] = *inp_seqno;
                     }
                     _ => unreachable!(),
                 }
             }
         }
+
+        for (src_shard_id, inp_seqno) in acks.into_iter().enumerate() {
+            let src_shard_id = src_shard_id as u32;
+            if inp_seqno > 0 {
+                let msg = Message::new_local_ack(src_shard_id, inp_seqno);
+                append_index!(shard_back_log, &src_shard_id, msg);
+            }
+        }
+
         self.send_to_shards();
     }
 
@@ -944,9 +962,11 @@ impl Shard {
         let mut inp_seqnos = Vec::default();
         let mut oug_acks: BTreeMap<ClientID, Vec<Message>> = BTreeMap::default();
         for (inp_seqno, msg) in index.iter() {
-            if *inp_seqno < last_acked {
-                inp_seqnos.push(*inp_seqno);
+            if *inp_seqno > last_acked {
+                continue;
             }
+
+            inp_seqnos.push(*inp_seqno);
             if let Message::ShardIndex { src_client_id, packet_id, .. } = msg {
                 let msg = Message::new_pub_ack(v5::Pub::new_pub_ack(*packet_id));
                 match oug_acks.get_mut(src_client_id) {

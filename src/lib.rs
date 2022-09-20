@@ -96,9 +96,7 @@ mod types;
 
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use packet::{MQTTRead, MQTTWrite};
-#[cfg(any(feature = "fuzzy", test))]
-pub use timer::TimerEntry;
-pub use timer::{TimeoutValue, Timer};
+pub use timer::{TimeoutValue, Timer, TimerEntry};
 pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
