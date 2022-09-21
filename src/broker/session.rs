@@ -1183,8 +1183,6 @@ impl SessionState {
     }
 
     fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
-        use crate::ReasonCode::ExceededReceiveMaximum;
-
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
@@ -1210,14 +1208,14 @@ impl SessionState {
             let (mut omsgs, mut rmsgs) = (Vec::with_capacity(n), Vec::with_capacity(n));
             let mut packet_ids = Vec::with_capacity(n);
             for msg in msgs.into_iter() {
-                if let Message::Packet { packet_id: Some(packet_id), .. } = &msg {
+                if let Message::Oug { packet_id: Some(packet_id), .. } = &msg {
                     packet_ids.push((*packet_id, msg.clone()));
                     omsgs.push(msg);
                 } else {
                     match self.incr_oug_qos12() {
                         Some((out_seqno, packet_id)) => {
                             packet_ids.push((packet_id, msg.clone()));
-                            omsgs.push(msg.into_packet(out_seqno, Some(packet_id)));
+                            omsgs.push(msg.into_oug(out_seqno, Some(packet_id)));
                         }
                         None => rmsgs.push(msg),
                     }

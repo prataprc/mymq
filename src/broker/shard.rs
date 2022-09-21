@@ -796,7 +796,7 @@ impl Shard {
                 }
                 Message::Retain { publish } if publish.is_qos0() => {
                     let out_seqno = args.session.incr_oug_qos0();
-                    oug_retain0.push(msg.into_packet(out_seqno, None));
+                    oug_retain0.push(msg.into_oug(out_seqno, None));
                 }
                 Message::Retain { .. } => {
                     oug_retain12.push(msg);

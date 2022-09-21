@@ -165,7 +165,7 @@ pub enum Message {
     // session boundary
     /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
     /// sending them downstream.
-    Packet {
+    Oug {
         out_seqno: OutSeqno,
         packet_id: Option<PacketID>,
         publish: v5::Publish,
@@ -176,13 +176,13 @@ impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
-            Message::Packet { .. } => write!(f, "Message::Packet"),
             Message::Subscribe { .. } => write!(f, "Message::Subscribe"),
             Message::UnSubscribe { .. } => write!(f, "Message::UnSubscribe"),
             Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::ShardIndex { .. } => write!(f, "Message::ShardIndex"),
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
+            Message::Oug { .. } => write!(f, "Message::Oug"),
         }
     }
 }
@@ -204,7 +204,7 @@ impl<'a> Arbitrary<'a> for Message {
                     _ => unreachable!(),
                 },
             },
-            1 => Message::Packet {
+            1 => Message::Oug {
                 out_seqno: uns.arbitrary()?,
                 packet_id: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
@@ -287,7 +287,7 @@ impl Message {
         Message::LocalAck { shard_id, last_acked }
     }
 
-    pub fn into_packet(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {
+    pub fn into_oug(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {
         let mut publish = match self {
             Message::Routed { publish, .. } => publish,
             Message::Retain { publish } => publish,
@@ -296,13 +296,13 @@ impl Message {
         if let Some(packet_id) = pktid {
             publish.set_packet_id(packet_id);
         }
-        Message::Packet { out_seqno, packet_id: pktid, publish }
+        Message::Oug { out_seqno, packet_id: pktid, publish }
     }
 
     pub fn to_v5_packet(&self) -> v5::Packet {
         match self {
             Message::ClientAck { packet, .. } => packet.clone(),
-            Message::Packet { publish, .. } => v5::Packet::Publish(publish.clone()),
+            Message::Oug { publish, .. } => v5::Packet::Publish(publish.clone()),
             _ => unreachable!(),
         }
     }
@@ -310,7 +310,7 @@ impl Message {
     pub fn to_packet_id(&self) -> PacketID {
         match self {
             Message::ShardIndex { packet_id, .. } => *packet_id,
-            Message::Packet { packet_id: Some(packet_id), .. } => *packet_id,
+            Message::Oug { packet_id: Some(packet_id), .. } => *packet_id,
             _ => unreachable!(),
         }
     }
