@@ -24,3 +24,11 @@
   use a security component to authorize particular actions on the topic resource for a
   given Client.
 * Create a Cheatsheet for MQTT protocol.
+
+### Test cases
+
+* If both Client and Server set Receive Maximum to 1, they make sure that no more than
+  one message is “in-flight” at any one time. In this case no QoS 1 message will be
+  received after any later one even on re-connection. For example a subscriber might
+  receive them in the order 1,2,3,3,4 but not 1,2,3,2,3,4. Refer to section 4.9 Flow
+  Control for details of how the Receive Maximum is used.
