@@ -51,9 +51,6 @@ pub const SLEEP_10MS: std::time::Duration = std::time::Duration::from_millis(10)
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Type alias for MQTT PacketID.
-pub type PacketID = u16;
-
 /// Trait implemented by types that participate in MQTT protocol framing.
 ///
 /// Shall return one of the following error-kind: `ProtocolError`, `MalformedPacket`.
@@ -97,7 +94,7 @@ mod types;
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use packet::{MQTTRead, MQTTWrite};
 pub use timer::{TimeoutValue, Timer, TimerEntry};
-pub use types::{Blob, MqttProtocol, UserProperty, VarU32};
+pub use types::{Blob, MqttProtocol, PacketID, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
 #[macro_use]

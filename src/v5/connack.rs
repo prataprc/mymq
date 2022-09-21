@@ -276,34 +276,6 @@ impl<'a> Arbitrary<'a> for ConnAck {
     }
 }
 
-impl ConnAck {
-    pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
-        ConnAck {
-            flags: ConnackFlags::default(),
-            code: ConnackReasonCode::Success,
-            properties: ps,
-        }
-    }
-
-    pub fn set_session_present(&mut self) {
-        self.flags = ConnackFlags(*self.flags | *ConnackFlags::SESSION_PRESENT);
-    }
-
-    pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {
-        let flags = ConnackFlags::default();
-        ConnAck { flags, code, properties: None }
-    }
-
-    #[cfg(any(feature = "fuzzy", test))]
-    pub fn normalize(&mut self) {
-        if let Some(props) = &mut self.properties {
-            if props.is_empty() {
-                self.properties = None
-            }
-        }
-    }
-}
-
 impl Packetize for ConnAck {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
@@ -343,8 +315,41 @@ impl Packetize for ConnAck {
 }
 
 impl ConnAck {
+    pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
+        ConnAck {
+            flags: ConnackFlags::default(),
+            code: ConnackReasonCode::Success,
+            properties: ps,
+        }
+    }
+
+    pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {
+        let flags = ConnackFlags::default();
+        ConnAck { flags, code, properties: None }
+    }
+
+    pub fn set_session_present(&mut self) {
+        self.flags = ConnackFlags(*self.flags | *ConnackFlags::SESSION_PRESENT);
+    }
+
+    pub fn receive_maximum(&self) -> u16 {
+        match &self.properties {
+            Some(props) => props.receive_maximum(),
+            None => ConnAckProperties::RECEIVE_MAXIMUM,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         Ok(())
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn normalize(&mut self) {
+        if let Some(props) = &mut self.properties {
+            if props.is_empty() {
+                self.properties = None
+            }
+        }
     }
 }
 

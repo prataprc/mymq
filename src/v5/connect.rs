@@ -690,7 +690,7 @@ impl Packetize for ConnectProperties {
 }
 
 impl ConnectProperties {
-    pub const RECEIVE_MAXIMUM: u16 = 65535;
+    pub const RECEIVE_MAXIMUM: u16 = 65_535_u16;
     pub const TOPIC_ALIAS_MAXIMUM: u16 = 0;
 
     pub fn session_expiry_interval(&self) -> Option<u32> {

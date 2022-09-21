@@ -11,7 +11,7 @@ use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
 use std::{collections::VecDeque, fmt, io, mem, net, result, time};
 
-use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, Packetize};
+use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, PacketID, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
@@ -35,15 +35,20 @@ pub struct ClientBuilder {
     pub protocol_version: MqttProtocol,
     /// Provide unique client identifier, if missing, will be sent empty in CONNECT.
     pub client_id: Option<ClientID>,
-    /// Socket settings for blocking io, refer [net::TcpStream::connect_timeout]
+    /// Socket settings for blocking io, refer [net::TcpStream::connect_timeout].
+    /// Defaults to None.
     pub connect_timeout: Option<time::Duration>,
-    /// Socket settings for blocking io, refer [net::TcpStream::set_read_timeout]
+    /// Socket settings for blocking io, refer [net::TcpStream::set_read_timeout].
+    /// Defaults to None.
     pub read_timeout: Option<time::Duration>,
-    /// Socket settings for blocking io, refer [net::TcpStream::set_write_timeout]
+    /// Socket settings for blocking io, refer [net::TcpStream::set_write_timeout].
+    /// Defaults to None.
     pub write_timeout: Option<time::Duration>,
     /// Socket settings, refer [net::TcpStream::set_nodelay].
+    /// Defaults to None.
     pub nodelay: Option<bool>,
     /// Socket settings, refer [net::TcpStream::set_ttl].
+    /// Defaults to None.
     pub ttl: Option<u32>,
     /// Maximum packet size,
     pub max_packet_size: u32,
@@ -101,6 +106,7 @@ impl ClientBuilder {
         };
 
         client.cio = cio;
+        client.next_packet_ids = (1..connack.receive_maximum()).collect();
         client.connack = connack;
 
         Ok(client)
@@ -130,6 +136,7 @@ impl ClientBuilder {
         };
 
         client.cio = cio;
+        client.next_packet_ids = (1..connack.receive_maximum()).collect();
         client.connack = connack;
 
         Ok(client)
@@ -156,7 +163,7 @@ impl ClientBuilder {
             last_rcvd: time::Instant::now(),
             rd_deadline: None,
             wt_deadline: None,
-            packet_id: 1,
+            next_packet_ids: Vec::default(),
 
             in_packets: VecDeque::default(),
             cio: ClientIO::None,
@@ -184,9 +191,9 @@ pub struct Client {
 
     last_rcvd: time::Instant,
     last_sent: time::Instant,
-    rd_deadline: Option<time::Instant>,
-    wt_deadline: Option<time::Instant>,
-    packet_id: u16,
+    rd_deadline: Option<time::Instant>, // defaults to None
+    wt_deadline: Option<time::Instant>, // defaults to None
+    next_packet_ids: Vec<PacketID>,
 
     in_packets: VecDeque<v5::Packet>,
     cio: ClientIO,
@@ -245,7 +252,7 @@ impl Client {
             last_sent: self.last_rcvd,
             rd_deadline: None,
             wt_deadline: None,
-            packet_id: 0,
+            next_packet_ids: Vec::default(),
 
             in_packets: VecDeque::default(),
             cio: rd_cio,
@@ -278,6 +285,7 @@ impl Client {
             ClientIO::handshake(&mut self, connect, sock, blocking)?
         };
         self.cio = cio;
+        self.next_packet_ids = (1..connack.receive_maximum()).collect();
         self.connack = connack;
 
         Ok(self)
@@ -417,6 +425,9 @@ impl Client {
     /// subscribe for a single filter.
     ///
     /// ```ignore
+    ///     let mut sub = v5::Subscribe::default();
+    ///
+    ///     let filter: TopicFilter = "#".into();
     ///     let opt = {
     ///         let fwdrule = v5::RetainForwardRule::OnNewSubscribe;
     ///         let retain_as_published = true;
@@ -424,8 +435,6 @@ impl Client {
     ///         let qos = QoS::AtMostOnce;
     ///         v5::SubscriptionOpt::new(fwdrule, retain_as_published, no_local, qos)
     ///     };
-    ///     let filter: TopicFilter = "#".into();
-    ///     let mut sub = v5::Subscribe::default();
     ///     sub.add_filter(filter, opt);
     ///
     ///     sub.set_subscription_id(0x1003);
@@ -437,7 +446,7 @@ impl Client {
     /// remote and subscribe-ack is recieved with the same `packet_id`. [Client] shall
     /// automatically choose a `packet_id` for this subscription.
     pub fn subscribe(&mut self, mut sub: v5::Subscribe) -> io::Result<v5::SubAck> {
-        sub.packet_id = self.next_packet_id();
+        sub.packet_id = self.next_packet_id(false /*is_publish*/).ok().unwrap();
         self.write(v5::Packet::Subscribe(sub.clone()))?;
         self.cio_read_sub_ack(&sub)
     }
@@ -492,12 +501,15 @@ impl Client {
     }
 
     /// Same as [Self::write], but does not block. Application must be prepared to
-    /// handle [io::ErrorKind::WouldBlock], and [io::ErrorKind::Interrupted]
-    pub fn write_noblock(&mut self) -> io::Result<()> {
+    /// handle [io::ErrorKind::WouldBlock], and [io::ErrorKind::Interrupted].
+    ///
+    /// To finish writing previous write pass `packet` as None. Returns [Result::Ok]
+    /// only when write has finished.
+    pub fn write_noblock(&mut self, packet: Option<v5::Packet>) -> io::Result<()> {
         self.try_read()?;
 
         let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-        let res = cio.write_noblock(self);
+        let res = cio.write_noblock(self, packet);
         let _none = mem::replace(&mut self.cio, cio);
 
         self.last_sent = time::Instant::now();
@@ -540,23 +552,18 @@ impl Client {
 
     fn cio_read_sub_ack(&mut self, sub: &v5::Subscribe) -> io::Result<v5::SubAck> {
         loop {
-            let pkt = {
-                let mut cio = mem::replace(&mut self.cio, ClientIO::None);
-                let res = cio.read(self);
-                let _none = mem::replace(&mut self.cio, cio);
-                res?
-            };
-
-            match pkt {
-                v5::Packet::SubAck(sa) if sa.packet_id == sub.packet_id => break Ok(sa),
-                v5::Packet::SubAck(sa) => warn!(
+            self.cio_read()?;
+            match self.in_packets.pop_front() {
+                Some(v5::Packet::SubAck(sa)) if sa.packet_id == sub.packet_id => {
+                    break Ok(sa);
+                }
+                Some(v5::Packet::SubAck(sa)) => warn!(
                     "sub-ack mismatch in packet_id {} != {}",
                     sa.packet_id, sub.packet_id
                 ),
-                pkt => self.in_packets.push_back(pkt),
+                Some(pkt) => self.in_packets.push_back(pkt),
+                None => unreachable!(),
             }
-
-            self.last_rcvd = time::Instant::now();
         }
     }
 }
@@ -579,13 +586,15 @@ impl Client {
         }
     }
 
-    fn next_packet_id(&mut self) -> u16 {
-        let packet_id = self.packet_id;
-        self.packet_id = match self.packet_id.wrapping_add(1) {
-            0 => 1,
-            n => n,
-        };
-        packet_id
+    fn next_packet_id(&mut self, publish: bool) -> Result<PacketID> {
+        if publish {
+            match self.next_packet_ids.pop() {
+                Some(packet_id) => Ok(packet_id),
+                None => err!(ProtocolError, code: ExceededReceiveMaximum, ""),
+            }
+        } else {
+            Ok(0)
+        }
     }
 }
 
@@ -866,19 +875,23 @@ impl ClientIO {
         }
     }
 
-    fn write_noblock(&mut self, client: &mut Client) -> io::Result<()> {
+    fn write_noblock(
+        &mut self,
+        client: &mut Client,
+        pkt: Option<v5::Packet>,
+    ) -> io::Result<()> {
         match self {
             ClientIO::Blocking { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, None, false)
+                write_packet(client, sock, pktw, pkt, false)
             }
             ClientIO::NoBlock { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, None, false)
+                write_packet(client, sock, pktw, pkt, false)
             }
             ClientIO::BlockWt { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, None, false)
+                write_packet(client, sock, pktw, pkt, false)
             }
             ClientIO::NoBlockWt { sock, pktw, .. } => {
-                write_packet(client, sock, pktw, None, false)
+                write_packet(client, sock, pktw, pkt, false)
             }
             ClientIO::None => {
                 let s = format!("disconnected while Client::write_noblock");

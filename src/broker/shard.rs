@@ -736,16 +736,9 @@ impl Shard {
             };
 
             let (disconnected, err) = if !disconnected {
-                let mut msgs = Vec::default();
-                for msg in oug_qos12.into_iter() {
-                    let (out_seqno, packet_id) = args.session.incr_oug_qos12();
-                    msgs.push(msg.into_packet(out_seqno, Some(packet_id)));
-                }
-                match args.session.book_oug_qos12(msgs.clone()) {
-                    Ok(()) => match args.session.commit_cs_oug_back_log(msgs) {
-                        Ok(status) => (status.is_disconnected(), None),
-                        Err(err) => (true, Some(err)),
-                    },
+                match args.session.commit_cs_oug_back_log(oug_qos12) {
+                    Ok(QueueStatus::Disconnected(_)) => (true, None),
+                    Ok(_) => (false, None),
                     Err(err) => (true, Some(err)),
                 }
             } else {
@@ -806,8 +799,7 @@ impl Shard {
                     oug_retain0.push(msg.into_packet(out_seqno, None));
                 }
                 Message::Retain { .. } => {
-                    let (out_seqno, packet_id) = args.session.incr_oug_qos12();
-                    oug_retain12.push(msg.into_packet(out_seqno, Some(packet_id)));
+                    oug_retain12.push(msg);
                 }
                 Message::Subscribe { .. } => {
                     let client_id = &args.session.client_id;
@@ -849,11 +841,9 @@ impl Shard {
         let status = args.session.tx_oug_back_log(oug_retain0);
         rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
 
-        rio.disconnected = match args.session.book_oug_qos12(oug_retain12.clone()) {
-            Ok(()) => {
-                let status = args.session.tx_oug_back_log(oug_retain12);
-                matches!(status, QueueStatus::Disconnected(_))
-            }
+        rio.disconnected = match args.session.commit_cs_oug_back_log(oug_retain12) {
+            Ok(QueueStatus::Disconnected(_)) => true,
+            Ok(_) => false,
             Err(_err) => true,
         };
     }

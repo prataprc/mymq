@@ -9,6 +9,9 @@ use crate::util::{self, advance};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{IterTopicPath, Packetize};
 
+/// Type alias for MQTT PacketID.
+pub type PacketID = u16;
+
 // TODO: Section.4.7
 //       An Application Message is sent to each Client Subscription whose Topic
 //       Filter matches the Topic Name attached to an Application Message. The topic

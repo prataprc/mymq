@@ -106,9 +106,8 @@ pub struct Active {
     // Message::Packet outgoing QoS-0 PUBLISH messages.
     // Message::Packet outgoing QoS-0 Retain messages.
     oug_back_log: Vec<Message>,
-    // This value is incremented for every out-going PUBLISH(qos>0).
-    // If index.len() > `receive_maximum`, don't increment this value.
-    next_packet_id: PacketID,
+    // Array of available packet-ids. size is determined by `receive_maximum`.
+    next_packet_ids: Vec<PacketID>,
     // Message::Packet outgoing QoS-1/2 PUBLISH messages.
     // Message::Packet outgoing QoS-1/2 Retain messages.
     //
@@ -124,6 +123,10 @@ pub struct Active {
 
 impl From<SessionArgsActive> for Active {
     fn from(args: SessionArgsActive) -> Active {
+        let next_packet_ids: Vec<PacketID> = {
+            let receive_maximum = args.connect.receive_maximum();
+            (1..receive_maximum).collect()
+        };
         let keep_alive = KeepAlive::new(&args);
         Active {
             common: Common { config: args.config, ..Common::default() },
@@ -136,7 +139,7 @@ impl From<SessionArgsActive> for Active {
             inc_packet_ids: Vec::default(),
             oug_acks: Vec::default(),
             oug_back_log: Vec::default(),
-            next_packet_id: 1,
+            next_packet_ids,
             oug_retry_qos12: BTreeMap::default(),
             oug_retry_timer: Timer::default(),
         }
@@ -902,11 +905,6 @@ impl Session {
         self.state.incr_oug_qos0()
     }
 
-    #[inline]
-    pub fn incr_oug_qos12(&mut self) -> (OutSeqno, PacketID) {
-        self.state.incr_oug_qos12()
-    }
-
     pub fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
         self.state.tx_oug_acks(msgs)
     }
@@ -1018,10 +1016,6 @@ impl Session {
         }
     }
 
-    pub fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
-        self.state.book_oug_qos12(msgs)
-    }
-
     pub fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
         self.state.commit_cs_oug_back_log(msgs)
     }
@@ -1045,14 +1039,13 @@ impl SessionState {
         }
     }
 
-    pub fn incr_oug_qos12(&mut self) -> (OutSeqno, PacketID) {
+    pub fn incr_oug_qos12(&mut self) -> Option<(OutSeqno, PacketID)> {
         match self {
             SessionState::Active(active) => {
                 let seqno = active.cs_oug_seqno;
                 active.cs_oug_seqno = seqno.saturating_add(1);
-                let packet_id = active.next_packet_id;
-                active.next_packet_id = packet_id.wrapping_add(1);
-                (seqno, packet_id)
+                let packet_id = active.next_packet_ids.pop()?;
+                Some((seqno, packet_id))
             }
             _ => unreachable!(),
         }
@@ -1189,37 +1182,9 @@ impl SessionState {
         Ok(code)
     }
 
-    fn book_oug_qos12(&mut self, msgs: Vec<Message>) -> Result<()> {
-        let active = match self {
-            SessionState::Active(active) => active,
-            ss => unreachable!("{:?}", ss),
-        };
-        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
-
-        for msg in msgs.into_iter() {
-            match &msg {
-                Message::Packet { packet_id: Some(packet_id), .. } => {
-                    let packet_id = *packet_id;
-                    let te1 = TimerEntry::new(retry_interval, msg);
-                    let te2 = Arc::clone(&te1);
-                    if let Some(_) = active.oug_retry_qos12.insert(packet_id, te1) {
-                        err!(
-                            Fatal,
-                            code: ImplementationError,
-                            "packet_id:{} duplicate in oug_retry_qos12",
-                            packet_id
-                        )?;
-                    }
-                    active.oug_retry_timer.add_timeout(retry_interval, te2);
-                }
-                msg => unreachable!("{:?}", msg),
-            }
-        }
-
-        Ok(())
-    }
-
     fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
+        use crate::ReasonCode::ExceededReceiveMaximum;
+
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
@@ -1236,12 +1201,59 @@ impl SessionState {
         }
 
         active.cs_oug_back_log.extend(msgs.into_iter());
+        let msgs = mem::replace(&mut active.cs_oug_back_log, Vec::default());
 
-        let msgs = mem::replace(&mut active.cs_oug_back_log, vec![]);
-        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, msgs);
+        mem::drop(active);
+
+        let (omsgs, rmsgs, packet_ids) = {
+            let n = msgs.len();
+            let (mut omsgs, mut rmsgs) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            let mut packet_ids = Vec::with_capacity(n);
+            for msg in msgs.into_iter() {
+                if let Message::Packet { packet_id: Some(packet_id), .. } = &msg {
+                    packet_ids.push((*packet_id, msg.clone()));
+                    omsgs.push(msg);
+                } else {
+                    match self.incr_oug_qos12() {
+                        Some((out_seqno, packet_id)) => {
+                            packet_ids.push((packet_id, msg.clone()));
+                            omsgs.push(msg.into_packet(out_seqno, Some(packet_id)));
+                        }
+                        None => rmsgs.push(msg),
+                    }
+                }
+            }
+            (omsgs, rmsgs, packet_ids)
+        };
+
+        let active = match self {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        let m = omsgs.len();
+        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, omsgs);
+        debug_assert!(ids.len() == 0);
+
         let _empty = mem::replace(&mut active.cs_oug_back_log, status.take_values());
 
-        debug_assert!(ids.len() == 0);
+        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
+        let n = active.cs_oug_back_log.len();
+        for (packet_id, msg) in packet_ids[..(m - n)].to_vec().into_iter() {
+            let te1 = TimerEntry::new(retry_interval, msg);
+            let te2 = Arc::clone(&te1);
+            if let Some(_) = active.oug_retry_qos12.insert(packet_id, te1) {
+                err!(
+                    Fatal,
+                    code: ImplementationError,
+                    "packet_id:{} duplicate in oug_retry_qos12",
+                    packet_id
+                )?;
+            }
+            active.oug_retry_timer.add_timeout(retry_interval, te2);
+        }
+
+        active.cs_oug_back_log.extend(rmsgs.into_iter());
 
         Ok(status)
     }
