@@ -5,6 +5,8 @@ use log::{error, warn};
 use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, fmt, result};
 
+#[allow(unused_imports)]
+use crate::broker::Shard;
 use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};

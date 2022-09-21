@@ -182,7 +182,7 @@ pub struct Error {
     pub kind: ErrorKind,
     /// Human readable string.
     pub description: String,
-    /// MQTT Reason code.
+    /// Reason code.
     pub code: Option<ReasonCode>,
     /// Chain of errors, that is, if another error lead to this error.
     pub cause: Option<Box<dyn std::error::Error + Send>>,
@@ -340,7 +340,6 @@ impl Error {
         }
     }
 
-    /// Reason code as defined by `MQTT-spec`.
     pub fn code(&self) -> ReasonCode {
         self.code.unwrap_or(ReasonCode::UnspecifiedError)
     }
@@ -364,7 +363,7 @@ pub enum ErrorKind {
     // general error
     InvalidInput,
     Fatal,
-    // mqtt errors
+    // protocol errors
     MalformedPacket,
     ProtocolError,
     UnsupportedProtocolVersion,
@@ -397,7 +396,7 @@ impl fmt::Display for ErrorKind {
             // general error
             InvalidInput => write!(f, "InvalidInput"),
             Fatal => write!(f, "Fatal"),
-            // mqtt errors
+            // protocol errors
             ProtocolError => write!(f, "ProtocolError"),
             UnsupportedProtocolVersion => write!(f, "UnsupportedProtocolVersion"),
             InsufficientBytes => write!(f, "InsufficientBytes"),
@@ -423,7 +422,7 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// ReasonCode defined by `MQTT-spec`, each variant defines error value.
+/// ReasonCode defined by each variant defines error value.
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
