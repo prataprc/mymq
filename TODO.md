@@ -1,7 +1,3 @@
-* Contains both "broker" and "client" code.
-* Provide feature-gating to compile this source base for
-  * Both "broker" and "client"
-  * Only "client", this will reduce the library foot-print and make for fast-compilation.
 * Binary-mymqd, cleanup and document in lib.rs
 * Cleanup src/broker/chash.rs,src/broker/crc.rs
 * Create a script to calculate the bare-minimum `rustc` version required.
@@ -24,6 +20,27 @@
   use a security component to authorize particular actions on the topic resource for a
   given Client.
 * Create a Cheatsheet for MQTT protocol.
+
+### Will message
+
+* Will QoS, Retain
+* Will topic, payload, properties
+* Will Delay Interval
+* Will properties
+  * Payload Format Indicator
+  * Message Expiry Interval
+  * Content Type
+  * Response Topic
+  * Correlation Data
+  * User Property
+* ReasonCode, Disconnect with Will Message
+
+### Security
+
+* Basic authentication using username and password
+* Enhanced authentication
+* Re-authentication
+* Section 4 and 5 covers some details.
 
 ### Test cases
 
