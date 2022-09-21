@@ -161,14 +161,7 @@ impl Default for Connect {
             flags: ConnectFlags::default(),
             keep_alive: 0,
             properties: None,
-            payload: ConnectPayload {
-                client_id: ClientID::new_uuid_v4(),
-                will_properties: None,
-                will_topic: None,
-                will_payload: None,
-                username: None,
-                password: None,
-            },
+            payload: ConnectPayload::default(),
         }
     }
 }
@@ -530,6 +523,13 @@ impl Connect {
         match &self.properties {
             Some(props) => props.topic_alias_max(),
             None => None,
+        }
+    }
+
+    pub fn will_delay_interval(&self) -> u32 {
+        match &self.payload.will_properties {
+            Some(props) => props.will_delay_interval(),
+            None => WillProperties::WILL_DELAY_INTERVAL,
         }
     }
 
