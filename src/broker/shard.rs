@@ -10,7 +10,7 @@ use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket}
 use crate::broker::{ConsensIO, InpSeqno, PktRx, PktTx, Timestamp};
 use crate::broker::{RouteIO, SessionArgsActive, SessionArgsReplica};
 
-use crate::{v5, ClientID, ToJson};
+use crate::{v5, ClientID, Timer, ToJson};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -131,6 +131,8 @@ pub struct ActiveLoop {
     ///   client.
     ack_timestamps: Vec<Timestamp>,
 
+    // Message::Routed, will messages published by broken sessions.
+    will_messages: Timer<Message>,
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::cc_topic_filters
@@ -305,6 +307,8 @@ impl Shard {
                 shard_back_log: BTreeMap::default(),
                 index: BTreeMap::default(),
                 ack_timestamps: Vec::default(),
+
+                will_messages: Timer::default(),
 
                 shard_queues: BTreeMap::default(),
                 cc_topic_filters: args.cc_topic_filters,
@@ -634,8 +638,8 @@ impl Shard {
                 }
                 Ok(()) => {
                     let session = mem::replace(&mut args.session, _empty_session);
-                    let val = FailSession { session, err: err_disconnected().err() };
-                    fail_sessions.push(val);
+                    let err = err_disconnected(&self.prefix).err();
+                    fail_sessions.push(FailSession { session, err });
                 }
                 Err(err) => {
                     let session = mem::replace(&mut args.session, _empty_session);
@@ -674,8 +678,8 @@ impl Shard {
             let oug_qos0 = cons_io.oug_qos0.remove(&client_id).unwrap_or(Vec::default());
             if args.session.tx_oug_back_log(oug_qos0).is_disconnected() {
                 let session = mem::replace(&mut args.session, _empty_session);
-                let val = FailSession { session, err: err_disconnected().err() };
-                fail_sessions.push(val);
+                let err = err_disconnected(&self.prefix).err();
+                fail_sessions.push(FailSession { session, err });
             } else {
                 let session = mem::replace(&mut args.session, _empty_session);
                 cons_io.oug_seqno.insert(client_id.clone(), session.to_cs_oug_seqno());
@@ -992,8 +996,8 @@ impl Shard {
                 None => false,
             };
             if disconnected {
-                let val = FailSession { session, err: err_disconnected().err() };
-                fail_sessions.push(val);
+                let err = err_disconnected(&self.prefix).err();
+                fail_sessions.push(FailSession { session, err });
             } else {
                 sessions1.insert(client_id, session);
             }
@@ -1595,6 +1599,6 @@ fn err_session_takeover(prefix: &str, raddr: net::SocketAddr) -> Result<()> {
     err!(SessionTakenOver, code: SessionTakenOver, "{} client {}", prefix, raddr)
 }
 
-fn err_disconnected() -> Result<()> {
-    todo!()
+fn err_disconnected(prefix: &str) -> Result<()> {
+    err!(Disconnected, code: Success, "{}", prefix)
 }

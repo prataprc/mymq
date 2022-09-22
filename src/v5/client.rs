@@ -163,7 +163,7 @@ impl ClientBuilder {
             last_rcvd: time::Instant::now(),
             rd_deadline: None,
             wt_deadline: None,
-            next_packet_ids: Vec::default(),
+            next_packet_ids: VecDeque::default(),
 
             in_packets: VecDeque::default(),
             cio: ClientIO::None,
@@ -193,7 +193,7 @@ pub struct Client {
     last_sent: time::Instant,
     rd_deadline: Option<time::Instant>, // defaults to None
     wt_deadline: Option<time::Instant>, // defaults to None
-    next_packet_ids: Vec<PacketID>,
+    next_packet_ids: VecDeque<PacketID>,
 
     in_packets: VecDeque<v5::Packet>,
     cio: ClientIO,
@@ -252,7 +252,7 @@ impl Client {
             last_sent: self.last_rcvd,
             rd_deadline: None,
             wt_deadline: None,
-            next_packet_ids: Vec::default(),
+            next_packet_ids: VecDeque::default(),
 
             in_packets: VecDeque::default(),
             cio: rd_cio,
@@ -446,7 +446,7 @@ impl Client {
     /// remote and subscribe-ack is recieved with the same `packet_id`. [Client] shall
     /// automatically choose a `packet_id` for this subscription.
     pub fn subscribe(&mut self, mut sub: v5::Subscribe) -> io::Result<v5::SubAck> {
-        sub.packet_id = self.next_packet_id(false /*is_publish*/).ok().unwrap();
+        sub.packet_id = self.aquire_packet_id(false /*is_publish*/).ok().unwrap();
         self.write(v5::Packet::Subscribe(sub.clone()))?;
         self.cio_read_sub_ack(&sub)
     }
@@ -586,15 +586,19 @@ impl Client {
         }
     }
 
-    fn next_packet_id(&mut self, publish: bool) -> Result<PacketID> {
+    fn acquire_packet_id(&mut self, publish: bool) -> Result<PacketID> {
         if publish {
-            match self.next_packet_ids.pop() {
+            match self.next_packet_ids.pop_front() {
                 Some(packet_id) => Ok(packet_id),
                 None => err!(ProtocolError, code: ExceededReceiveMaximum, ""),
             }
         } else {
             Ok(0)
         }
+    }
+
+    fn release_packet_id(&mut self, packet_id: PacketID) {
+        self.next_packet_ids.push_back();
     }
 }
 

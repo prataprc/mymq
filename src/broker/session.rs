@@ -1,5 +1,6 @@
 use log::{debug, error, trace, warn};
 
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc};
 
@@ -107,7 +108,7 @@ pub struct Active {
     // Message::Packet outgoing QoS-0 Retain messages.
     oug_back_log: Vec<Message>,
     // Array of available packet-ids. size is determined by `receive_maximum`.
-    next_packet_ids: Vec<PacketID>,
+    next_packet_ids: VecDeque<PacketID>,
     // Message::Packet outgoing QoS-1/2 PUBLISH messages.
     // Message::Packet outgoing QoS-1/2 Retain messages.
     //
@@ -123,7 +124,7 @@ pub struct Active {
 
 impl From<SessionArgsActive> for Active {
     fn from(args: SessionArgsActive) -> Active {
-        let next_packet_ids: Vec<PacketID> = {
+        let next_packet_ids: VecDeque<PacketID> = {
             let receive_maximum = args.connect.receive_maximum();
             (1..receive_maximum).collect()
         };
@@ -473,10 +474,9 @@ impl Session {
 
         let mut status = active.session_rx.try_recvs(&self.prefix);
 
-        rio.disconnected = match status.take_values() {
+        match status.take_values() {
             pkts if pkts.len() == 0 => {
                 active.keep_alive.check_expired()?;
-                status.is_disconnected()
             }
             pkts => {
                 active.keep_alive.live();
@@ -484,15 +484,9 @@ impl Session {
                 for pkt in pkts.into_iter() {
                     self.handle_packet(shard, rio, pkt)?;
                 }
-
-                if let QueueStatus::Disconnected(_) = status {
-                    error!("{} downstream-rx disconnect", self.prefix);
-                    true
-                } else {
-                    false
-                }
             }
         };
+        rio.disconnected = status.is_disconnected();
 
         Ok(())
     }
@@ -1044,7 +1038,7 @@ impl SessionState {
             SessionState::Active(active) => {
                 let seqno = active.cs_oug_seqno;
                 active.cs_oug_seqno = seqno.saturating_add(1);
-                let packet_id = active.next_packet_ids.pop()?;
+                let packet_id = active.next_packet_ids.pop_front()?;
                 Some((seqno, packet_id))
             }
             _ => unreachable!(),
