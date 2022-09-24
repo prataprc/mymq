@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fmt, result};
 
 #[allow(unused_imports)]
 use crate::broker::Shard;
-use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
+use crate::broker::{InpSeqno, OutSeqno, QueueStatus, SessionArgsReplica};
 
 use crate::{v5, ClientID, PacketID};
 
@@ -40,6 +40,8 @@ pub struct ConsensIO {
     pub oug_unsubs: BTreeMap<ClientID, Vec<Message>>,
     // Message::Routed
     pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
+    // Message::{AddSession, RemSession}
+    pub ctrl_msgs: Vec<Message>,
 }
 
 /// Type implement the tx-handle for a message-queue.
@@ -132,13 +134,21 @@ pub enum Message {
     /// PUBACK   - happens for every PINGREQ is handled by this session.
     /// SUBACK   - happens after SUBSCRIBE is commited to [Shard].
     /// UNSUBACK - happens after UNSUBSCRIBE is commited to [Shard].
-    ClientAck { packet: v5::Packet },
+    ClientAck {
+        packet: v5::Packet,
+    },
     /// Retain publish messages.
-    Retain { publish: v5::Publish },
+    Retain {
+        publish: v5::Publish,
+    },
     /// Consensus Loop.
-    Subscribe { sub: v5::Subscribe },
+    Subscribe {
+        sub: v5::Subscribe,
+    },
     /// Consensus Loop.
-    UnSubscribe { unsub: v5::UnSubscribe },
+    UnSubscribe {
+        unsub: v5::UnSubscribe,
+    },
     /// Incoming PUBLISH packets, QoS > 0 are indexed in the shard instance.
     ShardIndex {
         src_client_id: ClientID,
@@ -169,6 +179,18 @@ pub enum Message {
         out_seqno: OutSeqno,
         packet_id: Option<PacketID>,
         publish: v5::Publish,
+    },
+
+    // Consensus
+    AddSession {
+        shard_id: u32,
+        client_id: ClientID,
+        raddr: net::SocketAddr,
+        config: Config,
+    },
+    RemSession {
+        shard_id: u32,
+        client_id: ClientID,
     },
 }
 
@@ -312,6 +334,15 @@ impl Message {
             Message::ShardIndex { packet_id, .. } => *packet_id,
             Message::Oug { packet_id: Some(packet_id), .. } => *packet_id,
             _ => unreachable!(),
+        }
+    }
+
+    pub fn into_session_args_replica(self) -> SessionArgsReplica {
+        SessionArgsReplica {
+            shard_id: self.shard_id,
+            client_id: self.client_id,
+            raddr: self.raddr,
+            config: self.config,
         }
     }
 }

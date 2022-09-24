@@ -582,7 +582,9 @@ impl Shard {
                 break;
             }
 
-            match self.mio_events(&rx, &events) {
+            let mut cons_io = ConsensIO::default();
+
+            match self.mio_events(&rx, &events, &mut cons_io) {
                 true => break,
                 _exit => (),
             };
@@ -590,7 +592,7 @@ impl Shard {
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
             let mut args = ActiveContext::new(msg_rx, inner);
 
-            let mut cons_io = self.active_pre_cs(&mut args);
+            self.active_pre_cs(&mut args, &mut cons_io);
             self.active_cs(&mut args, &mut cons_io);
             self.return_local_acks(&mut args, &mut cons_io);
             self.active_post_cs(&mut args, &mut cons_io);
@@ -614,7 +616,7 @@ impl Shard {
         self
     }
 
-    fn active_pre_cs(&mut self, args: &mut ActiveContext) -> ConsensIO {
+    fn active_pre_cs(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
         let sessions = match &mut args.inner {
             Inner::MainActive(ActiveLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
@@ -623,7 +625,11 @@ impl Shard {
         };
 
         let mut fail_sessions: Vec<FailSession> = Vec::default();
-        let mut route_io = RouteIO::default();
+        let mut route_io = {
+            let val = RouteIO::default();
+            val.cons_io = mem::replace(cons_io, ConsensIO::default());
+            val
+        };
         let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
         for (client_id, session) in sessions.into_iter() {
             let _empty_session = mem::replace(&mut args.session, session);
@@ -657,7 +663,7 @@ impl Shard {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        route_io.cons_io
+        mem::replace(cons_io, route_io.cons_io);
     }
 
     fn active_cs(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
@@ -1051,7 +1057,9 @@ impl Shard {
                 break;
             }
 
-            match self.mio_events(&rx, &events) {
+            let mut cons_io = ConsensIO::default();
+
+            match self.mio_events(&rx, &events, &mut cons_io) {
                 true => break,
                 _exit => (),
             };
@@ -1079,7 +1087,12 @@ impl Shard {
 
 impl Shard {
     // (exit,)
-    fn mio_events(&mut self, rx: &ThreadRx, events: &mio::Events) -> bool {
+    fn mio_events(
+        &mut self,
+        rx: &ThreadRx,
+        events: &mio::Events,
+        cons_io: &mut ConsensIO,
+    ) -> bool {
         let mut count = 0;
         for _event in events.iter() {
             count += 1;
@@ -1088,7 +1101,7 @@ impl Shard {
 
         loop {
             // keep repeating until all control requests are drained.
-            match self.drain_control_chan(rx) {
+            match self.drain_control_chan(rx, cons_iod) {
                 (_, true) => break true,
                 (QueueStatus::Ok(_), false) => (),
                 (QueueStatus::Block(_), _) => break false,
@@ -1098,7 +1111,11 @@ impl Shard {
     }
 
     // Return (queue-status, disconnected)
-    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
+    fn drain_control_chan(
+        &mut self,
+        rx: &ThreadRx,
+        cons_io: &mut ConsensIO,
+    ) -> (QueueReq, bool) {
         use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
@@ -1115,11 +1132,11 @@ impl Shard {
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
                 (req @ AddSession { .. }, Some(tx)) => {
-                    let resp = self.handle_add_session_a(req);
+                    let resp = self.handle_add_session_a(req, cons_io);
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
                 (req @ FlushSession { .. }, None) => {
-                    self.handle_flush_session(req);
+                    self.handle_flush_session(req, cons_io);
                 }
                 (req @ Close, Some(tx)) => {
                     let resp = self.handle_close_a(req);
@@ -1137,7 +1154,11 @@ impl Shard {
 
 // Handle incoming messages
 impl Shard {
-    fn clean_failed_sessions(&mut self, mut fail_sessions: Vec<FailSession>) {
+    fn clean_failed_sessions(
+        &mut self,
+        mut fail_sessions: Vec<FailSession>,
+        cons_io: &mut ConsensIO,
+    ) {
         fail_sessions.sort_by_key(|a| a.session.client_id.clone());
         fail_sessions.dedup_by_key(|a| a.session.client_id.clone());
 
@@ -1147,7 +1168,7 @@ impl Shard {
             match miot.remove_connection(&session.client_id) {
                 Ok(Some(socket)) => {
                     let req = Request::FlushSession { socket, err };
-                    self.handle_flush_session(req);
+                    self.handle_flush_session(req, cons_io);
                 }
                 Ok(None) => {
                     debug!(
@@ -1181,47 +1202,17 @@ impl Shard {
         }
     }
 
-    fn handle_flush_session(&mut self, req: Request) -> Response {
-        use crate::broker::flush::FlushConnectionArgs;
-
-        let (socket, err) = match req {
-            Request::FlushSession { socket, err } => (socket, err),
-            _ => unreachable!(),
-        };
-
-        match &mut self.inner {
-            Inner::MainActive(ActiveLoop { sessions, cc_topic_filters, .. }) => {
-                let cid = socket.client_id.clone();
-                if let Some(mut session) = sessions.remove(&cid) {
-                    session.remove_topic_filters(cc_topic_filters);
-                    sessions.insert(cid, session.into_reconnect());
-                } else {
-                    warn!("{} client_id:{} session not found", self.prefix, *cid);
-                }
-            }
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        let ActiveLoop { flusher, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-        let args = FlushConnectionArgs { socket, err: err };
-        app_fatal!(&self, flusher.flush_connection(args));
-
-        // TODO: consensus loop: replicate flush_session so that replica shall remove
-        // the session from its book-keeping.
-
-        Response::Ok
-    }
-
-    fn handle_add_session_a(&mut self, req: Request) -> Response {
+    fn handle_add_session_a(
+        &mut self,
+        req: Request,
+        cons_io: &mut ConsensIO,
+    ) -> Response {
         use crate::broker::miot::AddConnectionArgs;
 
         // create the session
         let (mut session, upstream, downstream) = {
             let (args, upstream, downstream) = self.to_args_active(&req);
-            let session = self.new_session_a(args);
+            let session = self.new_session_a(args, cons_io);
             (session, upstream, downstream)
         };
 
@@ -1296,6 +1287,46 @@ impl Shard {
         };
         sessions.insert(args.client_id.clone(), session);
         info!("{} raddr:{} adding new replica session to shard", self.prefix, args.raddr);
+
+        Response::Ok
+    }
+
+    fn handle_flush_session(
+        &mut self,
+        req: Request,
+        cons_io: &mut ConsensIO,
+    ) -> Response {
+        use crate::broker::flush::FlushConnectionArgs;
+
+        let (socket, err) = match req {
+            Request::FlushSession { socket, err } => (socket, err),
+            _ => unreachable!(),
+        };
+        let cid = socket.client_id.clone();
+
+        self.cleanup_index(&cid);
+
+        match &mut self.inner {
+            Inner::MainActive(ActiveLoop { sessions, cc_topic_filters, .. }) => {
+                if let Some(mut session) = sessions.remove(&cid) {
+                    session.remove_topic_filters(cc_topic_filters);
+                    sessions.insert(cid, session.into_reconnect());
+                } else {
+                    warn!("{} client_id:{} session not found", self.prefix, *cid);
+                }
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let ActiveLoop { flusher, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+        let args = FlushConnectionArgs { socket, err: err };
+        app_fatal!(&self, flusher.flush_connection(args));
+
+        // TODO: consensus loop: replicate flush_session so that replica shall remove
+        // the session from its book-keeping.
 
         Response::Ok
     }
@@ -1396,10 +1427,10 @@ impl Shard {
 
         let args = match req {
             Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
+                shard_id: self.shard_id,
+                client_id: ClientID::from_connect(&connect.payload.client_id),
                 raddr: sock.peer_addr().unwrap(),
                 config: self.config.clone(),
-                client_id: ClientID::from_connect(&connect.payload.client_id),
-                shard_id: self.shard_id,
                 miot_tx,
                 session_rx,
                 connect: connect.clone(),
@@ -1410,7 +1441,11 @@ impl Shard {
         (args, upstream, downstream)
     }
 
-    fn new_session_a(&mut self, args: SessionArgsActive) -> Session {
+    fn new_session_a(
+        &mut self,
+        args: SessionArgsActive,
+        cons_io: &mut ConsensIO,
+    ) -> Session {
         // add_connection further down shall wake miot-thread.
         let ActiveLoop { sessions, miot, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
@@ -1432,7 +1467,7 @@ impl Shard {
                         let prefix = &self.prefix;
                         let err: Result<()> = err_session_takeover(prefix, args.raddr);
                         let arg = Request::FlushSession { socket, err: err.err() };
-                        self.handle_flush_session(arg);
+                        self.handle_flush_session(arg, cons_io);
                     }
                     Ok(None) if session.is_replica() => (),
                     Ok(None) => {
@@ -1600,5 +1635,5 @@ fn err_session_takeover(prefix: &str, raddr: net::SocketAddr) -> Result<()> {
 }
 
 fn err_disconnected(prefix: &str) -> Result<()> {
-    err!(Disconnected, code: Success, "{}", prefix)
+    err!(Disconnected, code: ImplementationError, "{}", prefix)
 }

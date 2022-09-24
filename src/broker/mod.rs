@@ -126,10 +126,21 @@ pub struct SessionArgsActive {
 }
 
 pub struct SessionArgsReplica {
+    pub shard_id: u32,
+    pub client_id: ClientID,
     pub raddr: net::SocketAddr,
     pub config: Config,
-    pub client_id: ClientID,
-    pub shard_id: u32,
+}
+
+impl From<SessionArgsActive> for SessionArgsReplica {
+    fn from(args: SessionArgsActive) -> SessionArgsReplica {
+        SessionArgsReplica {
+            shard_id: args.shard_id,
+            client_id: args.shard_id.clone(),
+            raddr: args.raddr,
+            config: args.config.clone(),
+        }
+    }
 }
 
 mod config;
