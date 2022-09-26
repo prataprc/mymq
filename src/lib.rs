@@ -93,7 +93,7 @@ mod types;
 
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use packet::{MQTTRead, MQTTWrite};
-pub use timer::{TimeoutValue, Timer, TimerEntry};
+pub use timer::Timer;
 pub use types::{Blob, MqttProtocol, PacketID, UserProperty, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
@@ -101,8 +101,8 @@ pub use types::{ClientID, TopicFilter, TopicName};
 pub mod v5;
 pub mod util;
 
-#[cfg(feature = "broker")]
-pub mod broker;
+//#[cfg(feature = "broker")]
+//pub mod broker;
 
 #[cfg(feature = "netw")]
 pub mod netw;

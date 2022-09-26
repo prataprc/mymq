@@ -1,18 +1,9 @@
 //! Module implement differential timer.
 
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-use std::{fmt, mem, result, sync::Arc, time};
+use std::{collections::BTreeMap, fmt, mem, result, sync::Arc, time};
 
-/// Trait to be implemented by values that are managed by [Timer].
-pub trait TimeoutValue {
-    /// Call this to mark value as deleted. Once it is marked as deleted,
-    /// [Timer::expired] won't return this value when it expires. On the other hand,
-    /// it will be quitely deleted by `GC`.
-    fn delete(&self);
-
-    /// Return whether this value was marked as deleted.
-    fn is_deleted(&self) -> bool;
-}
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Differential Timer, to add timers for messages, sessions etc and manage expiry.
 ///
@@ -20,37 +11,44 @@ pub trait TimeoutValue {
 /// * log(1) complexity for other operations.
 ///
 /// Application shall call [Timer::gc] and [Timer::expired] periodically. If application
-/// have no logic to call [TimeoutValue::delete] on the timer-entry, then there is no
+/// have no logic to call [Timer::delete] on the timer-entry, then there is no
 /// need to call [Timer::gc].
-pub struct Timer<T> {
+pub struct Timer<K, T> {
     instant: time::Instant,
-    head: Box<Titem<T>>,
+    head: Box<Titem<K, T>>,
+    entries: BTreeMap<K, Arc<TimerEntry<T>>>,
 }
 
-enum Titem<T> {
+enum Titem<K, T> {
     Head {
-        next: Box<Titem<T>>,
+        next: Box<Titem<K, T>>,
     },
     Timeout {
         delta: u64,
-        value: T,
-        next: Box<Titem<T>>,
+        key: K,
+        te: Arc<TimerEntry<T>>,
+        next: Box<Titem<K, T>>,
     },
     Sentinel,
 }
 
-impl<T> Default for Timer<T> {
-    fn default() -> Timer<T> {
+impl<K, T> Default for Timer<K, T> {
+    fn default() -> Timer<K, T> {
         Timer {
             instant: time::Instant::now(),
             head: Box::new(Titem::Head { next: Box::new(Titem::Sentinel) }),
+            entries: BTreeMap::default(),
         }
     }
 }
 
-impl<T> Timer<T> {
+impl<K, T> Timer<K, T> {
     /// Add a new timer entry, timer entry shall expire after `secs` seconds.
-    pub fn add_timeout(&mut self, secs: u64, value: T) {
+    pub fn add_timeout(&mut self, secs: u64, key: K, value: T)
+    where
+        K: Ord + Clone,
+    {
+        let te = Arc::new(TimerEntry { value, secs, deleted: AtomicBool::new(false) });
         let micros = (secs as u64) * 1_000_000;
         let mut ndelta = micros.saturating_sub(self.instant.elapsed().as_micros() as u64);
 
@@ -58,14 +56,25 @@ impl<T> Timer<T> {
         loop {
             match prev.take_next() {
                 n @ Titem::Sentinel => {
-                    let next = Titem::Timeout { delta: ndelta, value, next: Box::new(n) };
+                    let key = key.clone();
+                    let next = Titem::Timeout {
+                        delta: ndelta,
+                        key,
+                        te: Arc::clone(&te),
+                        next: Box::new(n),
+                    };
                     prev.set_next(next);
                     break;
                 }
                 mut nn @ Titem::Timeout { .. } if ndelta < nn.to_delta() => {
                     nn.differential(ndelta);
                     let delta = ndelta;
-                    let next = Titem::Timeout { delta, value, next: Box::new(nn) };
+                    let next = Titem::Timeout {
+                        delta,
+                        key: key.clone(),
+                        te: Arc::clone(&te),
+                        next: Box::new(nn),
+                    };
                     prev.set_next(next);
                     break;
                 }
@@ -77,13 +86,28 @@ impl<T> Timer<T> {
                 Titem::Head { .. } => unreachable!(),
             }
         }
+        self.entries.insert(key, te);
+    }
+
+    /// Mark the entry specified by `key` as deleted.
+    pub fn delete(&mut self, key: &K) -> Result<()>
+    where
+        K: Ord,
+    {
+        if let Some(te) = self.entries.get(key) {
+            te.delete();
+        }
+        Ok(())
     }
 
     /// Return an iterator of all expired timer entries. Returned entries shall be
-    /// removed from this timer-list. Pass None for `elapsed`.
+    /// removed from this timer-list. Also deleted entries are not considered as expired
+    /// and shall not be returned, they are returned only by gc().
+    /// Pass None for `elapsed`.
     pub fn expired(&mut self, elapsed: Option<u64>) -> impl Iterator<Item = T>
     where
-        T: Clone + TimeoutValue,
+        K: Ord,
+        T: Clone,
     {
         let micros = elapsed.unwrap_or(self.instant.elapsed().as_micros() as u64);
         self.instant += time::Duration::from_micros(micros);
@@ -96,22 +120,18 @@ impl<T> Timer<T> {
                     self.head.set_next(Titem::Sentinel);
                     break;
                 }
-                Titem::Timeout { delta, value, next } if delta > micros => {
+                Titem::Timeout { delta, key, te, next } if delta > micros => {
                     let delta = delta - micros;
-                    let next = Titem::Timeout { delta, value, next };
+                    let next = Titem::Timeout { delta, key, te, next };
                     self.head.set_next(next);
                     break;
                 }
-                Titem::Timeout { value, next, .. } if value.is_deleted() => {
-                    // if test, then return this as well
-                    #[cfg(feature = "fuzzy")]
-                    expired.push(value);
-                    // or quitely remove and ignore this item.
-                    self.head.set_next(*next);
-                }
-                Titem::Timeout { value, next, .. } => {
-                    // exipired, remove and return this item.
-                    expired.push(value);
+                Titem::Timeout { key, te, next, .. } => {
+                    mem::drop(self.entries.remove(&key).unwrap());
+                    match Arc::try_unwrap(te) {
+                        Ok(te) => expired.push(te.value),
+                        Err(_) => unreachable!("fatal"),
+                    }
                     self.head.set_next(*next);
                 }
                 Titem::Head { .. } => unreachable!(),
@@ -124,18 +144,23 @@ impl<T> Timer<T> {
     /// Garbage collect all timer-entries marked as deleted by application.
     pub fn gc(&mut self) -> impl Iterator<Item = T>
     where
-        T: TimeoutValue,
+        K: Ord,
     {
         let mut prev = self.head.as_mut();
         let mut gced = vec![];
+
         loop {
             match prev.take_next() {
                 next @ Titem::Sentinel => {
                     prev.set_next(next);
-                    break gced.into_iter();
+                    break;
                 }
-                Titem::Timeout { value, mut next, .. } if value.is_deleted() => {
-                    gced.push(value);
+                Titem::Timeout { key, te, mut next, .. } if te.is_deleted() => {
+                    mem::drop(self.entries.remove(&key).unwrap());
+                    match Arc::try_unwrap(te) {
+                        Ok(te) => gced.push(te.value),
+                        Err(_) => unreachable!("fatal"),
+                    }
                     let next = mem::replace(&mut next, Box::new(Titem::Sentinel));
                     prev.set_next(*next);
                 }
@@ -150,26 +175,39 @@ impl<T> Timer<T> {
                 Titem::Head { .. } => unreachable!(),
             }
         }
+
+        gced.into_iter()
     }
 
+    /// Close this timer and return all pending entries. Some of them might have expired
+    /// and others may havn't.
     pub fn close(mut self) -> impl Iterator<Item = T>
     where
-        T: Clone + TimeoutValue,
+        K: Ord,
+        T: Clone,
     {
         let mut node = mem::replace(&mut self.head, Box::new(Titem::Sentinel));
         let mut values = vec![];
         loop {
             node = match *node {
                 Titem::Head { next } => next,
-                Titem::Timeout { value, next, .. } => {
-                    values.push(value);
+                Titem::Timeout { key, te, next, .. } => {
+                    mem::drop(self.entries.remove(&key).unwrap());
+                    match Arc::try_unwrap(te) {
+                        Ok(te) => values.push(te.value),
+                        Err(_) => unreachable!("fatal"),
+                    }
                     next
                 }
                 Titem::Sentinel => {
-                    break values.into_iter();
+                    break;
                 }
             };
         }
+
+        assert!(self.entries.len() == 0);
+
+        values.into_iter()
     }
 
     pub fn pprint(&self)
@@ -180,9 +218,9 @@ impl<T> Timer<T> {
         loop {
             node = match node {
                 Titem::Head { next } => next.as_ref(),
-                Titem::Timeout { value, next, delta } => {
+                Titem::Timeout { delta, te, next, .. } => {
                     let micros = time::Duration::from_micros(*delta);
-                    println!("timevalue {:?} {}", micros, value);
+                    println!("timevalue {:?} {}", micros, te.value);
                     next.as_ref()
                 }
                 Titem::Sentinel => break,
@@ -191,7 +229,7 @@ impl<T> Timer<T> {
     }
 }
 
-impl<T> Titem<T> {
+impl<K, T> Titem<K, T> {
     fn differential(&mut self, ndelta: u64) {
         match self {
             Titem::Timeout { delta, .. } => *delta = *delta - ndelta,
@@ -199,7 +237,7 @@ impl<T> Titem<T> {
         }
     }
 
-    fn as_mut_next(&mut self) -> &mut Titem<T> {
+    fn as_mut_next(&mut self) -> &mut Titem<K, T> {
         match self {
             Titem::Head { next } => next.as_mut(),
             Titem::Timeout { next, .. } => next.as_mut(),
@@ -214,7 +252,7 @@ impl<T> Titem<T> {
         }
     }
 
-    fn take_next(&mut self) -> Titem<T> {
+    fn take_next(&mut self) -> Titem<K, T> {
         match self {
             Titem::Head { next } => *mem::replace(next, Box::new(Titem::Sentinel)),
             Titem::Timeout { next, .. } => *mem::replace(next, Box::new(Titem::Sentinel)),
@@ -222,7 +260,7 @@ impl<T> Titem<T> {
         }
     }
 
-    fn set_next(&mut self, new_next: Titem<T>) -> Box<Titem<T>> {
+    fn set_next(&mut self, new_next: Titem<K, T>) -> Box<Titem<K, T>> {
         match self {
             Titem::Head { next } => mem::replace(next, Box::new(new_next)),
             Titem::Timeout { next, .. } => mem::replace(next, Box::new(new_next)),
@@ -231,10 +269,10 @@ impl<T> Titem<T> {
     }
 }
 
-pub struct TimerEntry<T> {
-    pub value: T,
-    pub secs: u64,
-    pub deleted: AtomicBool,
+struct TimerEntry<T> {
+    value: T,
+    secs: u64,
+    deleted: AtomicBool,
 }
 
 impl<T> fmt::Display for TimerEntry<T> {
@@ -245,19 +283,12 @@ impl<T> fmt::Display for TimerEntry<T> {
     }
 }
 
-impl<T> TimeoutValue for Arc<TimerEntry<T>> {
+impl<T> TimerEntry<T> {
     fn delete(&self) {
         self.deleted.store(true, SeqCst)
     }
 
     fn is_deleted(&self) -> bool {
         self.deleted.load(SeqCst)
-    }
-}
-
-impl<T> TimerEntry<T> {
-    pub fn new(secs: u64, value: T) -> Arc<TimerEntry<T>> {
-        let val = TimerEntry { secs, value, deleted: AtomicBool::new(false) };
-        Arc::new(val)
     }
 }
