@@ -537,14 +537,11 @@ impl Miot {
             Some(mut socket) => {
                 let raddr = socket.conn.peer_addr().unwrap();
                 info!("{} raddr:{} removing connection ...", self.prefix, raddr);
-
                 app_fatal!(&self, poll.registry().deregister(&mut socket.conn));
-
                 Response::Removed(socket)
             }
             None => {
                 warn!("{} client_id:{} connection for not found ...", self.prefix, *cid);
-
                 Response::Ok
             }
         };

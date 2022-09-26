@@ -130,6 +130,7 @@ pub struct SessionArgsReplica {
     pub client_id: ClientID,
     pub raddr: net::SocketAddr,
     pub config: Config,
+    pub connect: v5::Connect,
 }
 
 impl From<SessionArgsActive> for SessionArgsReplica {
@@ -139,6 +140,7 @@ impl From<SessionArgsActive> for SessionArgsReplica {
             client_id: args.shard_id.clone(),
             raddr: args.raddr,
             config: args.config.clone(),
+            connect: args.connect,
         }
     }
 }

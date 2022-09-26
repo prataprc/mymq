@@ -187,6 +187,8 @@ pub enum Message {
         client_id: ClientID,
         raddr: net::SocketAddr,
         config: Config,
+        connect: v5::Connect,
+        clean_start: bool,
     },
     RemSession {
         shard_id: u32,
@@ -307,6 +309,10 @@ impl Message {
 
     pub fn new_local_ack(shard_id: u32, last_acked: InpSeqno) -> Message {
         Message::LocalAck { shard_id, last_acked }
+    }
+
+    pub fn new_rem_session(shard_id: u32, client_id: ClientID) -> Message {
+        Message::RemSession { shard_id, client_id }
     }
 
     pub fn into_oug(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {

@@ -24,14 +24,16 @@ pub trait Shard {
     fn incr_inp_seqno(&mut self) -> InpSeqno;
 }
 
-////   Initial/None  --------> Active ----+---------> Reconnect
-////          |                   ^       |              |
-////          |                   |       |              |
-////          |                   +-------+--------------+
-////          |                   |                      |
-////          |                   |                      |
-////          +--------------> Replica <-----------------+
-////
+//   Initial/None  --------> Active ----+---------> Reconnect
+//          |                   ^       |              | ^
+//          |                   |       |              | |
+//          |                   +-------+--------------+ |
+//          |                   |                      | |
+//          |                   |                      | |
+//          +--------------> Replica <-----------------+ |
+//                              |                        |
+//                              +------------------------+
+//
 pub enum SessionState {
     Active(Active),
     Replica(Replica),
@@ -163,6 +165,8 @@ impl DerefMut for Active {
 
 pub struct Replica {
     common: Common,
+
+    connect: v5::Connect,
 }
 
 impl From<SessionArgsReplica> for Replica {
@@ -238,7 +242,7 @@ impl Default for Session {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Stats {
     n_pings: usize,
 }
@@ -298,9 +302,18 @@ impl Session {
 
         let mut replica: Replica = args.into();
         replica.prefix = prefix.clone();
+        replica.connect = args.connect;
 
         let state = match self.state {
-            SessionState::None => SessionState::Replica(replica),
+            SessionState::Active(mut active) => {
+                replica.topic_aliases =
+                    mem::replace(&mut active.topic_aliases, BTreeMap::default());
+                replica.cs_subscriptions =
+                    mem::replace(&mut active.cs_subscriptions, BTreeMap::default());
+                replica.cs_oug_seqno = active.cs_oug_seqno;
+                replica.cs_oug_back_log =
+                    mem::replace(&mut active.cs_oug_back_log, Vec::default());
+            }
             SessionState::Reconnect(mut reconnect) => {
                 replica.topic_aliases =
                     mem::replace(&mut reconnect.topic_aliases, BTreeMap::default());
@@ -311,6 +324,7 @@ impl Session {
                     mem::replace(&mut reconnect.cs_oug_back_log, Vec::default());
                 SessionState::Replica(replica)
             }
+            SessionState::None => SessionState::Replica(replica),
             ss => unreachable!("{:?}", ss),
         };
 
@@ -350,7 +364,11 @@ impl Session {
                     },
                 };
                 SessionState::Reconnect(reconnect)
-            }
+            },
+            SessionState::Replica(mut replica) => {
+                let reconnect = Reconnect { common: replica.common };
+                SessionState::Reconnect(reconnect)
+            },
             ss => unreachable!("{:?}", ss),
         };
 
@@ -398,8 +416,9 @@ impl Session {
         connack
     }
 
-    pub fn close(self) -> Stats {
-        self.stats
+    pub fn close(self) -> Result<Stats> {
+        self.state.close()?;
+        Ok(self.stats)
     }
 }
 
@@ -435,6 +454,14 @@ impl Session {
     fn to_keep_alive(&self) -> Option<u16> {
         match &self.state {
             SessionState::Active(active) => active.keep_alive.keep_alive,
+            ss => unreachable!("{} {:?}", self.prefix, ss),
+        }
+    }
+
+    fn to_session_expiry_interval(&self) -> Option<u32> {
+        match &self.state {
+            SessionState::Active(active) => active.connect.session_expiry_interval(),
+            SessionState::Replica(replica) => replica.connect.session_expiry_interval(),
             ss => unreachable!("{} {:?}", self.prefix, ss),
         }
     }
@@ -1277,6 +1304,22 @@ impl SessionState {
         }
 
         self.commit_cs_oug_back_log(msgs)
+    }
+
+    fn close(self) -> Result<()> {
+        match self {
+            SessionState::Active(active) => {
+                mem::drop(active.keep_alive)
+                mem::drop(active.miot_tx);
+                mem::drop(active.session_rx);
+                mem::drop(active);
+            }
+            SessionState::Replica(replica) => mem::drop(replica);
+            SessionState::Reconnect(reconnect) => mem::drop(reconnect);
+            SessionState::None => (),
+        }
+
+        Ok(())
     }
 }
 
