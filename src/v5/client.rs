@@ -446,7 +446,7 @@ impl Client {
     /// remote and subscribe-ack is recieved with the same `packet_id`. [Client] shall
     /// automatically choose a `packet_id` for this subscription.
     pub fn subscribe(&mut self, mut sub: v5::Subscribe) -> io::Result<v5::SubAck> {
-        sub.packet_id = self.aquire_packet_id(false /*is_publish*/).ok().unwrap();
+        sub.packet_id = self.acquire_packet_id(false /*is_publish*/).ok().unwrap();
         self.write(v5::Packet::Subscribe(sub.clone()))?;
         self.cio_read_sub_ack(&sub)
     }
@@ -598,7 +598,7 @@ impl Client {
     }
 
     fn release_packet_id(&mut self, packet_id: PacketID) {
-        self.next_packet_ids.push_back();
+        self.next_packet_ids.push_back(packet_id);
     }
 }
 
