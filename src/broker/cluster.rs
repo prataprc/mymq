@@ -69,6 +69,8 @@ struct RunLoop {
     /// Index of retained messages for each topic-name, across all the sessions, local
     /// to this node.
     cc_retained_topics: RetainedTrie, // indexed by TopicName.
+    /// Timer that managers expiry of retained messages.
+    retain_timer: Timer<TopicName, v5::Publish>,
 
     /// Consensus state.
     state: ClusterState,
@@ -93,8 +95,6 @@ pub struct FinState {
     pub active_shards: Vec<Shard>,
     pub topic_filters: SubscribedTrie,
     pub retained_messages: RetainedTrie,
-    pub retain_timer: Timer<Arc<Retain>>,
-    pub retain_topics: BTreeMap<TopicName, Arc<Retain>>,
     pub stats: Stats,
 }
 
@@ -257,6 +257,7 @@ impl Cluster {
                 rebalancer,
                 cc_topic_filters: cc_topic_filters.clone(),
                 cc_retained_topics: cc_retained_topics.clone(),
+                retain_timer: Timer::default(),
 
                 stats: Stats::default(),
 
@@ -475,11 +476,6 @@ impl Threadable for Cluster {
 
         info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
 
-        let mut rt = Rt {
-            retain_timer: Timer::default(),
-            retain_topics: BTreeMap::default(),
-        };
-
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
             let timeout: Option<time::Duration> = None;
@@ -489,16 +485,16 @@ impl Threadable for Cluster {
                 break;
             }
 
-            match self.mio_events(&rx, &events, &mut rt) {
+            match self.mio_events(&rx, &events) {
                 true => break,
                 _exit => (),
             };
 
-            self.retain_expires(&mut rt);
+            self.retain_expires();
         }
 
         match &self.inner {
-            Inner::Main(_) => self.handle_close(Request::Close, &mut rt),
+            Inner::Main(_) => self.handle_close(Request::Close),
             Inner::Close(_) => Response::Ok,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -510,7 +506,7 @@ impl Threadable for Cluster {
 
 impl Cluster {
     // return (exit,)
-    fn mio_events(&mut self, rx: &ThreadRx, events: &Events, rt: &mut Rt) -> bool {
+    fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
         let mut iter = events.iter();
         let exit = 'outer: loop {
@@ -521,7 +517,7 @@ impl Cluster {
                     match event.token() {
                         Self::TOKEN_WAKE => loop {
                             // keep repeating until all control requests are drained
-                            match self.drain_control_chan(rx, rt) {
+                            match self.drain_control_chan(rx) {
                                 (_status, true) => break 'outer true,
                                 (QueueStatus::Ok(_), _exit) => (),
                                 (QueueStatus::Block(_), _) => break,
@@ -543,7 +539,7 @@ impl Cluster {
 
     // Return (queue-status, exit)
     // IPCFail,
-    fn drain_control_chan(&mut self, rx: &ThreadRx, rt: &mut Rt) -> (QueueReq, bool) {
+    fn drain_control_chan(&mut self, rx: &ThreadRx) -> (QueueReq, bool) {
         use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
@@ -562,17 +558,17 @@ impl Cluster {
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
                 (req @ SetRetainTopic { .. }, None) => {
-                    self.handle_set_retain_topic(req, rt);
+                    self.handle_set_retain_topic(req);
                 }
                 (req @ ResetRetainTopic { .. }, None) => {
-                    self.handle_reset_retain_topic(req, rt);
+                    self.handle_reset_retain_topic(req);
                 }
                 (req @ AddConnection(_), Some(tx)) => {
                     let resp = self.handle_add_connection(req);
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                 }
                 (req @ Close, Some(tx)) => {
-                    let resp = self.handle_close(req, rt);
+                    let resp = self.handle_close(req);
                     err!(IPCFail, try: tx.send(Ok(resp))).ok();
                     closed = true;
                 }
@@ -584,28 +580,18 @@ impl Cluster {
         (status, closed)
     }
 
-    fn retain_expires(&mut self, rt: &mut Rt) {
-        use crate::timer::TimeoutValue;
-
-        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
+    fn retain_expires(&mut self) {
+        let RunLoop { cc_retained_topics, retain_timer, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        // gather all retained messages and cleanup the RetainedTrie and
-        // `retain_topics` index.
-        for item in rt.retain_timer.expired(None).collect::<Vec<Arc<Retain>>>() {
-            assert!(item.is_deleted() == false);
+        let pkts: Vec<v5::Publish> = retain_timer.gc().collect();
+        debug!("{} gc:{} pkts in retain_timer", self.prefix, pkts.len());
 
-            cc_retained_topics.remove(&item.topic_name);
-
-            match rt.retain_topics.remove(&item.topic_name) {
-                Some(_) => (),
-                None => unreachable!(
-                    "{} unexpected, missing topic_name {:?}",
-                    self.prefix, item.topic_name
-                ),
-            }
+        // gather all retained packets and cleanup the RetainedTrie.
+        for pkt in retain_timer.expired(None).collect::<v5::Publish>() {
+            cc_retained_topics.remove(&pkt.topic_name);
         }
     }
 }
@@ -630,62 +616,40 @@ impl Cluster {
         Response::Ok
     }
 
-    fn handle_set_retain_topic(&mut self, req: Request, rt: &mut Rt) {
-        use crate::timer::TimeoutValue;
-
-        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
+    fn handle_set_retain_topic(&mut self, req: Request) {
         let publish = match req {
             Request::SetRetainTopic { publish } => publish,
             _ => unreachable!(),
         };
+        let key = publish.topic_name.clone();
 
-        let retain = Arc::new(Retain {
-            topic_name: publish.topic_name.clone(),
-            deleted: AtomicBool::new(false),
-        });
-        match rt.retain_topics.insert(publish.topic_name.clone(), Arc::clone(&retain)) {
-            Some(old_retain) => old_retain.delete(),
-            None => (),
-        };
-
-        // set this retain message as the latest one.
-        cc_retained_topics.set(&publish.topic_name, publish.clone());
-
-        // book keeping for message expiry.
-        match publish
-            .properties
-            .as_ref()
-            .map(|p| p.message_expiry_interval.as_ref())
-            .flatten()
-        {
-            Some(secs) => rt.retain_timer.add_timeout(*secs as u64, retain),
-            None => (),
-        }
-    }
-
-    fn handle_reset_retain_topic(&mut self, req: Request, rt: &mut Rt) {
-        use crate::timer::TimeoutValue;
-
-        let RunLoop { cc_retained_topics, .. } = match &mut self.inner {
+        let RunLoop { cc_retained_topics, retain_timer, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
+        // set this retain message as the latest one.
+        cc_retained_topics.set(&publish.topic_name, publish.clone());
+        retain_timer.delete(&key).unwrap();
 
+        // book keeping for message expiry.
+        if let Some(secs) = publish.message_expiry_interval() {
+            retain_timer.add_timeout(secs as u64, key, publish);
+        }
+    }
+
+    fn handle_reset_retain_topic(&mut self, req: Request) {
         let topic_name = match req {
             Request::ResetRetainTopic { topic_name } => topic_name,
             _ => unreachable!(),
         };
 
-        match rt.retain_topics.remove(&topic_name) {
-            Some(old_retain) => old_retain.delete(), // this will affect retain_timer.
-            None => (),
+        let RunLoop { cc_retained_topics, retain_timer, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         cc_retained_topics.remove(&topic_name);
+        retain_timer.delete(&topic_name).unwrap();
     }
 
     // Errors - IPCFail,
@@ -767,8 +731,6 @@ impl Cluster {
             active_shards: shards,
             topic_filters: run_loop.cc_topic_filters,
             retained_messages: run_loop.cc_retained_topics,
-            retain_timer: mem::replace(&mut rt.retain_timer, Timer::default()),
-            retain_topics: mem::replace(&mut rt.retain_topics, BTreeMap::default()),
             stats: run_loop.stats,
         };
 
@@ -904,24 +866,4 @@ impl ClusterState {
         };
         topology.iter().filter(|t| node == &t.master.uuid).map(|t| t.shard).collect()
     }
-}
-
-pub struct Retain {
-    topic_name: TopicName,
-    deleted: AtomicBool,
-}
-
-impl crate::timer::TimeoutValue for Arc<Retain> {
-    fn delete(&self) {
-        self.deleted.store(true, SeqCst);
-    }
-
-    fn is_deleted(&self) -> bool {
-        self.deleted.load(SeqCst)
-    }
-}
-
-struct Rt {
-    retain_timer: Timer<Arc<Retain>>,
-    retain_topics: BTreeMap<TopicName, Arc<Retain>>,
 }

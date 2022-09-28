@@ -2,13 +2,13 @@ use log::{debug, error, trace, warn};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Deref, DerefMut};
-use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc};
+use std::{cmp, fmt, mem, net, result, sync::Arc};
 
 use crate::broker::{Config, InpSeqno, RetainedTrie, RouteIO, SubscribedTrie};
 use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus};
 use crate::broker::{SessionArgsActive, SessionArgsReplica};
 
-use crate::{v5, ClientID, PacketID, Timer, TimerEntry, TopicFilter, TopicName};
+use crate::{v5, ClientID, PacketID, Timer, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 type QueueMsg = QueueStatus<Message>;
@@ -72,11 +72,22 @@ pub struct Common {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
     /// every outgoing publish packet.
     cs_oug_seqno: OutSeqno,
-    /// Message::Packet outgoing PUBLISH > QoS-1/2, first land here.
+    /// Message::Oug outgoing PUBLISH > QoS-1/2, first land here.
     ///
-    /// Entries from this index are deleted after they are removed from
-    /// `oug_retry_qos12` and after they go through the consensus loop.
+    /// qos12-publish messages are commited after consensus loop.
+    /// qos12-retain messages are commited while receiving new subscriptions.
     cs_oug_back_log: Vec<Message>,
+    /// Message::Oug outgoing QoS-1/2 PUBLISH messages.
+    /// Message::Oug outgoing QoS-1/2 Retain messages.
+    ///
+    /// This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
+    /// messages sent to subscribed clients. Entry is deleted from `oug_retry_qos12`
+    /// when ACK is received for PacketID and commited here only after replicating
+    /// ACK packet-ids in consensus loop.
+    ///
+    /// Note that length of this collection can't be more than the allowed limit of
+    /// concurrent PUBLISH specified by client.
+    oug_retry_qos12: Timer<PacketID, Message>,
 }
 
 impl Default for Common {
@@ -88,6 +99,7 @@ impl Default for Common {
             cs_subscriptions: BTreeMap::default(),
             cs_oug_seqno: 1,
             cs_oug_back_log: Vec::default(),
+            oug_retry_qos12: Timer::default(),
         }
     }
 }
@@ -106,22 +118,13 @@ pub struct Active {
     inc_packet_ids: Vec<PacketID>,
     // Message::ClientAck that needs to be sent to remote client.
     oug_acks: Vec<Message>,
-    // Message::Packet outgoing QoS-0 PUBLISH messages.
-    // Message::Packet outgoing QoS-0 Retain messages.
+    // Message::Oug outgoing QoS-0 PUBLISH messages.
+    // Message::Oug outgoing QoS-0 Retain messages.
     oug_back_log: Vec<Message>,
     // Array of available packet-ids. size is determined by `receive_maximum`.
     next_packet_ids: VecDeque<PacketID>,
-    // Message::Packet outgoing QoS-1/2 PUBLISH messages.
-    // Message::Packet outgoing QoS-1/2 Retain messages.
-    //
-    // This index is a set of un-acked collection of inflight PUBLISH (QoS-1 & 2)
-    // messages sent to subscribed clients. Entry is deleted from `oug_retry_qos12`
-    // when ACK is received for PacketID.
-    //
-    // Note that length of this collection is only as high as the allowed limit of
-    // concurrent PUBLISH specified by client.
-    oug_retry_qos12: BTreeMap<PacketID, Arc<TimerEntry<Message>>>,
-    oug_retry_timer: Timer<Arc<TimerEntry<Message>>>,
+    // Pending qos12 publish (Routed and Retain) messages waiting for next_packet_ids.
+    pending_qos12: VecDeque<Message>,
 }
 
 impl From<SessionArgsActive> for Active {
@@ -143,8 +146,7 @@ impl From<SessionArgsActive> for Active {
             oug_acks: Vec::default(),
             oug_back_log: Vec::default(),
             next_packet_ids,
-            oug_retry_qos12: BTreeMap::default(),
-            oug_retry_timer: Timer::default(),
+            pending_qos12: VecDeque::default(),
         }
     }
 }
@@ -192,6 +194,9 @@ impl DerefMut for Replica {
 
 pub struct Reconnect {
     common: Common,
+
+    // arrives from SessionState::Active, and lays dormant
+    next_packet_ids: VecDeque<PacketID>,
 }
 
 impl Deref for Reconnect {
@@ -260,25 +265,30 @@ impl Session {
 
         let state = match self.state {
             SessionState::None => SessionState::Active(active),
-            SessionState::Active(active) => SessionState::Active(active),
-            SessionState::Replica(mut replica) => {
-                active.cs_subscriptions =
-                    mem::replace(&mut replica.cs_subscriptions, BTreeMap::default());
+            SessionState::Replica(replica) => {
+                let cs_oug_back_log: Vec<Message> =
+                    replica.oug_retry_qos12.close().collect();
+
+                active.cs_subscriptions = replica.cs_subscriptions;
                 active.cs_oug_seqno = replica.cs_oug_seqno;
-                active.cs_oug_back_log =
-                    mem::replace(&mut replica.cs_oug_back_log, Vec::default());
+                active.cs_oug_back_log = cs_oug_back_log;
+                active.cs_oug_back_log.extend(replica.cs_oug_back_log.into_iter());
+                active.oug_retry_qos12 = replica.oug_retry_qos12;
                 SessionState::Active(active)
             }
-            SessionState::Reconnect(mut reconnect) => {
-                active.topic_aliases =
-                    mem::replace(&mut reconnect.topic_aliases, BTreeMap::default());
-                active.cs_subscriptions =
-                    mem::replace(&mut reconnect.cs_subscriptions, BTreeMap::default());
+            SessionState::Reconnect(reconnect) => {
+                active.topic_aliases = reconnect.topic_aliases;
+                active.cs_subscriptions = reconnect.cs_subscriptions;
                 active.cs_oug_seqno = reconnect.cs_oug_seqno;
-                active.cs_oug_back_log =
-                    mem::replace(&mut reconnect.cs_oug_back_log, Vec::default());
+                active.cs_oug_back_log = reconnect.cs_oug_back_log;
+                active.oug_retry_qos12 = reconnect.oug_retry_qos12;
+                active.next_packet_ids = match reconnect.next_packet_ids.len() {
+                    0 => active.next_packet_ids,
+                    _ => reconnect.next_packet_ids,
+                };
                 SessionState::Active(active)
             }
+            ss => unreachable!("{:?}", ss),
         };
 
         Session {
@@ -305,26 +315,20 @@ impl Session {
         replica.connect = args.connect;
 
         let state = match self.state {
-            SessionState::Active(mut active) => {
-                replica.topic_aliases =
-                    mem::replace(&mut active.topic_aliases, BTreeMap::default());
-                replica.cs_subscriptions =
-                    mem::replace(&mut active.cs_subscriptions, BTreeMap::default());
+            SessionState::None => SessionState::Replica(replica),
+            SessionState::Active(active) => {
+                replica.cs_subscriptions = active.cs_subscriptions;
                 replica.cs_oug_seqno = active.cs_oug_seqno;
-                replica.cs_oug_back_log =
-                    mem::replace(&mut active.cs_oug_back_log, Vec::default());
+                replica.cs_oug_back_log = active.cs_oug_back_log;
+                replica.oug_retry_qos12 = active.oug_retry_qos12;
             }
-            SessionState::Reconnect(mut reconnect) => {
-                replica.topic_aliases =
-                    mem::replace(&mut reconnect.topic_aliases, BTreeMap::default());
-                replica.cs_subscriptions =
-                    mem::replace(&mut reconnect.cs_subscriptions, BTreeMap::default());
+            SessionState::Reconnect(reconnect) => {
+                replica.cs_subscriptions = reconnect.cs_subscriptions;
                 replica.cs_oug_seqno = reconnect.cs_oug_seqno;
-                replica.cs_oug_back_log =
-                    mem::replace(&mut reconnect.cs_oug_back_log, Vec::default());
+                replica.cs_oug_back_log = reconnect.cs_oug_back_log;
+                replica.oug_retry_qos12 = reconnect.oug_retry_qos12;
                 SessionState::Replica(replica)
             }
-            SessionState::None => SessionState::Replica(replica),
             ss => unreachable!("{:?}", ss),
         };
 
@@ -342,33 +346,38 @@ impl Session {
 
     pub fn into_reconnect(self) -> Session {
         let prefix = format!("session:reconnect:{}", self.raddr);
+
         let state = match self.state {
-            SessionState::Active(mut active) => {
+            SessionState::Active(active) => {
                 let reconnect = Reconnect {
                     common: Common {
                         prefix: prefix.clone(),
-                        config: active.config.clone(),
-                        topic_aliases: mem::replace(
-                            &mut active.topic_aliases,
-                            BTreeMap::default(),
-                        ),
-                        cs_subscriptions: mem::replace(
-                            &mut active.cs_subscriptions,
-                            BTreeMap::default(),
-                        ),
+                        config: active.config,
+                        topic_aliases: active.topic_aliases,
+                        cs_subscriptions: active.cs_subscriptions,
                         cs_oug_seqno: active.cs_oug_seqno,
-                        cs_oug_back_log: mem::replace(
-                            &mut active.cs_oug_back_log,
-                            Vec::default(),
-                        ),
+                        cs_oug_back_log: active.cs_oug_back_log,
+                        oug_retry_qos12: active.oug_retry_qos12,
                     },
+                    next_packet_ids: active.next_packet_ids,
                 };
                 SessionState::Reconnect(reconnect)
-            },
-            SessionState::Replica(mut replica) => {
-                let reconnect = Reconnect { common: replica.common };
+            }
+            SessionState::Replica(replica) => {
+                let reconnect = Reconnect {
+                    common: Common {
+                        prefix: prefix.clone(),
+                        config: replica.config,
+                        topic_aliases: replica.topic_aliases,
+                        cs_subscriptions: replica.cs_subscriptions,
+                        cs_oug_seqno: replica.cs_oug_seqno,
+                        cs_oug_back_log: replica.cs_oug_back_log,
+                        oug_retry_qos12: replica.oug_retry_qos12,
+                    },
+                    next_packet_ids: VecDeque::default(),
+                };
                 SessionState::Reconnect(reconnect)
-            },
+            }
             ss => unreachable!("{:?}", ss),
         };
 
@@ -680,6 +689,7 @@ impl Session {
                 dst_shard_id: subscr.shard_id,
                 client_id: subscr.client_id.clone(),
                 inp_seqno,
+                out_seqno: 0, // NOTE: shall by the receiving session.
                 publish,
             });
 
@@ -926,10 +936,17 @@ impl Session {
         self.state.incr_oug_qos0()
     }
 
+    #[inline]
+    pub fn incr_oug_qos12(&mut self, mut msgs: Vec<Message>) -> Result<QueueMsg> {
+        self.state.incr_oug_qos12()
+    }
+
+    #[inline]
     pub fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
         self.state.tx_oug_acks(msgs)
     }
 
+    #[inline]
     pub fn tx_oug_back_log(&mut self, msgs: Vec<Message>) -> QueueMsg {
         self.state.tx_oug_back_log(msgs)
     }
@@ -1060,16 +1077,41 @@ impl SessionState {
         }
     }
 
-    pub fn incr_oug_qos12(&mut self) -> Option<(OutSeqno, PacketID)> {
-        match self {
-            SessionState::Active(active) => {
-                let seqno = active.cs_oug_seqno;
-                active.cs_oug_seqno = seqno.saturating_add(1);
-                let packet_id = active.next_packet_ids.pop_front()?;
-                Some((seqno, packet_id))
-            }
-            _ => unreachable!(),
+    // msgs carry Message::Retain or Message::Routed of qos12-publish
+    pub fn incr_oug_qos12(&mut self, mut msgs: Vec<Message>) -> Result<QueueMsg> {
+        let active = match self {
+            SessionState::Active(active) => active,
+            ss => unreachable!("{:?}", ss),
+        };
+
+        active.pending_qos12.extend(msgs.into_iter());
+
+        // TODO: separate back-log limit from mqtt_pkt_batch_size.
+        let m = active.pending_qos12.len();
+        let n = (active.config.mqtt_pkt_batch_size as usize) * 4;
+        if m > n {
+            // TODO: if back-pressure is increasing due to a slow receiving client,
+            // we will have to take drastic steps, like, closing this connection.
+            error!("{} pending_qos12 {} pressure > {}", active.prefix, m, n);
+            return Ok(QueueStatus::Disconnected(Vec::new()));
         }
+
+        let mut oug_msgs = Vec::default();
+        while let Some(msg) = active.pending_qos12.pop_front() {
+            match active.next_packet_ids.pop_front() {
+                Some(packet_id) => {
+                    let out_seqno = active.cs_oug_seqno;
+                    active.cs_oug_seqno = seqno.saturating_add(1);
+                    oug_msgs.push(msg.into_oug(out_seqno, packet_id));
+                }
+                None => {
+                    active.pending_qos12.push_back(msg);
+                    break;
+                }
+            };
+        }
+
+        Ok(QueueStatus::Ok(oug_msgs))
     }
 
     fn tx_oug_acks(&mut self, msgs: Vec<Message>) -> QueueMsg {
@@ -1203,11 +1245,15 @@ impl SessionState {
         Ok(code)
     }
 
+    // msgs carry Message::Retain or Message::Routed of qos12-publish
+    // also carries Message::Oug as part of retry publish logic.
     fn commit_cs_oug_back_log(&mut self, msgs: Vec<Message>) -> Result<QueueMsg> {
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
         };
+
+        active.cs_oug_back_log.extend(msgs.into_iter());
 
         // TODO: separate back-log limit from mqtt_pkt_batch_size.
         let m = active.cs_oug_back_log.len();
@@ -1219,103 +1265,47 @@ impl SessionState {
             return Ok(QueueStatus::Disconnected(Vec::new()));
         }
 
-        active.cs_oug_back_log.extend(msgs.into_iter());
+        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
+        for msg in active.cs_oug_back_log.iter() {
+            let packet_id = msg.to_packet_id().unwrap();
+            active.oug_retry_qos12.add_timeout(retry_interval, packet_id, msg.clone());
+        }
+
         let msgs = mem::replace(&mut active.cs_oug_back_log, Vec::default());
 
-        mem::drop(active);
-
-        let (omsgs, rmsgs, packet_ids) = {
-            let n = msgs.len();
-            let (mut omsgs, mut rmsgs) = (Vec::with_capacity(n), Vec::with_capacity(n));
-            let mut packet_ids = Vec::with_capacity(n);
-            for msg in msgs.into_iter() {
-                if let Message::Oug { packet_id: Some(packet_id), .. } = &msg {
-                    packet_ids.push((*packet_id, msg.clone()));
-                    omsgs.push(msg);
-                } else {
-                    match self.incr_oug_qos12() {
-                        Some((out_seqno, packet_id)) => {
-                            packet_ids.push((packet_id, msg.clone()));
-                            omsgs.push(msg.into_oug(out_seqno, Some(packet_id)));
-                        }
-                        None => rmsgs.push(msg),
-                    }
-                }
-            }
-            (omsgs, rmsgs, packet_ids)
-        };
-
-        let active = match self {
-            SessionState::Active(active) => active,
-            ss => unreachable!("{:?}", ss),
-        };
-
-        let m = omsgs.len();
-        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, omsgs);
+        let (ids, mut status) = flush_to_miot(&active.prefix, &active.miot_tx, msgs);
         debug_assert!(ids.len() == 0);
 
         let _empty = mem::replace(&mut active.cs_oug_back_log, status.take_values());
-
-        let retry_interval = active.config.mqtt_publish_retry_interval as u64;
-        let n = active.cs_oug_back_log.len();
-        for (packet_id, msg) in packet_ids[..(m - n)].to_vec().into_iter() {
-            let te1 = TimerEntry::new(retry_interval, msg);
-            let te2 = Arc::clone(&te1);
-            if let Some(_) = active.oug_retry_qos12.insert(packet_id, te1) {
-                err!(
-                    Fatal,
-                    code: ImplementationError,
-                    "packet_id:{} duplicate in oug_retry_qos12",
-                    packet_id
-                )?;
-            }
-            active.oug_retry_timer.add_timeout(retry_interval, te2);
-        }
-
-        active.cs_oug_back_log.extend(rmsgs.into_iter());
-
         Ok(status)
     }
 
     fn retry_publish(&mut self) -> Result<QueueMsg> {
-        use crate::TimeoutValue;
-
         let active = match self {
             SessionState::Active(active) => active,
             ss => unreachable!("{:?}", ss),
         };
         let retry_interval = active.config.mqtt_publish_retry_interval as u64;
 
-        let mut msgs = Vec::default();
-        for te2 in active.oug_retry_timer.expired(None) {
-            let packet_id = te2.value.to_packet_id();
-            match active.oug_retry_qos12.remove(&packet_id) {
-                Some(te1) if te1.is_deleted() => (),
-                Some(te1) => {
-                    msgs.push(te1.value.clone());
-                    active.oug_retry_timer.add_timeout(retry_interval, te2);
-                    active.oug_retry_qos12.insert(packet_id, te1);
-                }
-                None => warn!(
-                    "{} publish from oug_retry_timer is not found in oug_retry_qos12",
-                    active.prefix
-                ),
-            }
+        {
+            let msgs: Vec<Message> = active.oug_retry_qos12.gc().collect();
+            debug!("{} gc:{} msgs in oug_retry_qos12", self.prefix, msgs.len());
         }
 
+        let msgs: Vec<Message> = active.oug_retry_qos12.expired(None).collect();
         self.commit_cs_oug_back_log(msgs)
     }
 
     fn close(self) -> Result<()> {
         match self {
             SessionState::Active(active) => {
-                mem::drop(active.keep_alive)
+                mem::drop(active.keep_alive);
                 mem::drop(active.miot_tx);
                 mem::drop(active.session_rx);
                 mem::drop(active);
             }
-            SessionState::Replica(replica) => mem::drop(replica);
-            SessionState::Reconnect(reconnect) => mem::drop(reconnect);
+            SessionState::Replica(replica) => mem::drop(replica),
+            SessionState::Reconnect(reconnect) => mem::drop(reconnect),
             SessionState::None => (),
         }
 
@@ -1332,7 +1322,7 @@ impl SessionState {
     }
 }
 
-// Flush `Message::ClientAck` and `Message::Packet` downstream
+// Flush `Message::ClientAck` and `Message::Oug` downstream
 fn flush_to_miot(
     prefix: &str,
     miot_tx: &PktTx,

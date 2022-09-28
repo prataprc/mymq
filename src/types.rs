@@ -6,8 +6,8 @@ use std::result;
 use std::ops::{Deref, DerefMut};
 
 use crate::util::{self, advance};
+use crate::{v5, IterTopicPath, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{IterTopicPath, Packetize};
 
 /// Type alias for MQTT PacketID.
 pub type PacketID = u16;
@@ -116,8 +116,8 @@ impl ClientID {
         ClientID(uuid::Uuid::new_v4().to_string())
     }
 
-    pub fn from_connect(client_id: &ClientID) -> ClientID {
-        match client_id.len() {
+    pub fn from_connect(connect: &v5::Connect) -> ClientID {
+        match connect.payload.client_id.len() {
             0 => Self::new_uuid_v4(),
             _ => client_id.clone(),
         }

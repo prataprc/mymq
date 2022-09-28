@@ -3,11 +3,12 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use log::{error, warn};
 
 use std::sync::{mpsc, Arc};
-use std::{collections::BTreeMap, fmt, result};
+use std::{collections::BTreeMap, fmt, net, result};
 
 #[allow(unused_imports)]
 use crate::broker::Shard;
-use crate::broker::{InpSeqno, OutSeqno, QueueStatus, SessionArgsReplica};
+use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
+use crate::broker::{SessionArgsActive, SessionArgsReplica};
 
 use crate::{v5, ClientID, PacketID};
 
@@ -31,15 +32,18 @@ impl RouteIO {
 
 #[derive(Default)]
 pub struct ConsensIO {
-    pub oug_seqno: BTreeMap<ClientID, OutSeqno>,
-    // Message::Routed
-    pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
     // Message::Subscribe
     pub oug_subs: BTreeMap<ClientID, Vec<Message>>,
     // Message::UnSubscribe
     pub oug_unsubs: BTreeMap<ClientID, Vec<Message>>,
-    // Message::Routed
+
+    pub oug_seqno: BTreeMap<ClientID, OutSeqno>,
+    // Message::Routed, won't go through consensus loop.
+    pub oug_qos0: BTreeMap<ClientID, Vec<Message>>,
+    // Message::{Routed, Retain}
     pub oug_qos12: BTreeMap<ClientID, Vec<Message>>,
+    // list of packet_ids for qos12 msgs that has received ack from subscribed clients.
+    pub ack_qos12: Vec<PacketID>,
     // Message::{AddSession, RemSession}
     pub ctrl_msgs: Vec<Message>,
 }
@@ -139,6 +143,7 @@ pub enum Message {
     },
     /// Retain publish messages.
     Retain {
+        out_seqno: OutSeqno,
         publish: v5::Publish,
     },
     /// Consensus Loop.
@@ -164,6 +169,7 @@ pub enum Message {
         dst_shard_id: u32,    // receiving shard-id
         client_id: ClientID,  // receiving client-id
         inp_seqno: InpSeqno,  // shard's inp_seqno
+        out_seqno: OutSeqno,  // shall be set on the receiving side.
         publish: v5::Publish, // publish packet, as received from publishing client
     },
     /// Message that is periodically published by a session to other local shards.
@@ -177,16 +183,15 @@ pub enum Message {
     /// sending them downstream.
     Oug {
         out_seqno: OutSeqno,
-        packet_id: Option<PacketID>,
         publish: v5::Publish,
     },
 
     // Consensus
     AddSession {
-        shard_id: u32,
-        client_id: ClientID,
         raddr: net::SocketAddr,
         config: Config,
+        client_id: ClientID,
+        shard_id: u32,
         connect: v5::Connect,
         clean_start: bool,
     },
@@ -207,6 +212,7 @@ impl fmt::Debug for Message {
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
             Message::Oug { .. } => write!(f, "Message::Oug"),
+            Message::AddSession { .. } => write!(f, "Message::AddSession"),
         }
     }
 }
@@ -214,7 +220,7 @@ impl fmt::Debug for Message {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Message {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let val = match uns.arbitrary::<u8>()? % 8 {
+        let val = match uns.arbitrary::<u8>()? % 10 {
             0 => Message::ClientAck {
                 packet: match uns.arbitrary::<u8>()? % 8 {
                     0 => v5::Packet::ConnAck(uns.arbitrary()?),
@@ -230,7 +236,6 @@ impl<'a> Arbitrary<'a> for Message {
             },
             1 => Message::Oug {
                 out_seqno: uns.arbitrary()?,
-                packet_id: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
             },
             2 => Message::Subscribe { sub: uns.arbitrary()? },
@@ -247,11 +252,24 @@ impl<'a> Arbitrary<'a> for Message {
                 dst_shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
+                out_seqno: uns.arbitrary()?,
                 publish: uns.arbitrary()?,
             },
             7 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,
                 last_acked: uns.arbitrary()?,
+            },
+            8 => Message::AddSession {
+                shard_id: uns.arbitrary(),
+                client_id: uns.arbitrary(),
+                raddr: uns.arbitrary(),
+                config: uns.arbitrary(),
+                connect: uns.arbitrary(),
+                clean_start: uns.arbitrary(),
+            },
+            9 => Message::RemSession {
+                shard_id: uns.arbitrary()?,
+                client_id: uns.arbitrary()?,
             },
             _ => unreachable!(),
         };
@@ -274,7 +292,7 @@ impl Message {
     }
 
     pub fn new_retain_publish(publish: v5::Publish) -> Message {
-        Message::Retain { publish }
+        Message::Retain { out_seqno: 0, publish }
     }
 
     pub fn new_unsub(unsub: v5::UnSubscribe) -> Message {
@@ -311,20 +329,31 @@ impl Message {
         Message::LocalAck { shard_id, last_acked }
     }
 
+    pub fn new_add_session(args: SessionArgsActive, clean_start: bool) -> Message {
+        Message::AddSession {
+            raddr: args.raddr,
+            config: args.config,
+            client_id: args.client_id,
+            shard_id: args.shard_id,
+            connect: v5::Connect,
+            clean_start,
+        }
+    }
+
     pub fn new_rem_session(shard_id: u32, client_id: ClientID) -> Message {
         Message::RemSession { shard_id, client_id }
     }
 
-    pub fn into_oug(self, out_seqno: OutSeqno, pktid: Option<PacketID>) -> Message {
-        let mut publish = match self {
-            Message::Routed { publish, .. } => publish,
-            Message::Retain { publish } => publish,
+    pub fn into_oug(self, out_seqno: OutSeqno, packet_id: PacketID) -> Message {
+        let publish = match self {
+            Message::Routed { publish, out_seqno: 0, .. } => publish,
+            Message::Retain { publish, out_seqno: 0, .. } => publish,
             _ => unreachable!(),
         };
-        if let Some(packet_id) = pktid {
-            publish.set_packet_id(packet_id);
-        }
-        Message::Oug { out_seqno, packet_id: pktid, publish }
+
+        assert!(publish.to_packet_id().is_none());
+        publish.set_packet_id(packet_id);
+        Message::Oug { out_seqno, publish }
     }
 
     pub fn to_v5_packet(&self) -> v5::Packet {
@@ -337,8 +366,9 @@ impl Message {
 
     pub fn to_packet_id(&self) -> PacketID {
         match self {
-            Message::ShardIndex { packet_id, .. } => *packet_id,
-            Message::Oug { packet_id: Some(packet_id), .. } => *packet_id,
+            Message::Retain { publish, .. } => publish.to_packet_id.unwrap(),
+            Message::Routed { publish, .. } => publish.to_packet_id.unwrap(),
+            Message::Oug { publish, .. } => publish.to_packet_id().unwrap(),
             _ => unreachable!(),
         }
     }

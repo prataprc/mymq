@@ -27,6 +27,17 @@ macro_rules! append_index {
     }};
 }
 
+macro_rules! appends_index {
+    ($index:expr, $key:expr, $val:expr) => {{
+        match ($index).get_mut($key) {
+            Some(values) => values.extend($val.into_iter()),
+            None => {
+                ($index).insert(($key).clone(), $val);
+            }
+        }
+    }};
+}
+
 /// Type is the workhorse of MQTT, and shall host one or more sessions.
 ///
 /// Handle incoming MQTT packets, route them to other shards, send back acknowledgement,
@@ -97,7 +108,7 @@ pub struct ActiveLoop {
     /// Collection of sessions and corresponding clients managed by this shard. Shall be
     /// dropped after close_wait call, when the thread returns it will be empty.
     sessions: BTreeMap<ClientID, Session>,
-    reconnects: Timer<ClientID>,
+    reconnects: Timer<ClientID, Session>,
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     /// incoming PUBLISH (QoS-1 & 2) packet.
     inp_seqno: InpSeqno,
@@ -133,7 +144,7 @@ pub struct ActiveLoop {
     ack_timestamps: Vec<Timestamp>,
 
     // Message::Routed, will messages published by broken sessions.
-    will_messages: Timer<Message>,
+    will_messages: Timer<ClientID, Message>,
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard>,
     /// MVCC clone of Cluster::cc_topic_filters
@@ -161,7 +172,7 @@ pub struct ReplicaLoop {
     /// Collection of sessions and corresponding clients managed by this shard. Shall be
     /// dropped after close_wait call, when the thread returns it will be empty.
     sessions: BTreeMap<ClientID, Session>,
-    reconnects: Timer<ClientID>,
+    reconnects: Timer<ClientID, Session>,
 
     /// statistics
     stats: Stats,
@@ -172,7 +183,7 @@ pub struct ReplicaLoop {
 pub struct FinState {
     pub miot: Miot,
     pub sessions: BTreeMap<ClientID, session::Stats>,
-    pub reconnects: Vec<ClientID>,
+    pub reconnects: Vec<session::Stats>,
     pub inp_seqno: InpSeqno,
     pub shard_back_log: BTreeMap<u32, usize>,
     pub ack_timestamps: Vec<Timestamp>,
@@ -559,6 +570,7 @@ struct ActiveContext {
     inner: Inner,
     session: Session,
     cons_io: ConsensIO,
+    disconnected: bool,
 }
 
 impl ActiveContext {
@@ -568,6 +580,7 @@ impl ActiveContext {
             inner,
             session: Session::default(),
             cons_io: ConsensIO::default(),
+            disconnected: false,
         }
     }
 }
@@ -603,6 +616,7 @@ impl Shard {
             self.return_local_acks(&mut args, &mut cons_io);
             self.active_post_cs(&mut args, &mut cons_io);
             self.inc_publish_ack(&mut args); // send acks for incoming packets
+            self.expire_reconnects(&mut args);
 
             msg_rx = args.msg_rx;
             inner = args.inner;
@@ -659,6 +673,7 @@ impl Shard {
                 }
             };
             route_io = route_io.reset_session();
+            args.disconnected = false;
         }
 
         self.clean_failed_sessions(fail_sessions);
@@ -692,11 +707,16 @@ impl Shard {
                 let session = mem::replace(&mut args.session, _empty_session);
                 let err = err_disconnected(&self.prefix).err();
                 fail_sessions.push(FailSession { session, err });
+            } else if args.disconnected {
+                let session = mem::replace(&mut args.session, _empty_session);
+                let err = err_disconnected(&self.prefix).err();
+                fail_sessions.push(FailSession { session, err });
             } else {
                 let session = mem::replace(&mut args.session, _empty_session);
                 cons_io.oug_seqno.insert(client_id.clone(), session.to_cs_oug_seqno());
                 sessions1.insert(client_id, session);
             }
+            args.disconnected = false;
         }
 
         // TODO: replicate relevant fields of cons_io in the consensus loop.
@@ -777,6 +797,8 @@ impl Shard {
                 let session = mem::replace(&mut args.session, _empty_session);
                 sessions1.insert(client_id, session);
             }
+
+            args.disconnected = false;
         }
 
         self.clean_failed_sessions(fail_sessions);
@@ -802,21 +824,19 @@ impl Shard {
         let mut oug_retain0 = Vec::default();
         let mut oug_retain12 = Vec::default();
 
-        for msg in oug_msgs.into_iter() {
-            match &msg {
+        for mut msg in oug_msgs.into_iter() {
+            match &mut msg {
                 Message::ClientAck { packet: v5::Packet::PingResp } => {
                     oug_acks.push(msg);
                 }
                 Message::ClientAck { packet: v5::Packet::PubAck(_) } => {
                     oug_acks.push(msg);
                 }
-                Message::Retain { publish } if publish.is_qos0() => {
-                    let out_seqno = args.session.incr_oug_qos0();
-                    oug_retain0.push(msg.into_oug(out_seqno, None));
+                Message::Retain { out_seqno, publish } if publish.is_qos0() => {
+                    *out_seqno = args.session.incr_oug_qos0();
+                    oug_retain0.push(msg);
                 }
-                Message::Retain { .. } => {
-                    oug_retain12.push(msg);
-                }
+                Message::Retain { .. } => oug_retain12.push(msg),
                 Message::Subscribe { .. } => {
                     let client_id = &args.session.client_id;
                     append_index!(&mut rio.cons_io.oug_subs, client_id, msg);
@@ -857,9 +877,13 @@ impl Shard {
         let status = args.session.tx_oug_back_log(oug_retain0);
         rio.disconnected = matches!(status, QueueStatus::Disconnected(_));
 
-        rio.disconnected = match args.session.commit_cs_oug_back_log(oug_retain12) {
-            Ok(QueueStatus::Disconnected(_)) => true,
-            Ok(_) => false,
+        rio.disconnected = match args.session.incr_oug_qos12(oug_retain12) {
+            Ok(QueueStatus::Ok(msgs)) => {
+                let client_id = &args.session.client_id;
+                appends_index!(&mut rio.cons_io.oug_qos12, client_id, msgs);
+                false
+            }
+            Ok(QueueStatus::Block(_)) | Ok(QueueStatus::Disconnected(_)) => true,
             Err(_err) => true,
         };
     }
@@ -897,8 +921,9 @@ impl Shard {
         // receive messages targeting all the sessions hosted in this shard.
         let mut status = args.msg_rx.try_recvs();
 
-        for msg in status.take_values().into_iter() {
-            match &msg {
+        let mut oug_qos12 = Vec::default();
+        for mut msg in status.take_values().into_iter() {
+            match &mut msg {
                 Message::LocalAck { shard_id, last_acked } => {
                     match ack_timestamps
                         .binary_search_by_key(shard_id, |t| t.dst_shard_id)
@@ -907,22 +932,26 @@ impl Shard {
                         Err(_) => unreachable!(),
                     }
                 }
-                Message::Routed { client_id, publish, .. } if publish.is_qos0() => {
-                    append_index!(cons_io.oug_qos0, client_id, msg);
+                Message::Routed { publish, .. } if publish.is_qos12() => {
+                    oug_qos12.push(msg);
                 }
-                Message::Routed { client_id, .. } => {
-                    append_index!(cons_io.oug_qos12, client_id, msg);
+                Message::Routed { client_id, publish, out_seqno, .. } => {
+                    *out_seqno = args.session.incr_oug_qos0();
+                    append_index!(&mut cons_io.oug_qos0, client_id, msg);
                 }
                 _ => unreachable!(),
             };
         }
 
-        if matches!(status, QueueStatus::Disconnected(_)) {
-            error!(
-                "{} shard_id:{} fatal !! shard-msg-rx has closed",
-                self.prefix, self.shard_id
-            )
-        }
+        args.disconnected = match args.session.incr_oug_qos12(oug_qos12) {
+            Ok(QueueStatus::Ok(msgs)) => {
+                let client_id = &args.session.client_id;
+                appends_index!(&mut cons_io.oug_qos12, client_id, msgs);
+                false
+            }
+            Ok(QueueStatus::Block(_)) | Ok(QueueStatus::Disconnected(_)) => true,
+            Err(_err) => true,
+        };
     }
 
     fn return_local_acks(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
@@ -1026,7 +1055,18 @@ impl Shard {
         };
     }
 
-    fn remove_session(&mut self, client_id: &ClientID) -> Option<Session> {
+    fn expire_reconnects(&mut self, args: &mut ActiveContext) {
+        let ActiveLoop { reconnects, .. } = match &mut self.inner {
+            Inner::MainActive(active_loop) => active_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        for session in reconnects.expired(None) {
+            info!("{} session:{} reconnect expired", session.as_client_id());
+        }
+    }
+
+    fn remove_session(&mut self, client_id: &ClientID) {
         match &mut self.inner {
             Inner::MainActive(ActiveLoop {
                 index,
@@ -1048,25 +1088,25 @@ impl Shard {
                 }
 
                 if let Some(mut session) = sessions.remove(client_id) {
-                    let expiry = session.to_session_expiry_interval().unwrap_or(0);
-                    reconnects.add_timeout(expiry, client_id.clone());
                     session.remove_topic_filters(cc_topic_filters);
-                    sessions.insert(client_id.clone(), session.into_reconnect());
-                    Some(session)
+                    reconnects.add_timeout(
+                        session.to_session_expiry_interval().unwrap_or(0),
+                        client_id.clone(),
+                        session.into_reconnect(),
+                    );
                 } else {
                     warn!("{} client_id:{} session not found", self.prefix, *client_id);
-                    None
                 }
             }
             Inner::MainReplica(ReplicaLoop { sessions, reconnects, .. }) => {
                 if let Some(mut session) = sessions.remove(client_id) {
-                    let expiry = session.to_session_expiry_interval().unwrap_or(0);
-                    reconnects.add_timeout(expiry, client_id, clone());
-                    sessions.insert(client_id.clone(), session.into_reconnect());
-                    Some(session)
+                    reconnects.add_timeout(
+                        0, // NOTE: reconnect never expires on the replica.
+                        client_id.clone(),
+                        session.into_reconnect(),
+                    );
                 } else {
                     warn!("{} client_id:{} session not found", self.prefix, *client_id);
-                    None
                 }
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1134,7 +1174,7 @@ impl Shard {
 
         loop {
             // keep repeating until all control requests are drained.
-            match self.drain_control_chan(rx, cons_iod) {
+            match self.drain_control_chan(rx, cons_io) {
                 (_, true) => break true,
                 (QueueStatus::Ok(_), false) => (),
                 (QueueStatus::Block(_), _) => break false,
@@ -1200,7 +1240,7 @@ impl Shard {
 
             match miot.remove_connection(&session.client_id) {
                 Ok(Some(socket)) => {
-                    let req = Request::FlushSession { socket, err };
+                    Request::FlushSession { socket, err };
                     self.handle_flush_session(req, cons_io);
                 }
                 Ok(None) => {
@@ -1235,28 +1275,21 @@ impl Shard {
         }
     }
 
-    fn handle_add_session_a(
-        &mut self,
-        req: Request,
-        cons_io: &mut ConsensIO,
-    ) -> Response {
+    fn handle_add_session_a(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
         use crate::broker::miot::AddConnectionArgs;
 
         // create the session
         let (mut session, upstream, downstream) = {
-            let (args, upstream, downstream) = self.to_args_active(&req);
+            let (args, upstream, downstream) = self.to_args_active(&r);
             let session = self.new_session_a(args, cons_io);
             (session, upstream, downstream)
         };
 
-        let AddSessionArgs { sock, connect } = match req {
+        let AddSessionArgs { sock, connect } = match r {
             Request::AddSession(args) => args,
             _ => unreachable!(),
         };
         let raddr = sock.peer_addr().unwrap();
-        let client_id = ClientID::from_connect(&connect.payload.client_id);
-
-        // TODO: handle connect.flags.clean_start here.
 
         // send back the connection acknowledgment CONNACK here.
         {
@@ -1264,19 +1297,19 @@ impl Shard {
             let status = session.tx_oug_acks(vec![Message::new_conn_ack(packet)]);
 
             match status {
-                QueueStatus::Ok(_) => {
+                QueueStatus::Ok(_) | QueueStatus::Block(_) => {
                     info!("{} raddr:{} send CONNACK", self.prefix, raddr);
                 }
-                QueueStatus::Disconnected(_) | QueueStatus::Block(_) => {
+                QueueStatus::Disconnected(_) => {
                     error!("{} raddr:{} fail to send CONNACK", self.prefix, raddr);
                     return Response::Ok;
                 }
             }
         }
 
-        // add_connection further down shall wake miot-thread.
+        // add_connection to miot
         {
-            let client_id = client_id.clone();
+            let client_id = session.client_id.clone();
             let def = Config::DEF_MQTT_MAX_PACKET_SIZE;
             let args = AddConnectionArgs {
                 client_id,
@@ -1292,11 +1325,8 @@ impl Shard {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        sessions.insert(client_id.clone(), session);
+        sessions.insert(session.client_id.clone(), session);
         info!("{} raddr:{} adding new session to shard", self.prefix, raddr);
-
-        // TODO: consensus loop: replicate add_session so that replica can be created
-        // in remote nodes. We did not wait for add_session to be commited.
 
         Response::Ok
     }
@@ -1324,37 +1354,28 @@ impl Shard {
         Response::Ok
     }
 
-    fn handle_flush_session(
-        &mut self,
-        req: Request,
-        cons_io: &mut ConsensIO,
-    ) -> Response {
+    fn handle_flush_session(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
         use crate::broker::flush::FlushConnectionArgs;
 
-        let (socket, err) = match req {
+        let (socket, err) = match r {
             Request::FlushSession { socket, err } => (socket, err),
             _ => unreachable!(),
         };
-        let cid = socket.client_id.clone();
 
-        let session = self.remove_session(&cid);
+        let client_id = socket.client_id.clone();
+
+        self.remove_session(&client_id);
 
         let ActiveLoop { flusher, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let args = FlushConnectionArgs { socket, err: err };
+        let args = FlushConnectionArgs { socket, err };
         app_fatal!(&self, flusher.flush_connection(args));
 
-        match session {
-            Some(session) => {
-                let client_id = session.client_id.clone();
-                let msg = Message::new_rem_session(session.shard_id, client_id);
-                cons_io.ctrl_msgs.append(msg);
-                Response::Session(session)
-            }
-            None => Response::Ok,
-        }
+        let msg = Message::new_rem_session(self.shard_id, client_id);
+        cons_io.ctrl_msgs.append(msg);
+        Response::Ok
     }
 
     fn handle_close_a(&mut self, _req: Request) -> Response {
@@ -1384,7 +1405,7 @@ impl Shard {
         let fin_state = FinState {
             miot,
             sessions: new_sessions,
-            reconnects: active_loop.reconnects.close().collect(),
+            reconnects: active_loop.reconnects.close().map(|s| s.close()).collect(),
             inp_seqno: active_loop.inp_seqno,
             shard_back_log: BTreeMap::default(), // TODO
             ack_timestamps: active_loop.ack_timestamps,
@@ -1419,7 +1440,7 @@ impl Shard {
         let fin_state = FinState {
             miot: Miot::default(),
             sessions: new_sessions,
-            reconnects: replica_loop.reconnects.close().collect(),
+            reconnects: replica_loop.reconnects.close().map(|s| s.close()).collect(),
             inp_seqno: 0,
             shard_back_log: BTreeMap::default(), // TODO
             ack_timestamps: Vec::default(),
@@ -1456,7 +1477,7 @@ impl Shard {
         let args = match req {
             Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
                 shard_id: self.shard_id,
-                client_id: ClientID::from_connect(&connect.payload.client_id),
+                client_id: ClientID::from_connect(&connect),
                 raddr: sock.peer_addr().unwrap(),
                 config: self.config.clone(),
                 miot_tx,
@@ -1475,44 +1496,63 @@ impl Shard {
         cons_io: &mut ConsensIO,
     ) -> Session {
         // add_connection further down shall wake miot-thread.
-        let ActiveLoop { sessions, miot, .. } = match &mut self.inner {
+        let ActiveLoop { sessions, reconnects, miot, .. } = match &mut self.inner {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let resp = match miot.remove_connection(&args.client_id) {
+        let client_id = args.client_id.clone();
+        let clean_start = args.connect.is_clean_start();
+        let reconnect = reconnects.contains(&client_id);
+
+        let (session, clean_start) = match miot.remove_connection(&client_id) {
+            Ok(None) if reconnect && clean_start => {
+                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
+                cons_io.ctrl_msgs.append(msg);
+
+                info!(
+                    "{} old_raddr:{} new_raddr:{} session clean_start",
+                    self.prefix, session.raddr, args.raddr,
+                );
+                let _old_session = sessions.remove(&client_id);
+                (Session::default().into_active(args), true)
+            }
+            Ok(None) if reconnect => {
+                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
+                cons_io.ctrl_msgs.append(msg);
+
+                info!(
+                    "{} old_raddr:{} new_raddr:{} session reconnect",
+                    self.prefix, session.raddr, args.raddr,
+                );
+                (sessions.get(&client_id).unwrap().into_active(args), false)
+            }
+            Ok(None) => {
+                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
+                cons_io.ctrl_msgs.append(msg);
+
+                (Session::default().into_active(args), true)
+            }
             Ok(Some(socket)) => {
                 let err: Result<()> = err_session_takeover(&self.prefix, args.raddr);
                 let arg = Request::FlushSession { socket, err: err.err() };
-                self.handle_flush_session(arg, cons_io)
-            }
-            Ok(None) => {
-                error!(
-                    "{} client_id:{} session missing in miot",
-                    self.prefix, *args.client_id
-                );
-                Response::Ok
+                self.handle_flush_session(arg, cons_io);
+                (Session::default().into_active(args), true)
             }
             Err(err) => {
+                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
+                cons_io.ctrl_msgs.append(msg);
+
                 self.as_app_tx().send("fatal".to_string()).ok();
                 error!("{} fatal error {} ", self.prefix, err);
-                Response::Ok
+                (Session::default().into_active(args), true)
             }
         };
 
-        if let Response::Session(session) = resp {
-            let stats = session.close();
-            info!(
-                "{} old_raddr:{} new_raddr:{} replica:{} session take over",
-                self.prefix,
-                session.raddr,
-                args.raddr,
-                session.is_replica()
-            );
-            info!("{:?}", stats);
-        }
+        let msg = Message::new_add_session(args, clean_start);
+        cons_io.ctrl_msgs.append(msg);
 
-        Session::default().into_active(args)
+        session
     }
 
     fn new_session_r(&mut self, args: SessionArgsReplica) -> Session {

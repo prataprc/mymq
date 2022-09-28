@@ -220,6 +220,37 @@ impl Publish {
         }
     }
 
+    #[inline]
+    pub fn to_packet_id(&self) -> Option<u16> {
+        self.packet_id
+    }
+
+    #[inline]
+    pub fn as_topic_name(&self) -> &TopicName {
+        &self.topic_name
+    }
+
+    #[inline]
+    pub fn is_qos0(&self) -> bool {
+        self.qos == QoS::AtMostOnce
+    }
+
+    #[inline]
+    pub fn is_qos12(&self) -> bool {
+        !self.is_qos0()
+    }
+
+    pub fn message_expiry_interval(&self) -> Option<u32> {
+        self.properties.as_ref()?.message_expiry_interval()
+    }
+
+    pub fn topic_alias(&self) -> Option<u16> {
+        match &self.properties {
+            Some(props) => props.topic_alias,
+            None => None,
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         match self.qos {
             QoS::AtMostOnce if self.duplicate => err!(
@@ -266,27 +297,6 @@ impl Publish {
             if payload.len() == 0 {
                 self.payload = None
             }
-        }
-    }
-
-    pub fn as_topic_name(&self) -> &TopicName {
-        &self.topic_name
-    }
-
-    #[inline]
-    pub fn is_qos0(&self) -> bool {
-        self.qos == QoS::AtMostOnce
-    }
-
-    #[inline]
-    pub fn is_qos12(&self) -> bool {
-        !self.is_qos0()
-    }
-
-    pub fn topic_alias(&self) -> Option<u16> {
-        match &self.properties {
-            Some(props) => props.topic_alias,
-            None => None,
         }
     }
 }
@@ -423,10 +433,6 @@ impl Packetize for PublishProperties {
 }
 
 impl PublishProperties {
-    fn is_payload_utf8(&self) -> bool {
-        self.payload_format_indicator.is_utf8()
-    }
-
     #[cfg(any(feature = "fuzzy", test))]
     pub fn is_empty(&self) -> bool {
         self.payload_format_indicator == PayloadFormat::Binary
@@ -437,5 +443,13 @@ impl PublishProperties {
             && self.subscribtion_identifiers.len() == 0
             && self.content_type.is_none()
             && self.user_properties.len() == 0
+    }
+
+    pub fn message_expiry_interval(&self) -> Option<u32> {
+        self.message_expiry_interval
+    }
+
+    fn is_payload_utf8(&self) -> bool {
+        self.payload_format_indicator.is_utf8()
     }
 }

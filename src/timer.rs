@@ -94,7 +94,7 @@ impl<K, T> Timer<K, T> {
     where
         K: Ord,
     {
-        if let Some(te) = self.entries.get(key) {
+        if let Some(te) = self.entries.remove(key) {
             te.delete();
         }
         Ok(())
@@ -139,6 +139,10 @@ impl<K, T> Timer<K, T> {
         }
 
         expired.into_iter()
+    }
+
+    pub fn contains(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
     }
 
     /// Garbage collect all timer-entries marked as deleted by application.

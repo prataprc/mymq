@@ -102,22 +102,30 @@ impl ConnectFlags {
 
     /// Return (clean_start, will_flag, will_qos, will_retain)
     pub fn unwrap(&self) -> (bool, bool, QoS, bool) {
-        let clean_start: bool = (self.0 & Self::CLEAN_START.0) > 0;
-        let will_flag: bool = (self.0 & Self::WILL_FLAG.0) > 0;
+        let clean_start: bool = self.is_clean_start();
+        let will_flag: bool = self.is_will_flag();
         let will_qos: QoS = (self.0 & Self::WILL_QOS_MASK >> 3).try_into().unwrap();
         let will_retain: bool = (self.0 & Self::WILL_RETAIN.0) > 0;
 
         (clean_start, will_flag, will_qos, will_retain)
     }
 
+    #[inline]
+    pub fn is_clean_start(&self) -> bool {
+        (self.0 & Self::CLEAN_START.0) > 0
+    }
+
+    #[inline]
     pub fn is_will_flag(&self) -> bool {
         (self.0 & Self::WILL_FLAG.0) > 0
     }
 
+    #[inline]
     pub fn is_username(&self) -> bool {
         (self.0 & Self::USERNAME.0) > 0
     }
 
+    #[inline]
     pub fn is_password(&self) -> bool {
         (self.0 & Self::PASSWORD.0) > 0
     }
