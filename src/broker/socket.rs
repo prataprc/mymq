@@ -1,6 +1,6 @@
 use log::{error, trace, warn};
 
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::{collections::VecDeque, mem, time};
 
 use crate::broker::{Config, QueueStatus};
@@ -55,14 +55,14 @@ impl PktTx {
 /// Type implement the rx-handle for a packet-queue.
 pub struct PktRx {
     pkt_batch_size: usize,
-    rx: mpsc::Receiver<v5::Packet>,
+    rx: Mutex<mpsc::Receiver<v5::Packet>>,
 }
 
 impl PktRx {
     pub fn try_recvs(&self, _prefix: &str) -> QueueStatus<v5::Packet> {
         let mut pkts = Vec::with_capacity(self.pkt_batch_size);
         loop {
-            match self.rx.try_recv() {
+            match self.rx.lock().unwrap().try_recv() {
                 Ok(pkt) if pkts.len() < self.pkt_batch_size => pkts.push(pkt),
                 Ok(pkt) => {
                     pkts.push(pkt);
@@ -358,7 +358,7 @@ impl Socket {
 pub fn pkt_channel(miot_id: u32, size: usize, waker: Arc<mio::Waker>) -> (PktTx, PktRx) {
     let (tx, rx) = mpsc::sync_channel(size);
     let pkt_tx = PktTx { miot_id, tx, waker };
-    let pkt_rx = PktRx { pkt_batch_size: size, rx };
+    let pkt_rx = PktRx { pkt_batch_size: size, rx: Mutex::new(rx) };
 
     (pkt_tx, pkt_rx)
 }

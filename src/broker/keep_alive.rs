@@ -13,7 +13,7 @@ pub struct KeepAlive {
 
 impl KeepAlive {
     pub fn new(args: &SessionArgsActive) -> KeepAlive {
-        let factor = args.config.mqtt_keep_alive_factor;
+        let factor = args.config.mqtt_keep_alive_factor();
         let (keep_alive, interval) = match args.config.mqtt_keep_alive() {
             Some(val) => (Some(val as u16), Some(((val as f32) * factor) as u16)),
             None if args.connect.keep_alive == 0 => (None, None),

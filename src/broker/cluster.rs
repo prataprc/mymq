@@ -2,7 +2,7 @@ use log::{debug, error, info, trace};
 use mio::event::Events;
 use uuid::Uuid;
 
-use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, mpsc, Arc};
+use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, fmt, net, path, result, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
@@ -27,7 +27,7 @@ pub struct Cluster {
 
 enum Inner {
     Init,
-    // Help by application.
+    // Held by application.
     Handle(Arc<mio::Waker>, Thread<Cluster, Request, Result<Response>>),
     // Held by Listener, Handshake, Ticker and Shard.
     Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
@@ -590,7 +590,7 @@ impl Cluster {
         debug!("{} gc:{} pkts in retain_timer", self.prefix, pkts.len());
 
         // gather all retained packets and cleanup the RetainedTrie.
-        for pkt in retain_timer.expired(None).collect::<v5::Publish>() {
+        for pkt in retain_timer.expired(None).collect::<Vec<v5::Publish>>() {
             cc_retained_topics.remove(&pkt.topic_name);
         }
     }
@@ -692,7 +692,7 @@ impl Cluster {
         Response::Ok
     }
 
-    fn handle_close(&mut self, _: Request, rt: &mut Rt) -> Response {
+    fn handle_close(&mut self, _: Request) -> Response {
         use std::mem;
 
         let mut run_loop = match mem::replace(&mut self.inner, Inner::Init) {

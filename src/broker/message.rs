@@ -5,10 +5,10 @@ use log::{error, warn};
 use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, fmt, net, result};
 
+use crate::broker::SessionArgsReplica;
 #[allow(unused_imports)]
 use crate::broker::Shard;
-use crate::broker::{InpSeqno, OutSeqno, QueueStatus};
-use crate::broker::{SessionArgsActive, SessionArgsReplica};
+use crate::broker::{Config, InpSeqno, OutSeqno, QueueStatus};
 
 use crate::{v5, ClientID, PacketID};
 
@@ -213,6 +213,7 @@ impl fmt::Debug for Message {
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
             Message::Oug { .. } => write!(f, "Message::Oug"),
             Message::AddSession { .. } => write!(f, "Message::AddSession"),
+            Message::RemSession { .. } => write!(f, "Message::RemSession"),
         }
     }
 }
@@ -329,23 +330,23 @@ impl Message {
         Message::LocalAck { shard_id, last_acked }
     }
 
-    pub fn new_add_session(args: SessionArgsActive, clean_start: bool) -> Message {
-        Message::AddSession {
-            raddr: args.raddr,
-            config: args.config,
-            client_id: args.client_id,
-            shard_id: args.shard_id,
-            connect: v5::Connect,
-            clean_start,
-        }
+    pub fn new_add_session() -> Message {
+        todo!() // directly constructed
     }
 
     pub fn new_rem_session(shard_id: u32, client_id: ClientID) -> Message {
         Message::RemSession { shard_id, client_id }
     }
 
+    pub fn set_clean_start(&mut self, cstart: bool) {
+        match self {
+            Message::AddSession { clean_start, .. } => *clean_start = cstart,
+            _ => unreachable!(),
+        }
+    }
+
     pub fn into_oug(self, out_seqno: OutSeqno, packet_id: PacketID) -> Message {
-        let publish = match self {
+        let mut publish = match self {
             Message::Routed { publish, out_seqno: 0, .. } => publish,
             Message::Retain { publish, out_seqno: 0, .. } => publish,
             _ => unreachable!(),
@@ -364,21 +365,21 @@ impl Message {
         }
     }
 
-    pub fn to_packet_id(&self) -> PacketID {
+    pub fn to_packet_id(&self) -> Option<PacketID> {
         match self {
-            Message::Retain { publish, .. } => publish.to_packet_id.unwrap(),
-            Message::Routed { publish, .. } => publish.to_packet_id.unwrap(),
-            Message::Oug { publish, .. } => publish.to_packet_id().unwrap(),
+            Message::Retain { publish, .. } => publish.to_packet_id(),
+            Message::Routed { publish, .. } => publish.to_packet_id(),
+            Message::Oug { publish, .. } => publish.to_packet_id(),
             _ => unreachable!(),
         }
     }
 
     pub fn into_session_args_replica(self) -> SessionArgsReplica {
-        SessionArgsReplica {
-            shard_id: self.shard_id,
-            client_id: self.client_id,
-            raddr: self.raddr,
-            config: self.config,
+        match self {
+            Message::AddSession {
+                raddr, config, client_id, shard_id, connect, ..
+            } => SessionArgsReplica { raddr, config, client_id, shard_id, connect },
+            _ => unreachable!(),
         }
     }
 }

@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::{collections::BTreeMap, fmt, mem, result, sync::Arc, time};
 
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::Result;
 
 /// Differential Timer, to add timers for messages, sessions etc and manage expiry.
 ///
@@ -107,7 +107,6 @@ impl<K, T> Timer<K, T> {
     pub fn expired(&mut self, elapsed: Option<u64>) -> impl Iterator<Item = T>
     where
         K: Ord,
-        T: Clone,
     {
         let micros = elapsed.unwrap_or(self.instant.elapsed().as_micros() as u64);
         self.instant += time::Duration::from_micros(micros);
@@ -141,8 +140,22 @@ impl<K, T> Timer<K, T> {
         expired.into_iter()
     }
 
-    pub fn contains(&self, key: &K) -> bool {
+    pub fn contains(&self, key: &K) -> bool
+    where
+        K: Ord,
+    {
         self.entries.contains_key(key)
+    }
+
+    pub fn values(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        let mut values = Vec::default();
+        for val in self.entries.values() {
+            values.push(val.value.clone())
+        }
+        values
     }
 
     /// Garbage collect all timer-entries marked as deleted by application.
@@ -188,7 +201,6 @@ impl<K, T> Timer<K, T> {
     pub fn close(mut self) -> impl Iterator<Item = T>
     where
         K: Ord,
-        T: Clone,
     {
         let mut node = mem::replace(&mut self.head, Box::new(Titem::Sentinel));
         let mut values = vec![];
@@ -281,15 +293,14 @@ struct TimerEntry<T> {
 
 impl<T> fmt::Display for TimerEntry<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        let deleted = self.deleted.load(SeqCst);
         let secs = time::Duration::from_secs(self.secs);
-        write!(f, "TimerEntry<{:?},{}>", secs, deleted)
+        write!(f, "TimerEntry<{:?},{}>", secs, self.deleted.load(SeqCst))
     }
 }
 
 impl<T> TimerEntry<T> {
     fn delete(&self) {
-        self.deleted.store(true, SeqCst)
+        self.deleted.store(true, SeqCst);
     }
 
     fn is_deleted(&self) -> bool {

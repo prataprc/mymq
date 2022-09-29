@@ -53,7 +53,7 @@ impl SubscriptionOpt {
         let rfr: u8 = u8::from(rfr) << 4;
         let rap: u8 = if rap { 0b1000 } else { 0b0000 };
         let nl: u8 = if nl { 0b0100 } else { 0b0000 };
-        let qos: u8 = qos.into();
+        let qos = u8::from(qos);
 
         SubscriptionOpt(rfr | rap | nl | qos)
     }

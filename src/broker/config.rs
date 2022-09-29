@@ -1,4 +1,5 @@
-use std::{fs, net, path};
+use std::ops::{Deref, DerefMut};
+use std::{cmp, fs, net, path, result};
 
 use crate::util;
 use crate::{Error, ErrorKind, Result};
@@ -31,7 +32,7 @@ macro_rules! config_field {
 }
 
 /// Cluster configuration.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Human readable name of the cluster.
     /// * **Default**: None, must be supplied
@@ -118,7 +119,7 @@ pub struct Config {
     /// multiplying the `mqtt_keep_alive` with this factor.
     /// * **Default**: [Config::DEF_MQTT_KEEP_ALIVE_FACTOR]
     /// * **Mutable**: No
-    pub mqtt_keep_alive_factor: f32,
+    pub mqtt_keep_alive_factor: F32,
 
     /// MQTT Receive-maximum, control the number of unacknowledged PUBLISH packets
     /// server can receive and process concurrently for the client.
@@ -323,7 +324,7 @@ impl Config {
     /// Refer to [Config::mqtt_pkt_batch_size]
     pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::mqtt_keep_alive_factor]
-    pub const DEF_MQTT_KEEP_ALIVE_FACTOR: f32 = 1.5; // suggested by the spec.
+    pub const DEF_MQTT_KEEP_ALIVE_FACTOR: F32 = F32(1.5); // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]
     pub const DEF_MQTT_RECEIVE_MAXIMUM: u16 = 256;
     /// Refer to [Config::mqtt_maximum_qos]
@@ -371,6 +372,10 @@ impl Config {
         }
     }
 
+    pub fn mqtt_keep_alive_factor(&self) -> f32 {
+        self.mqtt_keep_alive_factor.0
+    }
+
     pub fn mqtt_topic_alias_max(&self) -> Option<u16> {
         match &self.mqtt_topic_alias_max {
             Some(0) => None,
@@ -381,7 +386,7 @@ impl Config {
 }
 
 /// Node configuration
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ConfigNode {
     /// Unique identifier for this node within this cluster. There may be other
     /// requirement on the unique-id, like randomness, cyptographic security, public-key.
@@ -431,5 +436,38 @@ impl TryFrom<toml::Value> for ConfigNode {
         }
 
         Ok(def)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct F32(f32);
+
+impl Deref for F32 {
+    type Target = f32;
+
+    fn deref(&self) -> &f32 {
+        &self.0
+    }
+}
+
+impl DerefMut for F32 {
+    fn deref_mut(&mut self) -> &mut f32 {
+        &mut self.0
+    }
+}
+
+impl PartialEq for F32 {
+    fn eq(&self, other: &F32) -> bool {
+        self.total_cmp(other) == cmp::Ordering::Equal
+    }
+}
+
+impl Eq for F32 {}
+
+impl std::str::FromStr for F32 {
+    type Err = std::num::ParseFloatError;
+
+    fn from_str(src: &str) -> result::Result<F32, std::num::ParseFloatError> {
+        Ok(F32(f32::from_str(src)?))
     }
 }

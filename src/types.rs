@@ -4,6 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::result;
 
 use std::ops::{Deref, DerefMut};
+use std::{fmt, result};
 
 use crate::util::{self, advance};
 use crate::{v5, IterTopicPath, Packetize};
@@ -78,6 +79,12 @@ impl AsRef<[u8]> for Blob {
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Default)]
 pub struct ClientID(pub String);
 
+impl fmt::Display for ClientID {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Deref for ClientID {
     type Target = String;
 
@@ -118,8 +125,8 @@ impl ClientID {
 
     pub fn from_connect(connect: &v5::Connect) -> ClientID {
         match connect.payload.client_id.len() {
-            0 => Self::new_uuid_v4(),
-            _ => client_id.clone(),
+            0 => ClientID::new_uuid_v4(),
+            _ => connect.payload.client_id.clone(),
         }
     }
 }
@@ -211,7 +218,7 @@ impl<'a> Arbitrary<'a> for TopicName {
             }
         };
 
-        Ok(s.into())
+        Ok(TopicName::from(s))
     }
 }
 
@@ -396,7 +403,7 @@ impl<'a> Arbitrary<'a> for TopicFilter {
             }
         };
 
-        Ok(s.into())
+        Ok(TopicFilter::from(s))
     }
 }
 
