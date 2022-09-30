@@ -5,10 +5,9 @@ use std::{fmt, result};
 
 use std::ops::{Deref, DerefMut};
 
-use crate::util::advance;
-use crate::v5::{FixedHeader, Property, PropertyType, QoS};
-use crate::{Blob, Packetize, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, VarU32};
+use crate::v5::{FixedHeader, Property, PropertyType, QoS, UserProperty};
+use crate::Packetize;
 
 const PP: &'static str = "Packet::ConnAck";
 
@@ -378,7 +377,7 @@ pub struct ConnAckProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for ConnAckProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
+        use crate::v5::valid_user_props;
 
         let str_choice: Vec<String> =
             vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
@@ -427,7 +426,7 @@ impl<'a> Arbitrary<'a> for ConnAckProperties {
             server_reference,
             authentication_method,
             authentication_data: uns.arbitrary()?,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

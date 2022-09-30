@@ -3,10 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::util::advance;
+use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType, Subscribe};
-use crate::{Blob, Packetize, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::Packetize;
 
 const PP: &'static str = "Packet::SubAck";
 
@@ -188,7 +187,7 @@ pub struct SubAckProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for SubAckProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
+        use crate::v5::valid_user_props;
 
         let rs_choice: Vec<String> =
             vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
@@ -201,7 +200,7 @@ impl<'a> Arbitrary<'a> for SubAckProperties {
         let n_user_props = uns.arbitrary::<usize>()? % 4;
         let val = SubAckProperties {
             reason_string,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

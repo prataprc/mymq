@@ -6,8 +6,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{cmp, fmt, result};
 
 use crate::util::advance;
-use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{ClientID, Packetize, TopicFilter, TopicName};
+
+pub use crate::{Blob, Error, ErrorKind, ReasonCode, Result, VarU32};
 
 // TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
 //       ProtocolError.
@@ -41,6 +42,8 @@ pub(crate) use dec_prop;
 /// MQTT packetization, decode a list of properties.
 macro_rules! dec_props {
     ($type:ty, $stream:expr, $n:expr; $($pred:tt)*) => {{
+        use crate::util::advance;
+
         if $($pred)* {
             match VarU32::decode(advance($stream, $n)?)? {
                 (VarU32(0), m) => (None, $n + m),
@@ -64,6 +67,8 @@ macro_rules! dec_props {
         }
     }};
     ($type:ty, $stream:expr, $n:expr) => {{
+        use crate::util::advance;
+
         match VarU32::decode(advance($stream, $n)?)? {
             (VarU32(0), m) => (None, $n + m),
             (VarU32(p), m) => {
@@ -904,7 +909,6 @@ pub enum Property {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Property {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
         use PropertyType::*;
 
         let content_types: Vec<String> =
@@ -1004,7 +1008,7 @@ impl<'a> Arbitrary<'a> for Property {
                 Property::RetainAvailable(val)
             }
             UserProp => {
-                let val: UserProperty = types::valid_user_props(uns, 1)?.pop().unwrap();
+                let val: UserProperty = valid_user_props(uns, 1)?.pop().unwrap();
                 Property::UserProp(val)
             }
             MaximumPacketSize => {
@@ -1241,6 +1245,58 @@ impl PayloadFormat {
 
     pub fn is_utf8(&self) -> bool {
         self == &PayloadFormat::Utf8
+    }
+}
+
+/// Type alias for MQTT User-Property.
+pub type UserProperty = (String, String);
+
+#[cfg(any(feature = "fuzzy", test))]
+pub fn valid_user_props<'a>(
+    uns: &mut Unstructured<'a>,
+    n: usize, // TODO: increase n to make size > 1/2 byte.
+) -> result::Result<Vec<UserProperty>, ArbitraryError> {
+    let mut props = vec![];
+    for _ in 0..n {
+        let keys: Vec<String> =
+            vec!["", "key"].into_iter().map(|s| s.to_string()).collect();
+        let vals: Vec<String> =
+            vec!["", "val"].into_iter().map(|s| s.to_string()).collect();
+
+        let key: String = uns.choose(&keys)?.to_string();
+        let val: String = uns.choose(&vals)?.to_string();
+        props.push((key, val))
+    }
+
+    Ok(props)
+}
+
+impl Packetize for UserProperty {
+    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        let stream: &[u8] = stream.as_ref();
+
+        let (key, m) = String::decode(stream)?;
+        let (val, n) = String::decode(advance(stream, m)?)?;
+        Ok(((key, val), (m + n)))
+    }
+
+    fn encode(&self) -> Result<Blob> {
+        let key_blob = self.0.encode()?;
+        let val_blob = self.1.encode()?;
+        let m = key_blob.as_ref().len();
+        let n = val_blob.as_ref().len();
+
+        if (m + n) < 32 {
+            let mut data = [0_u8; 32];
+            data[..m].copy_from_slice(key_blob.as_ref());
+            data[m..m + n].copy_from_slice(val_blob.as_ref());
+            Ok(Blob::Small { data, size: m + n })
+        } else {
+            let mut data = Vec::with_capacity(64);
+            data.extend_from_slice(key_blob.as_ref());
+            data.extend_from_slice(val_blob.as_ref());
+            Ok(Blob::Large { data })
+        }
     }
 }
 

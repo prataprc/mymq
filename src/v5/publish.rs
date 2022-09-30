@@ -3,10 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{cmp, fmt, result};
 
-use crate::util::advance;
 use crate::v5::{self, FixedHeader, PayloadFormat, Property, PropertyType, QoS};
-use crate::{Blob, Packetize, TopicName, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
+use crate::{Packetize, TopicName};
 
 const PP: &'static str = "Packet::Publish";
 
@@ -332,8 +331,6 @@ impl From<v5::WillProperties> for PublishProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for PublishProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
-
         let ct_choice: Vec<String> =
             vec!["", "img/png"].into_iter().map(|s| s.to_string()).collect();
         let content_type = match uns.arbitrary::<u8>()? % 2 {
@@ -351,7 +348,7 @@ impl<'a> Arbitrary<'a> for PublishProperties {
             correlation_data: uns.arbitrary()?,
             subscribtion_identifiers: uns.arbitrary()?,
             content_type,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: v5::valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

@@ -7,10 +7,10 @@ use std::{
     result,
 };
 
-use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS, UserProperty};
-use crate::{util::advance, v5};
-use crate::{Blob, ClientID, MqttProtocol, Packetize, TopicName, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{self, Blob, UserProperty, VarU32};
+use crate::v5::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
+use crate::{ClientID, MqttProtocol, Packetize, TopicName};
 
 const PP: &'static str = "Packet::Connect";
 
@@ -576,8 +576,6 @@ pub struct ConnectProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for ConnectProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
-
         let am_choice: Vec<String> =
             vec!["", "digest"].into_iter().map(|s| s.to_string()).collect();
         let authentication_method = match uns.arbitrary::<u8>()? % 2 {
@@ -595,7 +593,7 @@ impl<'a> Arbitrary<'a> for ConnectProperties {
             request_problem_info: uns.arbitrary()?,
             authentication_method,
             authentication_data: uns.arbitrary()?,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: v5::valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)
@@ -752,8 +750,6 @@ pub struct WillProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for WillProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
-
         let ct_choice: Vec<String> =
             vec!["", "img/png"].into_iter().map(|s| s.to_string()).collect();
         let content_type = match uns.arbitrary::<u8>()? % 2 {
@@ -770,7 +766,7 @@ impl<'a> Arbitrary<'a> for WillProperties {
             content_type,
             response_topic: uns.arbitrary()?,
             correlation_data: uns.arbitrary()?,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: v5::valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

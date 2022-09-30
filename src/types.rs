@@ -1,12 +1,9 @@
 #[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
-#[cfg(any(feature = "fuzzy", feature = "mymqd", test))]
-use std::result;
 
 use std::ops::{Deref, DerefMut};
 use std::{fmt, result};
 
-use crate::util::{self, advance};
 use crate::{v5, IterTopicPath, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
@@ -522,58 +519,6 @@ impl VarU32 {
     pub const MAX: VarU32 = VarU32(268_435_455);
 }
 
-/// Type alias for MQTT User-Property.
-pub type UserProperty = (String, String);
-
-#[cfg(any(feature = "fuzzy", test))]
-pub fn valid_user_props<'a>(
-    uns: &mut Unstructured<'a>,
-    n: usize, // TODO: increase n to make size > 1/2 byte.
-) -> result::Result<Vec<UserProperty>, ArbitraryError> {
-    let mut props = vec![];
-    for _ in 0..n {
-        let keys: Vec<String> =
-            vec!["", "key"].into_iter().map(|s| s.to_string()).collect();
-        let vals: Vec<String> =
-            vec!["", "val"].into_iter().map(|s| s.to_string()).collect();
-
-        let key: String = uns.choose(&keys)?.to_string();
-        let val: String = uns.choose(&vals)?.to_string();
-        props.push((key, val))
-    }
-
-    Ok(props)
-}
-
-impl Packetize for UserProperty {
-    fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        let stream: &[u8] = stream.as_ref();
-
-        let (key, m) = String::decode(stream)?;
-        let (val, n) = String::decode(advance(stream, m)?)?;
-        Ok(((key, val), (m + n)))
-    }
-
-    fn encode(&self) -> Result<Blob> {
-        let key_blob = self.0.encode()?;
-        let val_blob = self.1.encode()?;
-        let m = key_blob.as_ref().len();
-        let n = val_blob.as_ref().len();
-
-        if (m + n) < 32 {
-            let mut data = [0_u8; 32];
-            data[..m].copy_from_slice(key_blob.as_ref());
-            data[m..m + n].copy_from_slice(val_blob.as_ref());
-            Ok(Blob::Small { data, size: m + n })
-        } else {
-            let mut data = Vec::with_capacity(64);
-            data.extend_from_slice(key_blob.as_ref());
-            data.extend_from_slice(val_blob.as_ref());
-            Ok(Blob::Large { data })
-        }
-    }
-}
-
 impl Packetize for u8 {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
@@ -639,6 +584,8 @@ impl Packetize for u32 {
 
 impl Packetize for String {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
+        use crate::util;
+
         let stream: &[u8] = stream.as_ref();
 
         let (len, _) = u16::decode(stream)?;
@@ -663,6 +610,8 @@ impl Packetize for String {
     }
 
     fn encode(&self) -> Result<Blob> {
+        use crate::util;
+
         if !self.chars().all(util::is_valid_utf8_code_point) {
             err!(ProtocolError, desc: "String::encode invalid utf8 string")?;
         }

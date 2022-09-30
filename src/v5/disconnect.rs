@@ -3,10 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::util::advance;
+use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
 use crate::v5::{FixedHeader, Property, PropertyType};
-use crate::{Blob, Packetize, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::Packetize;
 
 const PP: &'static str = "Packet::Disconnect";
 
@@ -261,7 +260,7 @@ pub struct DisconnProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for DisconnProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
+        use crate::v5::valid_user_props;
 
         let rs_choice: Vec<String> =
             vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
@@ -281,7 +280,7 @@ impl<'a> Arbitrary<'a> for DisconnProperties {
         let val = DisconnProperties {
             session_expiry_interval: uns.arbitrary()?,
             reason_string,
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: valid_user_props(uns, n_user_props)?,
             server_reference,
         };
 

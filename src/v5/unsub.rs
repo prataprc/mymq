@@ -3,9 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{FixedHeader, Property, PropertyType};
-use crate::{util::advance, Blob, Packetize, TopicFilter, UserProperty, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{Blob, FixedHeader, Property, PropertyType, UserProperty, VarU32};
+use crate::v5::{Error, ErrorKind, ReasonCode, Result};
+use crate::{Packetize, TopicFilter};
 
 const PP: &'static str = "Packet::UnSubscribe";
 
@@ -140,11 +140,11 @@ pub struct UnSubscribeProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for UnSubscribeProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::types;
+        use crate::v5::valid_user_props;
 
         let n_user_props = uns.arbitrary::<usize>()? % 4;
         let val = UnSubscribeProperties {
-            user_properties: types::valid_user_props(uns, n_user_props)?,
+            user_properties: valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

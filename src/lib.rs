@@ -94,7 +94,7 @@ mod types;
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use packet::{MQTTRead, MQTTWrite};
 pub use timer::Timer;
-pub use types::{Blob, MqttProtocol, PacketID, UserProperty, VarU32};
+pub use types::{Blob, MqttProtocol, PacketID, VarU32};
 pub use types::{ClientID, TopicFilter, TopicName};
 
 #[macro_use]
