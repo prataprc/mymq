@@ -221,6 +221,8 @@ impl fmt::Debug for Message {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Message {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use std::str::FromStr;
+
         let val = match uns.arbitrary::<u8>()? % 10 {
             0 => Message::ClientAck {
                 packet: match uns.arbitrary::<u8>()? % 8 {
@@ -241,7 +243,10 @@ impl<'a> Arbitrary<'a> for Message {
             },
             2 => Message::Subscribe { sub: uns.arbitrary()? },
             3 => Message::UnSubscribe { unsub: uns.arbitrary()? },
-            4 => Message::Retain { publish: uns.arbitrary()? },
+            4 => Message::Retain {
+                out_seqno: uns.arbitrary()?,
+                publish: uns.arbitrary()?,
+            },
             5 => Message::ShardIndex {
                 src_client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
@@ -261,12 +266,12 @@ impl<'a> Arbitrary<'a> for Message {
                 last_acked: uns.arbitrary()?,
             },
             8 => Message::AddSession {
-                shard_id: uns.arbitrary(),
-                client_id: uns.arbitrary(),
-                raddr: uns.arbitrary(),
-                config: uns.arbitrary(),
-                connect: uns.arbitrary(),
-                clean_start: uns.arbitrary(),
+                raddr: net::SocketAddr::from_str("192.168.2.10").unwrap(),
+                config: Config::default(), // TODO: make config arbitrary
+                client_id: uns.arbitrary()?,
+                shard_id: uns.arbitrary()?,
+                connect: uns.arbitrary()?,
+                clean_start: uns.arbitrary()?,
             },
             9 => Message::RemSession {
                 shard_id: uns.arbitrary()?,
