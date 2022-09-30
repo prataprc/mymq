@@ -4,8 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
-use crate::v5::{FixedHeader, Property, PropertyType};
-use crate::Packetize;
+use crate::v5::{FixedHeader, Packetize, Property, PropertyType};
 
 const PP: &'static str = "Packet::Disconnect";
 

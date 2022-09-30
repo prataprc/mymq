@@ -6,9 +6,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{cmp, fmt, result};
 
 use crate::util::advance;
-use crate::{ClientID, Packetize, TopicFilter, TopicName};
 
-pub use crate::{Blob, Error, ErrorKind, ReasonCode, Result, VarU32};
+pub use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, VarU32};
+pub use crate::{Error, ErrorKind, ReasonCode, Result};
 
 // TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
 //       ProtocolError.
@@ -107,6 +107,9 @@ macro_rules! enc_prop {
 }
 pub(crate) use enc_prop;
 
+mod packet;
+pub use packet::{MQTTRead, MQTTWrite};
+
 mod auth;
 mod connack;
 mod connect;
@@ -118,9 +121,6 @@ mod sub;
 mod suback;
 mod unsub;
 mod unsuback;
-
-#[cfg(feature = "client")]
-pub mod client;
 
 pub use auth::{Auth, AuthProperties, AuthReasonCode};
 pub use connack::{ConnAck, ConnAckProperties, ConnackFlags, ConnackReasonCode};
@@ -135,6 +135,43 @@ pub use sub::{Subscribe, SubscribeFilter, SubscribeProperties, SubscriptionOpt};
 pub use suback::{SubAck, SubAckProperties, SubAckReasonCode};
 pub use unsub::{UnSubscribe, UnSubscribeProperties};
 pub use unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReasonCode};
+
+#[cfg(feature = "client")]
+pub mod client;
+
+/// Enumeration of different MQTT Protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+pub enum MqttProtocol {
+    V4 = 4,
+    V5 = 5,
+}
+
+impl TryFrom<u8> for MqttProtocol {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<MqttProtocol> {
+        match val {
+            4 => Ok(MqttProtocol::V4),
+            5 => Ok(MqttProtocol::V5),
+            val => err!(
+                MalformedPacket,
+                code: UnsupportedProtocolVersion,
+                "found: {:?}",
+                val
+            )?,
+        }
+    }
+}
+
+impl From<MqttProtocol> for u8 {
+    fn from(val: MqttProtocol) -> u8 {
+        match val {
+            MqttProtocol::V4 => 4,
+            MqttProtocol::V5 => 5,
+        }
+    }
+}
 
 /// Type captures an active subscription by client.
 #[derive(Clone, Debug, Default)]

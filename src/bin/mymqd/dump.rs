@@ -5,7 +5,7 @@ use structopt::StructOpt;
 use std::{cmp, collections::BTreeMap, mem, net, path, time};
 
 use crate::{Opt, Result, SubCommand};
-use mymq::{netw, util, v5, MQTTRead};
+use mymq::{netw, util, v5};
 
 const PCAP_TIMEOUT: time::Duration = time::Duration::from_millis(1000);
 const MQTT_SIGNATURE: [u8; 6] = [0, 4, 77, 81, 84, 84];
@@ -198,7 +198,7 @@ fn into_precision(val: &str) -> Result<pcap::Precision> {
 }
 
 type Key = (net::Ipv4Addr, u16);
-type Val = (Vec<u8>, MQTTRead, bool);
+type Val = (Vec<u8>, v5::MQTTRead, bool);
 struct Codec {
     dump: Dump,
     save_file: Option<pcap::Savefile>,
@@ -244,7 +244,7 @@ impl Codec {
         key: &(net::Ipv4Addr, u16),
         dir: pcap::Direction,
     ) -> Result<Option<v5::Packet>> {
-        use mymq::MQTTRead::{Fin, Header, Init, Remain};
+        use mymq::v5::MQTTRead::{Fin, Header, Init, Remain};
 
         let conns = match dir {
             pcap::Direction::In => &mut self.inp_conns,
@@ -257,7 +257,7 @@ impl Codec {
             None => return Ok(None),
         };
 
-        let mut pr = mem::replace(pktr, MQTTRead::default());
+        let mut pr = mem::replace(pktr, v5::MQTTRead::default());
         let max_packet_size = pr.to_max_packet_size();
         let mut slice = buf.as_slice();
         // println!("read_packet key:{:?} dir:{:?} slice:{}", key, dir, slice.len());
@@ -272,15 +272,15 @@ impl Codec {
                 }
                 Ok((val, false)) => val,
                 Err(err) if err.kind() == mymq::ErrorKind::MalformedPacket => {
-                    pr = MQTTRead::new(max_packet_size);
-                    break Err(format!("malformed packet from MQTTRead"));
+                    pr = v5::MQTTRead::new(max_packet_size);
+                    break Err(format!("malformed packet from v5::MQTTRead"));
                 }
                 Err(err) if err.kind() == mymq::ErrorKind::ProtocolError => {
-                    pr = MQTTRead::new(max_packet_size);
-                    break Err(format!("protocol error from MQTTRead"));
+                    pr = v5::MQTTRead::new(max_packet_size);
+                    break Err(format!("protocol error from v5::MQTTRead"));
                 }
                 Err(err) if err.kind() == mymq::ErrorKind::Disconnected => {
-                    pr = MQTTRead::new(max_packet_size);
+                    pr = v5::MQTTRead::new(max_packet_size);
                     break Ok(None);
                 }
                 Err(err) => unreachable!("unexpected error {}", err),
@@ -298,7 +298,7 @@ impl Codec {
                         break Err(err.to_string());
                     }
                 },
-                MQTTRead::None => unreachable!(),
+                v5::MQTTRead::None => unreachable!(),
             }
         };
         let m = buf.len() - slice.len();
@@ -592,7 +592,7 @@ impl Packet {
             }
             None if (flags & 0x2) > 0 => {
                 let buf = tcp.payload.to_vec();
-                let pktr = MQTTRead::new(MAX_PACKET_SIZE);
+                let pktr = v5::MQTTRead::new(MAX_PACKET_SIZE);
                 debug!("inserting key:{:?} dir:{:?}", key, dir);
                 conns.insert(key, (buf, pktr, false));
                 false
@@ -608,7 +608,7 @@ impl Packet {
                 Triplet::True => {
                     *mqtt_ok = true;
                     let buf = Vec::default();
-                    let pktr = MQTTRead::new(MAX_PACKET_SIZE);
+                    let pktr = v5::MQTTRead::new(MAX_PACKET_SIZE);
                     let key = (ip_remote, tcp.source);
                     debug!("inserting remote key:{:?} dir:{:?}", key, dir);
                     codec.out_conns.insert(key, (buf, pktr, true));

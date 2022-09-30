@@ -412,7 +412,7 @@ pub fn send_disconnect<W>(
 where
     W: io::Write,
 {
-    use crate::{packet::MQTTWrite, Packetize};
+    use crate::v5::{MQTTWrite, Packetize};
 
     let disconn = v5::Disconnect {
         code: ReasonCode::try_from(code as u8)?,

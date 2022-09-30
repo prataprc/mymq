@@ -3,9 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
+use crate::v5::{Blob, Packetize, UserProperty, VarU32};
+use crate::v5::{Error, ErrorKind, ReasonCode, Result};
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType, Subscribe};
-use crate::Packetize;
 
 const PP: &'static str = "Packet::SubAck";
 

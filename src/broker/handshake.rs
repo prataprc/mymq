@@ -5,7 +5,7 @@ use std::{io, net, thread, time};
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, Config};
 
-use crate::{v5, MQTTRead, Packetize, ToJson, SLEEP_10MS};
+use crate::{v5, Packetize, ToJson, SLEEP_10MS};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type handles incoming connection.
@@ -44,7 +44,7 @@ impl Threadable for Handshake {
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         use crate::broker::cluster::AddConnectionArgs;
 
-        let mut packetr = MQTTRead::new(self.config.mqtt_max_packet_size);
+        let mut packetr = v5::MQTTRead::new(self.config.mqtt_max_packet_size);
         let mut sock = self.sock.take().unwrap();
         let timeout = {
             let now = time::Instant::now();
@@ -76,16 +76,16 @@ impl Threadable for Handshake {
                 Err(err) => unreachable!("unexpected error {}", err),
             };
             match &packetr {
-                MQTTRead::Init { .. } if time::Instant::now() < timeout => {
+                v5::MQTTRead::Init { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                MQTTRead::Header { .. } if time::Instant::now() < timeout => {
+                v5::MQTTRead::Header { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                MQTTRead::Remain { .. } if time::Instant::now() < timeout => {
+                v5::MQTTRead::Remain { .. } if time::Instant::now() < timeout => {
                     thread::sleep(SLEEP_10MS);
                 }
-                MQTTRead::Fin { .. } => match packetr.parse() {
+                v5::MQTTRead::Fin { .. } => match packetr.parse() {
                     Ok(v5::Packet::Connect(connect)) => match connect.validate() {
                         Ok(()) => break (ReasonCode::Success, false, Some(connect)),
                         Err(err) => {
@@ -150,7 +150,7 @@ impl Handshake {
     where
         W: io::Write,
     {
-        use crate::MQTTWrite;
+        use crate::v5::MQTTWrite;
 
         let max_size = self.config.mqtt_max_packet_size;
         let timeout = {

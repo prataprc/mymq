@@ -5,7 +5,7 @@ use std::{collections::VecDeque, mem, time};
 
 use crate::broker::{Config, QueueStatus};
 
-use crate::{v5, ClientID, MQTTRead, MQTTWrite, Packetize};
+use crate::{v5, ClientID, Packetize};
 use crate::{ErrorKind, Result};
 
 pub type QueuePkt = QueueStatus<v5::Packet>;
@@ -104,7 +104,7 @@ pub struct Socket {
 }
 
 pub struct Source {
-    pub pr: MQTTRead,
+    pub pr: v5::MQTTRead,
     pub timeout: time::Duration,
     pub deadline: Option<time::SystemTime>,
     pub session_tx: PktTx,
@@ -113,7 +113,7 @@ pub struct Source {
 }
 
 pub struct Sink {
-    pub pw: MQTTWrite,
+    pub pw: v5::MQTTWrite,
     pub timeout: time::Duration,
     pub deadline: Option<time::SystemTime>,
     pub miot_rx: PktRx,
@@ -193,11 +193,11 @@ impl Socket {
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
     fn read_packet(&mut self, prefix: &str, config: &Config) -> Result<QueuePkt> {
-        use crate::MQTTRead::{Fin, Header, Init, Remain};
+        use crate::v5::MQTTRead::{Fin, Header, Init, Remain};
 
         let disconnected = QueuePkt::Disconnected(Vec::new());
 
-        let pr = mem::replace(&mut self.rd.pr, MQTTRead::default());
+        let pr = mem::replace(&mut self.rd.pr, v5::MQTTRead::default());
         let mut pr = match pr.read(&mut self.conn) {
             Ok((pr, _would_block)) => pr,
             Err(err) if err.kind() == ErrorKind::Disconnected => return Ok(disconnected),
@@ -221,7 +221,7 @@ impl Socket {
                 pr = pr.reset();
                 QueueStatus::Ok(vec![pkt])
             }
-            MQTTRead::None => unreachable!(),
+            v5::MQTTRead::None => unreachable!(),
         };
 
         let _none = mem::replace(&mut self.rd.pr, pr);
@@ -300,7 +300,10 @@ impl Socket {
                 stats.bytes += blob.as_ref().len();
                 match self.conn.flush() {
                     Ok(()) => {
-                        let mut pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
+                        let mut pw = {
+                            let dflt = v5::MQTTWrite::default();
+                            mem::replace(&mut self.wt.pw, dflt)
+                        };
                         stats.items += 1;
                         pw = pw.reset(blob.as_ref());
                         let _none = mem::replace(&mut self.wt.pw, pw);
@@ -319,9 +322,9 @@ impl Socket {
 
     // QueueStatus shall not carry any packets
     fn write_packet(&mut self, prefix: &str, config: &Config) -> QueuePkt {
-        use crate::MQTTWrite::{Fin, Init, Remain};
+        use crate::v5::MQTTWrite::{Fin, Init, Remain};
 
-        let pw = mem::replace(&mut self.wt.pw, MQTTWrite::default());
+        let pw = mem::replace(&mut self.wt.pw, v5::MQTTWrite::default());
         let (res, pw) = match pw.write(&mut self.conn) {
             Ok((pw, _would_block)) => match &pw {
                 Init { .. } | Remain { .. } if !self.write_elapsed() => {
@@ -338,10 +341,10 @@ impl Socket {
                     self.set_write_timeout(false, config.sock_mqtt_write_timeout);
                     (QueueStatus::Ok(Vec::new()), pw)
                 }
-                MQTTWrite::None => unreachable!(),
+                v5::MQTTWrite::None => unreachable!(),
             },
             Err(err) if err.kind() == ErrorKind::Disconnected => {
-                (QueueStatus::Disconnected(Vec::new()), MQTTWrite::default())
+                (QueueStatus::Disconnected(Vec::new()), v5::MQTTWrite::default())
             }
             Err(err) => unreachable!("unexpected error: {}", err),
         };

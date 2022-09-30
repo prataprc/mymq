@@ -6,7 +6,7 @@ use std::{fmt, mem, net, result, sync::Arc, time};
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Shard, Socket};
 
-use crate::{ClientID, MQTTRead, MQTTWrite, ToJson};
+use crate::{v5, ClientID, ToJson};
 use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
@@ -496,14 +496,14 @@ impl Miot {
         );
 
         let rd = socket::Source {
-            pr: MQTTRead::new(max_packet_size),
+            pr: v5::MQTTRead::new(max_packet_size),
             timeout: time::Duration::default(),
             deadline: None,
             session_tx,
             packets: VecDeque::default(),
         };
         let wt = socket::Sink {
-            pw: MQTTWrite::new(&[], args.max_packet_size),
+            pw: v5::MQTTWrite::new(&[], args.max_packet_size),
             timeout: time::Duration::default(),
             deadline: None,
             miot_rx,

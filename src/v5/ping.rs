@@ -1,8 +1,7 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::Arbitrary;
 
-use crate::v5::{Blob, FixedHeader, PacketType, Result, VarU32};
-use crate::Packetize;
+use crate::v5::{Blob, FixedHeader, PacketType, Packetize, Result, VarU32};
 
 /// PINGREQ Packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]

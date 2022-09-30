@@ -1,16 +1,12 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-    result,
-};
+use std::ops::{Deref, DerefMut};
+use std::{fmt, result};
 
-use crate::v5::{self, Blob, UserProperty, VarU32};
+use crate::v5::{self, Blob, ClientID, Packetize, TopicName, UserProperty, VarU32};
 use crate::v5::{Error, ErrorKind, ReasonCode, Result};
-use crate::v5::{FixedHeader, PayloadFormat, Property, PropertyType, QoS};
-use crate::{ClientID, MqttProtocol, Packetize, TopicName};
+use crate::v5::{FixedHeader, MqttProtocol, PayloadFormat, Property, PropertyType, QoS};
 
 const PP: &'static str = "Packet::Connect";
 

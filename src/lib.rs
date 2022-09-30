@@ -87,15 +87,12 @@ pub trait ToJson {
 
 #[macro_use]
 mod error;
-mod packet;
 mod timer;
 mod types;
 
 pub use error::{Error, ErrorKind, ReasonCode};
-pub use packet::{MQTTRead, MQTTWrite};
 pub use timer::Timer;
-pub use types::{Blob, MqttProtocol, PacketID, VarU32};
-pub use types::{ClientID, TopicFilter, TopicName};
+pub use types::{Blob, ClientID, PacketID, TopicFilter, TopicName, VarU32};
 
 #[macro_use]
 pub mod v5;

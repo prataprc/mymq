@@ -19,40 +19,6 @@ pub type PacketID = u16;
 //       security component to authorize particular actions on the topic resource for
 //       a given Client.
 
-/// Enumeration of different MQTT Protocol version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-pub enum MqttProtocol {
-    V4 = 4,
-    V5 = 5,
-}
-
-impl TryFrom<u8> for MqttProtocol {
-    type Error = Error;
-
-    fn try_from(val: u8) -> Result<MqttProtocol> {
-        match val {
-            4 => Ok(MqttProtocol::V4),
-            5 => Ok(MqttProtocol::V5),
-            val => err!(
-                MalformedPacket,
-                code: UnsupportedProtocolVersion,
-                "found: {:?}",
-                val
-            )?,
-        }
-    }
-}
-
-impl From<MqttProtocol> for u8 {
-    fn from(val: MqttProtocol) -> u8 {
-        match val {
-            MqttProtocol::V4 => 4,
-            MqttProtocol::V5 => 5,
-        }
-    }
-}
-
 /// Type is associated with [Packetize] trait and optimizes on the returned byte-blob.
 ///
 /// Small variant stores the bytes in stack.

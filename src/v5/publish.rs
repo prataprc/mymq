@@ -4,8 +4,8 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{cmp, fmt, result};
 
 use crate::v5::{self, FixedHeader, PayloadFormat, Property, PropertyType, QoS};
-use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, UserProperty, VarU32};
-use crate::{Packetize, TopicName};
+use crate::v5::{Blob, Packetize, TopicName, UserProperty, VarU32};
+use crate::v5::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Publish";
 

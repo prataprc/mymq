@@ -1,13 +1,11 @@
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
+use std::ops::{Deref, DerefMut};
 use std::{fmt, result};
 
-use std::ops::{Deref, DerefMut};
-
-use crate::v5::{Blob, Error, ErrorKind, ReasonCode, Result, VarU32};
+use crate::v5::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result, VarU32};
 use crate::v5::{FixedHeader, Property, PropertyType, QoS, UserProperty};
-use crate::Packetize;
 
 const PP: &'static str = "Packet::ConnAck";
 

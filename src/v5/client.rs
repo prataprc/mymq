@@ -11,7 +11,7 @@ use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
 use std::{collections::VecDeque, fmt, io, mem, net, result, time};
 
-use crate::{v5, ClientID, MQTTRead, MQTTWrite, MqttProtocol, PacketID, Packetize};
+use crate::{v5, ClientID, PacketID, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
@@ -32,7 +32,7 @@ impl Default for ConnectOptions {
 
 /// ClientBuilder to create a customized [Client].
 pub struct ClientBuilder {
-    pub protocol_version: MqttProtocol,
+    pub protocol_version: v5::MqttProtocol,
     /// Provide unique client identifier, if missing, will be sent empty in CONNECT.
     pub client_id: Option<ClientID>,
     /// Socket settings for blocking io, refer [net::TcpStream::connect_timeout].
@@ -73,7 +73,7 @@ impl Default for ClientBuilder {
             connect_properties: Some(v5::ConnectProperties::default()),
             connect_payload: v5::ConnectPayload::default(),
 
-            protocol_version: MqttProtocol::V5,
+            protocol_version: v5::MqttProtocol::V5,
         }
     }
 }
@@ -175,7 +175,7 @@ impl ClientBuilder {
 pub struct Client {
     client_id: ClientID,
     raddr: net::SocketAddr,
-    protocol_version: MqttProtocol,
+    protocol_version: v5::MqttProtocol,
     connect_timeout: Option<time::Duration>,
     read_timeout: Option<time::Duration>,
     write_timeout: Option<time::Duration>,
@@ -606,29 +606,29 @@ impl Client {
 enum ClientIO {
     Blocking {
         sock: net::TcpStream,
-        pktr: MQTTRead,
-        pktw: MQTTWrite,
+        pktr: v5::MQTTRead,
+        pktw: v5::MQTTWrite,
     },
     NoBlock {
         sock: mio::net::TcpStream,
-        pktr: MQTTRead,
-        pktw: MQTTWrite,
+        pktr: v5::MQTTRead,
+        pktw: v5::MQTTWrite,
     },
     BlockRd {
         sock: net::TcpStream,
-        pktr: MQTTRead,
+        pktr: v5::MQTTRead,
     },
     BlockWt {
         sock: net::TcpStream,
-        pktw: MQTTWrite,
+        pktw: v5::MQTTWrite,
     },
     NoBlockRd {
         sock: mio::net::TcpStream,
-        pktr: MQTTRead,
+        pktr: v5::MQTTRead,
     },
     NoBlockWt {
         sock: mio::net::TcpStream,
-        pktw: MQTTWrite,
+        pktw: v5::MQTTWrite,
     },
     None,
 }
@@ -656,8 +656,8 @@ impl ClientIO {
     ) -> io::Result<(ClientIO, v5::ConnAck)> {
         let max_packet_size = connect.max_packet_size(client.max_packet_size);
 
-        let mut pktr = MQTTRead::new(max_packet_size);
-        let mut pktw = MQTTWrite::new(&[], max_packet_size);
+        let mut pktr = v5::MQTTRead::new(max_packet_size);
+        let mut pktw = v5::MQTTWrite::new(&[], max_packet_size);
 
         write_packet(
             client,
@@ -949,17 +949,17 @@ impl Client {
 fn read_packet<R>(
     client: &mut Client,
     sock: &mut R,
-    pktr: &mut MQTTRead,
+    pktr: &mut v5::MQTTRead,
     block: bool,
 ) -> io::Result<v5::Packet>
 where
     R: io::Read,
 {
-    use crate::MQTTRead::{Fin, Header, Init, Remain};
+    use crate::v5::MQTTRead::{Fin, Header, Init, Remain};
 
     client.set_read_timeout(client.read_timeout);
 
-    let mut pr = mem::replace(pktr, MQTTRead::default());
+    let mut pr = mem::replace(pktr, v5::MQTTRead::default());
     let max_packet_size = pr.to_max_packet_size();
 
     let res = loop {
@@ -970,18 +970,18 @@ where
             }
             Ok((val, _)) => val,
             Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                pr = MQTTRead::new(max_packet_size);
-                let s = format!("malformed packet from MQTTRead");
+                pr = v5::MQTTRead::new(max_packet_size);
+                let s = format!("malformed packet from v5::MQTTRead");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                pr = MQTTRead::new(max_packet_size);
-                let s = format!("protocol error from MQTTRead");
+                pr = v5::MQTTRead::new(max_packet_size);
+                let s = format!("protocol error from v5::MQTTRead");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::Disconnected => {
-                pr = MQTTRead::new(max_packet_size);
-                let s = format!("client disconnected in MQTTRead");
+                pr = v5::MQTTRead::new(max_packet_size);
+                let s = format!("client disconnected in v5::MQTTRead");
                 break Err(io::Error::new(io::ErrorKind::ConnectionReset, s));
             }
             Err(err) => unreachable!("unexpected error {}", err),
@@ -1009,7 +1009,7 @@ where
                     }
                 }
             }
-            MQTTRead::None => unreachable!(),
+            v5::MQTTRead::None => unreachable!(),
         };
     };
 
@@ -1020,18 +1020,18 @@ where
 fn write_packet<W>(
     client: &mut Client,
     sock: &mut W,
-    pktw: &mut MQTTWrite,
+    pktw: &mut v5::MQTTWrite,
     pkt: Option<v5::Packet>,
     block: bool,
 ) -> io::Result<()>
 where
     W: io::Write,
 {
-    use crate::MQTTWrite::{Fin, Init, Remain};
+    use crate::v5::MQTTWrite::{Fin, Init, Remain};
 
     client.set_write_timeout(client.write_timeout);
 
-    let mut pw = mem::replace(pktw, MQTTWrite::default());
+    let mut pw = mem::replace(pktw, v5::MQTTWrite::default());
     let max_packet_size = pw.to_max_packet_size();
 
     if let Some(pkt) = pkt {
@@ -1054,18 +1054,18 @@ where
             }
             Ok((val, _)) => val,
             Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                pw = MQTTWrite::new(&[], max_packet_size);
-                let s = format!("malformed packet in MQTTWrite");
+                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                let s = format!("malformed packet in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                pw = MQTTWrite::new(&[], max_packet_size);
-                let s = format!("protocol error in MQTTWrite");
+                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                let s = format!("protocol error in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::Disconnected => {
-                pw = MQTTWrite::new(&[], max_packet_size);
-                let s = format!("client disconnected in MQTTWrite");
+                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                let s = format!("client disconnected in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::ConnectionReset, s));
             }
             Err(err) => unreachable!("unexpected error {}", err),
@@ -1083,7 +1083,7 @@ where
                 client.set_write_timeout(None);
                 break Ok(());
             }
-            MQTTWrite::None => unreachable!(),
+            v5::MQTTWrite::None => unreachable!(),
         };
     };
 
