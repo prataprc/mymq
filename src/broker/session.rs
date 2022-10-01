@@ -1298,7 +1298,7 @@ impl SessionState {
             debug!("{} gc:{} msgs in oug_retry_qos12", active.prefix, msgs.len());
         }
 
-        let msgs: Vec<Message> = active.oug_retry_qos12.expired(None).collect();
+        let msgs: Vec<Message> = active.oug_retry_qos12.expired().collect();
         self.commit_cs_oug_back_log(msgs)
     }
 

@@ -1055,7 +1055,7 @@ impl Shard {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        for session in reconnects.expired(None) {
+        for session in reconnects.expired() {
             info!("{} session:{} reconnect expired", self.prefix, *session.client_id);
         }
     }
@@ -1523,7 +1523,7 @@ impl Shard {
         let args = match req {
             Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
                 shard_id: self.shard_id,
-                client_id: ClientID::from_connect(&connect),
+                client_id: ClientID::from_v5_connect(&connect),
                 raddr: sock.peer_addr().unwrap(),
                 config: self.config.clone(),
                 miot_tx,

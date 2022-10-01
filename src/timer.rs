@@ -10,9 +10,9 @@ use crate::Result;
 /// * log(n) complexity for adding new timeouts.
 /// * log(1) complexity for other operations.
 ///
-/// Application shall call [Timer::gc] and [Timer::expired] periodically. If application
-/// have no logic to call [Timer::delete] on the timer-entry, then there is no
-/// need to call [Timer::gc].
+/// Application is expected to call [Timer::gc] and [Timer::expired] periodically.
+/// If application have no logic to call [Timer::delete] on the timer-entry, then
+/// there is no need to call [Timer::gc].
 pub struct Timer<K, T> {
     instant: time::Instant,
     head: Box<Titem<K, T>>,
@@ -43,7 +43,10 @@ impl<K, T> Default for Timer<K, T> {
 }
 
 impl<K, T> Timer<K, T> {
-    /// Add a new timer entry, timer entry shall expire after `secs` seconds.
+    /// Add a new timer entry, timer entry shall expire after `secs` seconds. Expired
+    /// `value`s are returned in the next call to [Timer::expired].
+    ///
+    /// **IMPORTANT**: Every unique value must have a unique key.
     pub fn add_timeout(&mut self, secs: u64, key: K, value: T)
     where
         K: Ord + Clone,
@@ -89,7 +92,9 @@ impl<K, T> Timer<K, T> {
         self.entries.insert(key, te);
     }
 
-    /// Mark the entry specified by `key` as deleted.
+    /// Mark the entry specified by `key` as deleted. When an entry, which was originally
+    /// added using the `key`, is deleted before it expires then the entry (its value)
+    /// is returned in the next call to [Timer::gc], and not in [Timer::expired].
     pub fn delete(&mut self, key: &K) -> Result<()>
     where
         K: Ord,
@@ -101,10 +106,23 @@ impl<K, T> Timer<K, T> {
     }
 
     /// Return an iterator of all expired timer entries. Returned entries shall be
-    /// removed from this timer-list. Also deleted entries are not considered as expired
-    /// and shall not be returned, they are returned only by gc().
-    /// Pass None for `elapsed`.
-    pub fn expired(&mut self, elapsed: Option<u64>) -> impl Iterator<Item = T>
+    /// removed from this timer-list.
+    pub fn expired(&mut self) -> impl Iterator<Item = T>
+    where
+        K: Ord,
+    {
+        self.do_expired(None)
+    }
+
+    #[cfg(any(feature = "fuzzy", test))]
+    pub fn elapsed(&mut self, elapsed: u64) -> impl Iterator<Item = T>
+    where
+        K: Ord,
+    {
+        self.do_expired(Some(elapsed))
+    }
+
+    fn do_expired(&mut self, elapsed: Option<u64>) -> impl Iterator<Item = T>
     where
         K: Ord,
     {
@@ -140,6 +158,9 @@ impl<K, T> Timer<K, T> {
         expired.into_iter()
     }
 
+    /// Return whether entry added with `key` is still present in the list. Entries that
+    /// are deleted using [Timer::delete] shall test negative. Similary expired entries
+    /// and garbage collected entries shall test negative.
     pub fn contains(&self, key: &K) -> bool
     where
         K: Ord,
@@ -147,6 +168,7 @@ impl<K, T> Timer<K, T> {
         self.entries.contains_key(key)
     }
 
+    /// Return a list of all entries that are active in this timer list.
     pub fn values(&self) -> Vec<T>
     where
         T: Clone,
@@ -196,8 +218,8 @@ impl<K, T> Timer<K, T> {
         gced.into_iter()
     }
 
-    /// Close this timer and return all pending entries. Some of them might have expired
-    /// and others may havn't.
+    /// Close this timer and return all pending entries. Some of the entries might have
+    /// expired while others may not.
     pub fn close(mut self) -> impl Iterator<Item = T>
     where
         K: Ord,

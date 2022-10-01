@@ -587,7 +587,7 @@ impl Cluster {
         debug!("{} gc:{} pkts in retain_timer", self.prefix, pkts.len());
 
         // gather all retained packets and cleanup the RetainedTrie.
-        for pkt in retain_timer.expired(None).collect::<Vec<v5::Publish>>() {
+        for pkt in retain_timer.expired().collect::<Vec<v5::Publish>>() {
             cc_retained_topics.remove(&pkt.topic_name);
         }
     }
