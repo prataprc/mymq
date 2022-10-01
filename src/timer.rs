@@ -126,7 +126,7 @@ impl<K, T> Timer<K, T> {
                     break;
                 }
                 Titem::Timeout { key, te, next, .. } => {
-                    mem::drop(self.entries.remove(&key).unwrap());
+                    mem::drop(self.entries.remove(&key));
                     match Arc::try_unwrap(te) {
                         Ok(te) => expired.push(te.value),
                         Err(_) => unreachable!("fatal"),
@@ -173,7 +173,7 @@ impl<K, T> Timer<K, T> {
                     break;
                 }
                 Titem::Timeout { key, te, mut next, .. } if te.is_deleted() => {
-                    mem::drop(self.entries.remove(&key).unwrap());
+                    mem::drop(self.entries.remove(&key));
                     match Arc::try_unwrap(te) {
                         Ok(te) => gced.push(te.value),
                         Err(_) => unreachable!("fatal"),
@@ -208,7 +208,7 @@ impl<K, T> Timer<K, T> {
             node = match *node {
                 Titem::Head { next } => next,
                 Titem::Timeout { key, te, next, .. } => {
-                    mem::drop(self.entries.remove(&key).unwrap());
+                    mem::drop(self.entries.remove(&key));
                     match Arc::try_unwrap(te) {
                         Ok(te) => values.push(te.value),
                         Err(_) => unreachable!("fatal"),

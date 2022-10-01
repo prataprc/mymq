@@ -266,7 +266,7 @@ impl<'a> Arbitrary<'a> for Message {
                 last_acked: uns.arbitrary()?,
             },
             8 => Message::AddSession {
-                raddr: net::SocketAddr::from_str("192.168.2.10").unwrap(),
+                raddr: net::SocketAddr::from_str("192.168.2.10:1883").unwrap(),
                 config: Config::default(), // TODO: make config arbitrary
                 client_id: uns.arbitrary()?,
                 shard_id: uns.arbitrary()?,
