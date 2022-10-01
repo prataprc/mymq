@@ -2,8 +2,7 @@ use uuid::Uuid;
 
 use std::{fmt, hash, result};
 
-use crate::Hostable;
-use crate::{Error, ErrorKind, Result};
+use crate::broker::{Error, ErrorKind, Hostable, Result};
 
 // Challenges in having consistent hashing.
 

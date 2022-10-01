@@ -7,10 +7,9 @@
 use log::warn;
 
 use std::sync::{mpsc, Arc};
-use std::thread;
+use std::{mem, panic, thread};
 
-use crate::broker::QueueStatus;
-use crate::{Error, ErrorKind, Result};
+use crate::broker::{Error, ErrorKind, QueueStatus, Result};
 
 pub type QueueReq<Q, R> = QueueStatus<(Q, Option<mpsc::Sender<R>>)>;
 
@@ -160,8 +159,6 @@ where
     R: 'static + Send,
 {
     fn drop(&mut self) {
-        use std::panic;
-
         if self.handle.is_some() || self.tx.is_some() {
             panic!("call close_wait() before dropping thread {:?}", self.name);
         }
@@ -223,8 +220,6 @@ where
     /// Even otherwise, when Thread value goes out of scope its drop implementation
     /// shall call this method to exit the thread, except that any errors are ignored.
     pub fn close_wait(mut self) -> T {
-        use std::{mem, panic};
-
         mem::drop(self.tx.take());
 
         let handle = self.handle.take().unwrap();

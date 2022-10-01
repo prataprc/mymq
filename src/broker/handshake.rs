@@ -3,10 +3,11 @@ use log::{error, info};
 use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
-use crate::broker::{Cluster, Config};
+use crate::broker::{Cluster, Config, SLEEP_10MS};
+use crate::broker::{Error, ErrorKind, ReasonCode, Result};
+use crate::broker::{Packetize, ToJson};
 
-use crate::{v5, Packetize, ToJson, SLEEP_10MS};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5;
 
 /// Type handles incoming connection.
 ///
@@ -150,8 +151,6 @@ impl Handshake {
     where
         W: io::Write,
     {
-        use crate::v5::MQTTWrite;
-
         let max_size = self.config.mqtt_max_packet_size;
         let timeout = {
             let now = time::Instant::now();
@@ -160,7 +159,7 @@ impl Handshake {
         };
 
         let cack = v5::ConnAck::from_reason_code(code);
-        let mut packetw = MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
+        let mut packetw = v5::MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
         loop {
             let (val, would_block) = match packetw.write(sock) {
                 Ok(args) => args,

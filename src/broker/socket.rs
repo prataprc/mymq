@@ -3,10 +3,10 @@ use log::{error, trace, warn};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{collections::VecDeque, mem, time};
 
+use crate::broker::{ClientID, ErrorKind, Packetize, Result};
 use crate::broker::{Config, QueueStatus};
 
-use crate::{v5, ClientID, Packetize};
-use crate::{ErrorKind, Result};
+use crate::v5;
 
 pub type QueuePkt = QueueStatus<v5::Packet>;
 

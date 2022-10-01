@@ -3,15 +3,16 @@ use mio::event::Events;
 use uuid::Uuid;
 
 use std::sync::{mpsc, Arc};
-use std::{collections::BTreeMap, fmt, net, path, result, time};
+use std::{collections::BTreeMap, fmt, mem, net, path, result, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{rebalance, ticker};
+use crate::broker::{util, Timer, ToJson, TopicName};
 use crate::broker::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
+use crate::broker::{Error, ErrorKind, Result};
 use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
 
-use crate::{util, v5, Timer, ToJson, TopicName};
-use crate::{Error, ErrorKind, Result};
+use crate::v5;
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
@@ -129,8 +130,6 @@ impl Default for Cluster {
 
 impl Drop for Cluster {
     fn drop(&mut self) {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => trace!("{} drop ...", self.prefix),
@@ -454,8 +453,6 @@ impl Cluster {
     /// Close this cluster and get back the statistics. Call return only after all the
     /// children threads are gracefully shutdown.
     pub fn close_wait(mut self) -> Cluster {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(_waker, thrd) => {
@@ -693,8 +690,6 @@ impl Cluster {
     }
 
     fn handle_close(&mut self, _: Request) -> Response {
-        use std::mem;
-
         let mut run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
             Inner::Close(_) => return Response::Ok,

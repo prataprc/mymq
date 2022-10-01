@@ -1,12 +1,13 @@
 use log::{debug, error, info, trace, warn};
 
-use std::{io, thread, time};
+use std::{io, mem, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Socket};
+use crate::broker::{Error, ErrorKind, ReasonCode, Result};
+use crate::broker::{Packetize, ToJson, SLEEP_10MS};
 
-use crate::{v5, ToJson, SLEEP_10MS};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5;
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -85,8 +86,6 @@ impl Default for Flusher {
 
 impl Drop for Flusher {
     fn drop(&mut self) {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => trace!("{} drop ...", self.prefix),
@@ -204,8 +203,6 @@ impl Flusher {
     }
 
     pub fn close_wait(mut self) -> Flusher {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(thrd) => {
@@ -344,8 +341,6 @@ impl Flusher {
     }
 
     fn handle_close(&mut self) -> Response {
-        use std::mem;
-
         let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
             Inner::Close(_) => return Response::Ok,
@@ -412,14 +407,12 @@ pub fn send_disconnect<W>(
 where
     W: io::Write,
 {
-    use crate::v5::{MQTTWrite, Packetize};
-
     let disconn = v5::Disconnect {
         code: ReasonCode::try_from(code as u8)?,
         properties: None,
     };
 
-    let mut packetw = MQTTWrite::new(disconn.encode().unwrap().as_ref(), max_size);
+    let mut packetw = v5::MQTTWrite::new(disconn.encode().unwrap().as_ref(), max_size);
     loop {
         let (val, would_block) = match packetw.write(conn) {
             Ok(args) => args,

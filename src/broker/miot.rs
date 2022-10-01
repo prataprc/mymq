@@ -5,9 +5,10 @@ use std::{fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{socket, AppTx, Config, QueueStatus, Shard, Socket};
+use crate::broker::{ClientID, ToJson};
+use crate::broker::{Error, ErrorKind, Result};
 
-use crate::{v5, ClientID, ToJson};
-use crate::{Error, ErrorKind, Result};
+use crate::v5;
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;

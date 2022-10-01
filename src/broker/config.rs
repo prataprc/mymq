@@ -1,8 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::{cmp, fs, net, path, result};
 
-use crate::util;
-use crate::{Error, ErrorKind, Result};
+use crate::broker::{util, Error, ErrorKind, Result};
 
 macro_rules! config_field {
     ($table:ident, $field:ident, $config:ident, $($args:tt)+) => {{

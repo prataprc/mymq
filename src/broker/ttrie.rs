@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::{borrow::Borrow, thread};
 
-use crate::broker::Spinlock;
-use crate::{v5, v5::Subscription, ClientID, IterTopicPath};
+use crate::broker::{ClientID, IterTopicPath, Spinlock};
+
+use crate::{v5, v5::Subscription};
 
 // NOTE: MQTT-Spec-v5. If the Retain Handling option is 0, any existing retained messages
 // matching the Topic Filter MUST be re-sent, but Applicaton Messages MUST NOT be

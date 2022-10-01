@@ -4,7 +4,7 @@
  * src/usr.bin/cksum/crc32.c.
  */
 
-use crate::{Error, ErrorKind, Result};
+use crate::broker::{util, Error, ErrorKind, Result};
 
 const CRC32TAB: [u32; 256] = [
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535,
@@ -47,8 +47,6 @@ const CRC32TAB: [u32; 256] = [
 ];
 
 pub fn client_to_shard<K: AsRef<[u8]>>(key: &K, nshards: usize) -> Result<u32> {
-    use crate::util;
-
     if util::is_power_of_2(nshards) {
         let key: &[u8] = key.as_ref();
         let mut crc = u32::MAX;

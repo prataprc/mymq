@@ -1,7 +1,7 @@
 use std::time;
 
 use crate::broker::SessionArgsActive;
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::broker::{Error, ErrorKind, ReasonCode, Result};
 
 /// Type implement keep-alive as per MQTT specification.
 pub struct KeepAlive {

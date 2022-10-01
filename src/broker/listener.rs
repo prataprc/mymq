@@ -1,13 +1,11 @@
 use log::{debug, error, info, trace};
 use mio::event::Events;
 
-use std::{fmt, net, result, sync::Arc, time};
+use std::{fmt, io, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Cluster, Config, QueueStatus};
-
-use crate::ToJson;
-use crate::{Error, ErrorKind, Result};
+use crate::broker::{Error, ErrorKind, Result, ToJson};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
@@ -108,8 +106,6 @@ impl Default for Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Init => trace!("{} drop ...", self.prefix),
@@ -207,8 +203,6 @@ pub enum Response {
 // calls to interface with listener-thread, and shall wake the thread
 impl Listener {
     pub fn close_wait(mut self) -> Listener {
-        use std::mem;
-
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(_waker, thrd) => {
@@ -322,7 +316,6 @@ impl Listener {
 
     fn accept_conn(&mut self) -> QueueStatus<()> {
         use crate::broker::Handshake;
-        use std::io;
 
         let RunLoop { listener, cluster, stats, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
@@ -362,8 +355,6 @@ impl Listener {
 
 impl Listener {
     fn handle_close(&mut self, _req: Request) -> Response {
-        use std::mem;
-
         let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
             Inner::Close(_) => return Response::Ok,

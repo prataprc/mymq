@@ -2,13 +2,16 @@
 
 use std::{mem, net, path, sync::mpsc};
 
-use crate::{v5, ClientID};
+use crate::v5;
 
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
 
 /// Control Queue is processed in batches of this constant.
 pub const CONTROL_CHAN_SIZE: usize = 1024;
+
+/// Used by threads to sleep wait for an event to accur..
+pub const SLEEP_10MS: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Type alias for back-channel to application.
 ///
@@ -169,3 +172,7 @@ pub use spinlock::Spinlock;
 pub use thread::{Rx, Thread, Threadable, Tx};
 pub use ticker::Ticker;
 pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
+
+pub use crate::{util, IterTopicPath};
+pub use crate::{ClientID, PacketID, Packetize, Timer, ToJson, TopicFilter, TopicName};
+pub use crate::{Error, ErrorKind, ReasonCode, Result};

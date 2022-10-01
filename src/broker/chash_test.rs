@@ -1,7 +1,7 @@
 use rand::{prelude::random, rngs::StdRng, SeedableRng};
 
 use super::*;
-use crate::Shardable;
+use crate::broker::Shardable;
 
 struct Nd(Uuid, u16);
 
