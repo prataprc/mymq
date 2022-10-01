@@ -8,6 +8,7 @@ use std::{io, path, result};
 mod arbitr;
 mod dump;
 mod list;
+mod show;
 mod start;
 
 #[derive(Clone, StructOpt)]
@@ -40,6 +41,7 @@ pub enum SubCommand {
     Dump(dump::Dump),
     List(list::List),
     Arbitr(arbitr::Arbitr),
+    Show(show::Show),
 }
 
 pub type Result<T> = result::Result<T, String>;
@@ -55,6 +57,7 @@ fn main() {
         SubCommand::Dump(_) => dump::run(opts),
         SubCommand::List(_) => list::run(opts),
         SubCommand::Arbitr(_) => arbitr::run(opts),
+        SubCommand::Show(_) => show::run(opts),
     };
 
     res.map_err(|e| println!("error: {}", e)).ok();
