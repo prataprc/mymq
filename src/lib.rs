@@ -1,4 +1,8 @@
-//! Package implement MQTT client and broker.
+//! Package implement message queue _broker_ based on MQTT protocol.
+//!
+//! Currently implements MQTT-v5 _broker_ and a corresponding _client_. Based [on
+//! popular demand][issue-4] other message-queue protocols shall be integrated into
+//! this broker.
 //!
 //! #### Features
 //!
@@ -25,15 +29,20 @@
 //! * [backtrace_frames][us1]
 //! * [backtrace][us2]
 //! * [error_iter][us3]
+//! * [map_first_last][us4]
+//! * [result_flattening][us5]
 //!
 //! #### Binary artifacts
 //!
-//! TODO
+//! * _*mymqd*_, daemon program to start the server and manage the mymq deployment.
 //!
 //! [dep]: https://doc.rust-lang.org/cargo/reference/features.html#dependency-features
 //! [us1]: https://doc.rust-lang.org/beta/unstable-book/library-features/backtrace.html
 //! [us2]: https://doc.rust-lang.org/beta/unstable-book/library-features/backtrace-frames.html
 //! [us3]: https://doc.rust-lang.org/beta/unstable-book/library-features/error-iter.html
+//! [us4]: https://doc.rust-lang.org/beta/unstable-book/library-features/map-first-last.htm
+//! [us5]: https://doc.rust-lang.org/beta/unstable-book/library-features/result-flattening.html
+//! [issue-4]: https://github.com/prataprc/mymq/issues/4
 
 // TODO: review all err!() calls and tally them with MQTT spec.
 // TODO: validate()? calls must be wired into all Packetize::{encode, decode}
@@ -48,9 +57,9 @@
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Trait implemented by types that participate in MQTT protocol framing.
+/// Trait, to serialize data, implemented by types that participate in protocol framing.
 ///
-/// Shall return one of the following error-kind: `ProtocolError`, `MalformedPacket`.
+/// Shall return one of the following [ErrorKind] `ProtocolError`, `MalformedPacket`.
 pub trait Packetize: Sized {
     /// Deserialize bytes and construct a packet or packet's field. Upon error, it is
     /// expected that the stream is left at meaningful boundry to re-detect the error.
@@ -62,7 +71,8 @@ pub trait Packetize: Sized {
 
 /// Trait implemented by [TopicName] and [TopicFilter].
 ///
-/// MQTT specification define both TopicName and TopicFilter in path-like format.
+/// We take the inspiration from MQTT specification where TopicName and TopicFilter are
+/// defined in path-like format.
 pub trait IterTopicPath<'a> {
     type Iter: Iterator<Item = &'a str> + Clone;
 

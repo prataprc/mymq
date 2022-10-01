@@ -7,7 +7,7 @@ use std::{fmt, result};
 use crate::{v5, IterTopicPath, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-/// Type alias for MQTT PacketID.
+/// Type alias for PacketID as u16.
 pub type PacketID = u16;
 
 // TODO: Section.4.7
@@ -20,12 +20,11 @@ pub type PacketID = u16;
 //       a given Client.
 
 /// Type is associated with [Packetize] trait and optimizes on the returned byte-blob.
-///
-/// Small variant stores the bytes in stack.
-/// Large variant stores the bytes in heap.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Blob {
+    /// Small variant stores the bytes in stack.
     Small { data: [u8; 32], size: usize },
+    /// Large variant stores the bytes in heap.
     Large { data: Vec<u8> },
 }
 
@@ -38,7 +37,7 @@ impl AsRef<[u8]> for Blob {
     }
 }
 
-/// Type client-id implements a unique ID defined by MQTT specification.
+/// Type client-id implements a unique ID, managed internally as string.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Default)]
 pub struct ClientID(pub String);
 
@@ -82,11 +81,15 @@ impl<'a> Arbitrary<'a> for ClientID {
 }
 
 impl ClientID {
+    /// Use uuid-v4 to generate a unique client ID. Stringified representaion shall
+    /// look like: `0c046132-816a-49eb-90c9-2d8161c50409`
     pub fn new_uuid_v4() -> ClientID {
         ClientID(uuid::Uuid::new_v4().to_string())
     }
 
-    pub fn from_connect(connect: &v5::Connect) -> ClientID {
+    /// Gather client_id from MQTT v5 `connect` packet. If v5 client has not provided
+    /// a `client_id` in its connect-packet, fall back to [ClientID::new_uuid_v4]
+    pub fn from_v5_connect(connect: &v5::Connect) -> ClientID {
         match connect.payload.client_id.len() {
             0 => ClientID::new_uuid_v4(),
             _ => connect.payload.client_id.clone(),
@@ -220,6 +223,7 @@ impl<'a> IterTopicPath<'a> for TopicName {
 }
 
 impl TopicName {
+    /// Validate topic-name based on TopicName specified by MQTT v5.
     pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
@@ -371,6 +375,7 @@ impl<'a> Arbitrary<'a> for TopicFilter {
 }
 
 impl TopicFilter {
+    /// Validate topic-filter based on TopicName specified by MQTT v5.
     pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
@@ -482,6 +487,8 @@ impl Packetize for VarU32 {
 }
 
 impl VarU32 {
+    /// This is a maximum value held by variable length 32-bit unsigned-integer. One
+    /// bit is sacrificed for each byte.
     pub const MAX: VarU32 = VarU32(268_435_455);
 }
 

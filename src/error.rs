@@ -119,16 +119,6 @@ macro_rules! err {
     }};
 }
 
-#[macro_export]
-macro_rules! dbg {
-    ($v:ident, code: $code:ident, $($args:expr),+) => {{
-        log::debug!("{}: {}", ErrorKind::$v, format!($($args),+));
-    }};
-    ($v:ident, desc: $($args:expr),+) => {{
-        log::debug!("{}: {}", ErrorKind::$v, format!($($args),+));
-    }};
-}
-
 /// Macro to log error. Suggest using the [err] macro.
 #[cfg_attr(any(feature = "fuzzy", test), macro_export)]
 macro_rules! log_error {
@@ -157,10 +147,9 @@ macro_rules! log_error {
     }};
 }
 
-/// If expression returns error then panic.
-///
-/// Before that, log the error, send "panic" message to application's back channel and
-/// then panic. `self` is the context type in which panic happens.
+/// This is a local macro used by mymq threads to send `fatal` message back to the
+/// application. Typically `self` is a thread and this macro make assumptions about
+/// the `self` argument.
 #[cfg(feature = "broker")]
 macro_rules! app_fatal {
     ($self:expr, $($args:expr),+) => {{
@@ -340,6 +329,8 @@ impl Error {
         }
     }
 
+    /// Return the reason-code. Default reason code shall be
+    /// [ReasonCode::UnspecifiedError]
     pub fn code(&self) -> ReasonCode {
         self.code.unwrap_or(ReasonCode::UnspecifiedError)
     }

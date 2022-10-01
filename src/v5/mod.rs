@@ -1,4 +1,4 @@
-//! Module implement MQTT Version-5 packet serialization.
+//! Module can speak MQTT Version-5 protocol.
 
 #[cfg(any(feature = "fuzzy", test))]
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
