@@ -47,30 +47,30 @@ impl TryFrom<u8> for AuthReasonCode {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Auth {
     pub code: AuthReasonCode,
-    pub properties: Option<AuthProperties>,
+    pub properties: AuthProperties,
 }
 
 impl fmt::Display for Auth {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         write!(f, "AUTH code:{}", self.code)?;
-        if let Some(properties) = &self.properties {
-            let mut props = Vec::default();
-            props.push(format!(
-                "  authentication_method: {:?}",
-                properties.authentication_method
-            ));
-            props.push(format!(
-                "  authentication_data: {}",
-                properties.authentication_data.len()
-            ));
-            if let Some(val) = &properties.reason_string {
-                props.push(format!("  reason_string: {:?}", val));
-            }
-            for (key, val) in properties.user_properties.iter() {
-                props.push(format!("  {:?}: {:?}", key, val));
-            }
-            write!(f, "{}\n", props.join("\n"))?;
+
+        let mut props = Vec::default();
+        props.push(format!(
+            "  authentication_method: {:?}",
+            self.properties.authentication_method
+        ));
+        props.push(format!(
+            "  authentication_data: {}",
+            self.properties.authentication_data.len()
+        ));
+
+        if let Some(val) = &self.properties.reason_string {
+            props.push(format!("  reason_string: {:?}", val));
         }
+        for (key, val) in self.properties.user_properties.iter() {
+            props.push(format!("  {:?}: {:?}", key, val));
+        }
+        write!(f, "{}\n", props.join("\n"))?;
 
         Ok(())
     }
@@ -96,12 +96,12 @@ impl Packetize for Auth {
         fh.validate()?;
 
         let (code, properties, n) = if *fh.remaining_len == 0 {
-            (AuthReasonCode::Success, None, n)
+            err!(ProtocolError, code: ProtocolError, "{} missing auth-method", PP)?
         } else {
             let (code, n) = dec_field!(u8, stream, n);
             let code = AuthReasonCode::try_from(code)?;
             let (properties, n) = dec_props!(AuthProperties, stream, n);
-            (code, properties, n)
+            (code, properties.unwrap(), n)
         };
 
         let val = Auth { code, properties };
@@ -116,11 +116,7 @@ impl Packetize for Auth {
         let mut data = Vec::with_capacity(64);
 
         data.extend_from_slice((self.code as u8).encode()?.as_ref());
-        if let Some(properties) = &self.properties {
-            data.extend_from_slice(properties.encode()?.as_ref());
-        } else {
-            data.extend_from_slice(VarU32(0).encode()?.as_ref());
-        }
+        data.extend_from_slice(self.properties.encode()?.as_ref());
 
         let fh = FixedHeader::new(PacketType::Auth, VarU32(data.len().try_into()?))?;
         data = insert_fixed_header(fh, data)?;
@@ -130,6 +126,7 @@ impl Packetize for Auth {
 }
 
 impl Auth {
+    /// NO-OP
     pub fn normalize(&mut self) {
         ()
     }
@@ -142,13 +139,13 @@ impl Auth {
 /// Collection of MQTT properties allowed in AUTH packet
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct AuthProperties {
-    /// Property::AuthenticationMethod
+    /// [Property::AuthenticationMethod]
     pub authentication_method: String,
-    /// Property::AuthenticationData
+    /// [Property::AuthenticationData]
     pub authentication_data: Vec<u8>,
-    /// Property::ReasonString
+    /// [Property::ReasonString]
     pub reason_string: Option<String>,
-    /// Property::UserProp
+    /// [Property::UserProp]
     pub user_properties: Vec<UserProperty>,
 }
 

@@ -5,10 +5,10 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{cmp, fmt, result};
 
-use crate::util::advance;
+use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
-pub use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, VarU32};
-pub use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::util::advance;
 
 // TODO: review all v5::* code to check error-kind, must either be MalformedPacket or
 //       ProtocolError.
@@ -123,7 +123,7 @@ mod unsub;
 mod unsuback;
 
 pub use auth::{Auth, AuthProperties, AuthReasonCode};
-pub use connack::{ConnAck, ConnAckProperties, ConnackFlags, ConnackReasonCode};
+pub use connack::{ConnAck, ConnAckFlags, ConnAckProperties, ConnAckReasonCode};
 pub use connect::WillProperties;
 pub use connect::{Connect, ConnectFlags, ConnectPayload, ConnectProperties};
 pub use disconnect::{DisconnProperties, DisconnReasonCode, Disconnect};

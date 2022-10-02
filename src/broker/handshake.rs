@@ -122,7 +122,7 @@ impl Threadable for Handshake {
 
         if connack {
             // if error, connect-ack shall be sent right here and ignored.
-            let code = v5::ConnackReasonCode::try_from(code as u8).unwrap();
+            let code = v5::ConnAckReasonCode::try_from(code as u8).unwrap();
             self.send_connack(code, &mut sock).ok();
         } else if let Some(connect) = connect {
             info!("{} raddr:{} handing over to cluster ...", self.prefix, self.raddr);
@@ -147,7 +147,7 @@ impl Threadable for Handshake {
 }
 
 impl Handshake {
-    fn send_connack<W>(&self, code: v5::ConnackReasonCode, sock: &mut W) -> Result<()>
+    fn send_connack<W>(&self, code: v5::ConnAckReasonCode, sock: &mut W) -> Result<()>
     where
         W: io::Write,
     {

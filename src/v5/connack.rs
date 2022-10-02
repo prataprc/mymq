@@ -11,9 +11,9 @@ const PP: &'static str = "Packet::ConnAck";
 
 /// Flags carried in CONNACK packet.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub struct ConnackFlags(pub u8);
+pub struct ConnAckFlags(pub u8);
 
-impl Deref for ConnackFlags {
+impl Deref for ConnAckFlags {
     type Target = u8;
 
     fn deref(&self) -> &u8 {
@@ -21,36 +21,36 @@ impl Deref for ConnackFlags {
     }
 }
 
-impl DerefMut for ConnackFlags {
+impl DerefMut for ConnAckFlags {
     fn deref_mut(&mut self) -> &mut u8 {
         &mut self.0
     }
 }
 
-impl Default for ConnackFlags {
-    fn default() -> ConnackFlags {
-        ConnackFlags(0)
+impl Default for ConnAckFlags {
+    fn default() -> ConnAckFlags {
+        ConnAckFlags(0)
     }
 }
 
 #[cfg(any(feature = "fuzzy", test))]
-impl<'a> Arbitrary<'a> for ConnackFlags {
+impl<'a> Arbitrary<'a> for ConnAckFlags {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let mut flags = vec![];
         if uns.arbitrary::<bool>()? {
             flags.push(Self::SESSION_PRESENT)
         }
 
-        Ok(ConnackFlags::new(&flags))
+        Ok(ConnAckFlags::new(&flags))
     }
 }
 
-impl Packetize for ConnackFlags {
+impl Packetize for ConnAckFlags {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
         let stream: &[u8] = stream.as_ref();
 
         let (flags, n) = dec_field!(u8, stream, 0);
-        let flags = ConnackFlags(flags);
+        let flags = ConnAckFlags(flags);
         flags.unwrap()?;
 
         flags.validate()?;
@@ -63,11 +63,11 @@ impl Packetize for ConnackFlags {
     }
 }
 
-impl ConnackFlags {
-    pub const SESSION_PRESENT: ConnackFlags = ConnackFlags(0b_0000_0001);
+impl ConnAckFlags {
+    pub const SESSION_PRESENT: ConnAckFlags = ConnAckFlags(0b_0000_0001);
 
-    pub fn new(flags: &[ConnackFlags]) -> ConnackFlags {
-        flags.iter().fold(ConnackFlags(0), |acc, flag| ConnackFlags(acc.0 | flag.0))
+    pub fn new(flags: &[ConnAckFlags]) -> ConnAckFlags {
+        flags.iter().fold(ConnAckFlags(0), |acc, flag| ConnAckFlags(acc.0 | flag.0))
     }
 
     /// Return `session_present` flag.
@@ -88,7 +88,7 @@ impl ConnackFlags {
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(u8)]
-pub enum ConnackReasonCode {
+pub enum ConnAckReasonCode {
     Success = 0x00,
     UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
@@ -113,9 +113,9 @@ pub enum ConnackReasonCode {
     ExceedConnectionRate = 0x9f,
 }
 
-impl fmt::Display for ConnackReasonCode {
+impl fmt::Display for ConnAckReasonCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        use ConnackReasonCode::*;
+        use ConnAckReasonCode::*;
 
         match self {
             Success => write!(f, "success"),
@@ -144,33 +144,33 @@ impl fmt::Display for ConnackReasonCode {
     }
 }
 
-impl TryFrom<u8> for ConnackReasonCode {
+impl TryFrom<u8> for ConnAckReasonCode {
     type Error = Error;
 
-    fn try_from(val: u8) -> Result<ConnackReasonCode> {
+    fn try_from(val: u8) -> Result<ConnAckReasonCode> {
         match val {
-            0x00 => Ok(ConnackReasonCode::Success),
-            0x80 => Ok(ConnackReasonCode::UnspecifiedError),
-            0x81 => Ok(ConnackReasonCode::MalformedPacket),
-            0x82 => Ok(ConnackReasonCode::ProtocolError),
-            0x83 => Ok(ConnackReasonCode::ImplementationError),
-            0x84 => Ok(ConnackReasonCode::UnsupportedProtocolVersion),
-            0x85 => Ok(ConnackReasonCode::InvalidClientID),
-            0x86 => Ok(ConnackReasonCode::BadLogin),
-            0x87 => Ok(ConnackReasonCode::NotAuthorized),
-            0x88 => Ok(ConnackReasonCode::ServerUnavailable),
-            0x89 => Ok(ConnackReasonCode::ServerBusy),
-            0x8a => Ok(ConnackReasonCode::Banned),
-            0x8c => Ok(ConnackReasonCode::BadAuthenticationMethod),
-            0x90 => Ok(ConnackReasonCode::TopicNameInvalid),
-            0x95 => Ok(ConnackReasonCode::PacketTooLarge),
-            0x97 => Ok(ConnackReasonCode::QuotaExceeded),
-            0x99 => Ok(ConnackReasonCode::PayloadFormatInvalid),
-            0x9a => Ok(ConnackReasonCode::RetainNotSupported),
-            0x9b => Ok(ConnackReasonCode::InvalidQoS),
-            0x9c => Ok(ConnackReasonCode::UseAnotherServer),
-            0x9d => Ok(ConnackReasonCode::ServerMoved),
-            0x9f => Ok(ConnackReasonCode::ExceedConnectionRate),
+            0x00 => Ok(ConnAckReasonCode::Success),
+            0x80 => Ok(ConnAckReasonCode::UnspecifiedError),
+            0x81 => Ok(ConnAckReasonCode::MalformedPacket),
+            0x82 => Ok(ConnAckReasonCode::ProtocolError),
+            0x83 => Ok(ConnAckReasonCode::ImplementationError),
+            0x84 => Ok(ConnAckReasonCode::UnsupportedProtocolVersion),
+            0x85 => Ok(ConnAckReasonCode::InvalidClientID),
+            0x86 => Ok(ConnAckReasonCode::BadLogin),
+            0x87 => Ok(ConnAckReasonCode::NotAuthorized),
+            0x88 => Ok(ConnAckReasonCode::ServerUnavailable),
+            0x89 => Ok(ConnAckReasonCode::ServerBusy),
+            0x8a => Ok(ConnAckReasonCode::Banned),
+            0x8c => Ok(ConnAckReasonCode::BadAuthenticationMethod),
+            0x90 => Ok(ConnAckReasonCode::TopicNameInvalid),
+            0x95 => Ok(ConnAckReasonCode::PacketTooLarge),
+            0x97 => Ok(ConnAckReasonCode::QuotaExceeded),
+            0x99 => Ok(ConnAckReasonCode::PayloadFormatInvalid),
+            0x9a => Ok(ConnAckReasonCode::RetainNotSupported),
+            0x9b => Ok(ConnAckReasonCode::InvalidQoS),
+            0x9c => Ok(ConnAckReasonCode::UseAnotherServer),
+            0x9d => Ok(ConnAckReasonCode::ServerMoved),
+            0x9f => Ok(ConnAckReasonCode::ExceedConnectionRate),
             val => {
                 err!(MalformedPacket, code: MalformedPacket, "{} reason-code {}", PP, val)
             }
@@ -181,8 +181,8 @@ impl TryFrom<u8> for ConnackReasonCode {
 /// CONNACK packet
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConnAck {
-    pub flags: ConnackFlags,
-    pub code: ConnackReasonCode,
+    pub flags: ConnAckFlags,
+    pub code: ConnAckReasonCode,
     pub properties: Option<ConnAckProperties>,
 }
 
@@ -253,8 +253,8 @@ impl fmt::Display for ConnAck {
 impl Default for ConnAck {
     fn default() -> ConnAck {
         ConnAck {
-            flags: ConnackFlags::default(),
-            code: ConnackReasonCode::Success,
+            flags: ConnAckFlags::default(),
+            code: ConnAckReasonCode::Success,
             properties: None,
         }
     }
@@ -280,9 +280,9 @@ impl Packetize for ConnAck {
         let (fh, n) = dec_field!(FixedHeader, stream, 0);
         fh.validate()?;
 
-        let (flags, n) = dec_field!(ConnackFlags, stream, n);
+        let (flags, n) = dec_field!(ConnAckFlags, stream, n);
         let (code, n) = dec_field!(u8, stream, n);
-        let code = ConnackReasonCode::try_from(code)?;
+        let code = ConnAckReasonCode::try_from(code)?;
         let (properties, n) = dec_props!(ConnAckProperties, stream, n);
 
         let val = ConnAck { flags, code, properties };
@@ -314,19 +314,19 @@ impl Packetize for ConnAck {
 impl ConnAck {
     pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
         ConnAck {
-            flags: ConnackFlags::default(),
-            code: ConnackReasonCode::Success,
+            flags: ConnAckFlags::default(),
+            code: ConnAckReasonCode::Success,
             properties: ps,
         }
     }
 
-    pub fn from_reason_code(code: ConnackReasonCode) -> ConnAck {
-        let flags = ConnackFlags::default();
+    pub fn from_reason_code(code: ConnAckReasonCode) -> ConnAck {
+        let flags = ConnAckFlags::default();
         ConnAck { flags, code, properties: None }
     }
 
     pub fn set_session_present(&mut self) {
-        self.flags = ConnackFlags(*self.flags | *ConnackFlags::SESSION_PRESENT);
+        self.flags = ConnAckFlags(*self.flags | *ConnAckFlags::SESSION_PRESENT);
     }
 
     pub fn receive_maximum(&self) -> u16 {
@@ -336,10 +336,6 @@ impl ConnAck {
         }
     }
 
-    fn validate(&self) -> Result<()> {
-        Ok(())
-    }
-
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         if let Some(props) = &mut self.properties {
@@ -347,6 +343,10 @@ impl ConnAck {
                 self.properties = None
             }
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        Ok(())
     }
 }
 
