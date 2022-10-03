@@ -1,14 +1,12 @@
 use log::{debug, error, info, trace, warn};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::{fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{socket, AppTx, Config, QueueStatus, Shard, Socket};
+use crate::broker::{AppTx, Config, QueueStatus, Shard, Socket};
 use crate::broker::{ClientID, ToJson};
 use crate::broker::{Error, ErrorKind, Result};
-
-use crate::v5;
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
@@ -145,10 +143,7 @@ impl Drop for Miot {
 
 impl ToJson for Miot {
     fn to_config_json(&self) -> String {
-        format!(
-            concat!("{{ {:?}: {} }}"),
-            "mqtt_max_packet_size", self.config.mqtt_max_packet_size,
-        )
+        format!("{{}}")
     }
 
     fn to_stats_json(&self) -> String {
@@ -224,7 +219,7 @@ impl Miot {
 }
 
 pub enum Request {
-    AddConnection(AddConnectionArgs),
+    AddConnection(Socket),
     RemoveConnection { client_id: ClientID },
     Close,
 }
@@ -234,27 +229,21 @@ pub enum Response {
     Removed(Socket),
 }
 
-pub struct AddConnectionArgs {
-    pub client_id: ClientID,
-    pub conn: mio::net::TcpStream,
-    pub upstream: socket::PktTx,
-    pub downstream: socket::PktRx,
-    pub max_packet_size: u32,
-}
-
 // calls to interface with miot-thread, and shall wake the thread
 impl Miot {
     pub fn wake(&self) {
         match &self.inner {
-            Inner::Handle(waker, _thrd) => app_fatal!(self, waker.wake()),
+            Inner::Handle(waker, _thrd) => {
+                app_fatal!(self, waker.wake());
+            }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
-    pub fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
+    pub fn add_connection(&self, sock: Socket) -> Result<()> {
         match &self.inner {
             Inner::Handle(_waker, thrd) => {
-                let req = Request::AddConnection(args);
+                let req = Request::AddConnection(sock);
                 match thrd.request(req)?? {
                     Response::Ok => Ok(()),
                     _ => unreachable!("{} unxpected response", self.prefix),
@@ -402,11 +391,8 @@ impl Miot {
 
         let mut fail_queues = Vec::new();
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = {
-                let raddr = socket.conn.peer_addr().unwrap();
-                format!("rconn:{}:{}", raddr, **client_id)
-            };
-            match socket.read_packets(&prefix, &self.config) {
+            let prefix = format!("rconn:{}:{}", socket.peer_addr(), **client_id);
+            match socket.read_packets(&prefix) {
                 Ok(QueueStatus::Ok(_)) | Ok(QueueStatus::Block(_)) => (),
                 Ok(QueueStatus::Disconnected(_)) => {
                     fail_queues.push((client_id.clone(), None));
@@ -432,8 +418,6 @@ impl Miot {
     }
 
     fn session_to_socket(&mut self) {
-        use crate::broker::socket::Stats as SockStats;
-
         let conns = match &mut self.inner {
             Inner::Main(RunLoop { conns, .. }) => conns,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -441,26 +425,25 @@ impl Miot {
 
         // if thread is closed conns will be empty.
         let mut fail_queues = Vec::new(); // TODO: with_capacity ?
-        let mut wstats = SockStats::default();
+        let (mut items, mut bytes) = (0_usize, 0_usize);
         for (client_id, socket) in conns.iter_mut() {
-            let prefix = {
-                let raddr = socket.conn.peer_addr().unwrap();
-                format!("wconn:{}:{}", raddr, **client_id)
+            let prefix = format!("wconn:{}:{}", socket.peer_addr(), **client_id);
+            let (a, b) = match socket.write_packets(&prefix) {
+                (QueueStatus::Ok(_), a, b) => {
+                    // TODO: should we wake the session here.
+                    (a, b)
+                }
+                (QueueStatus::Block(_), a, b) => {
+                    // TODO: should we wake the session here.
+                    (a, b)
+                }
+                (QueueStatus::Disconnected(_), a, b) => {
+                    fail_queues.push((client_id.clone(), None));
+                    (a, b)
+                }
             };
-            match socket.write_packets(&prefix, &self.config) {
-                (QueueStatus::Ok(_), stats) => {
-                    wstats.update(&stats);
-                    () // TODO: should we wake the session here.
-                }
-                (QueueStatus::Block(_), stats) => {
-                    wstats.update(&stats);
-                    () // TODO: should we wake the session here.
-                }
-                (QueueStatus::Disconnected(_), stats) => {
-                    wstats.update(&stats);
-                    fail_queues.push((client_id.clone(), None))
-                }
-            }
+            items += a;
+            bytes += b;
         }
 
         for (client_id, err) in fail_queues.into_iter() {
@@ -470,7 +453,7 @@ impl Miot {
             }
         }
 
-        self.incr_wstats(&wstats);
+        self.incr_wstats(items, bytes)
     }
 }
 
@@ -478,45 +461,28 @@ impl Miot {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use mio::Interest;
 
-        let mut args = match req {
-            Request::AddConnection(args) => args,
+        let mut sock = match req {
+            Request::AddConnection(sock) => sock,
             _ => unreachable!(),
         };
-        let raddr = args.conn.peer_addr().unwrap();
 
-        info!("{} raddr:{} adding connection ...", self.prefix, raddr);
-
-        let max_packet_size = self.config.mqtt_max_packet_size;
-        let (session_tx, miot_rx) = (args.upstream, args.downstream);
+        info!("{} raddr:{} adding connection ...", self.prefix, sock.peer_addr());
 
         let interests = Interest::READABLE | Interest::WRITABLE;
         let token = self.next_token();
         app_fatal!(
             self,
-            self.as_mut_poll().registry().register(&mut args.conn, token, interests)
+            self.as_mut_poll().registry().register(&mut sock, token, interests)
         );
 
-        let rd = socket::Source {
-            pr: v5::MQTTRead::new(max_packet_size),
-            timeout: time::Duration::default(),
-            deadline: None,
-            session_tx,
-            packets: VecDeque::default(),
-        };
-        let wt = socket::Sink {
-            pw: v5::MQTTWrite::new(&[], args.max_packet_size),
-            timeout: time::Duration::default(),
-            deadline: None,
-            miot_rx,
-            packets: VecDeque::default(),
-        };
-        let (client_id, conn) = (args.client_id.clone(), args.conn);
-        let socket = socket::Socket { client_id, conn, token, rd, wt };
-        let conns = match &mut self.inner {
-            Inner::Main(RunLoop { conns, .. }) => conns,
+        sock.set_mio_token(token);
+
+        match &mut self.inner {
+            Inner::Main(RunLoop { conns, .. }) => {
+                conns.insert(sock.to_client_id(), sock);
+            }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        conns.insert(args.client_id, socket);
 
         self.incr_n_add_conns();
 
@@ -536,9 +502,9 @@ impl Miot {
 
         let res = match conns.remove(&cid) {
             Some(mut socket) => {
-                let raddr = socket.conn.peer_addr().unwrap();
+                let raddr = socket.peer_addr();
                 info!("{} raddr:{} removing connection ...", self.prefix, raddr);
-                app_fatal!(&self, poll.registry().deregister(&mut socket.conn));
+                app_fatal!(&self, poll.registry().deregister(&mut socket));
                 Response::Removed(socket)
             }
             None => {
@@ -568,11 +534,11 @@ impl Miot {
         let mut tokens = Vec::with_capacity(conns.len());
 
         for (cid, sock) in conns.into_iter() {
-            let raddr = sock.conn.peer_addr().unwrap();
+            let raddr = sock.peer_addr();
             info!("{} raddr:{} client_id:{} closing socket", self.prefix, raddr, *cid);
-            client_ids.push(sock.client_id);
+            client_ids.push(sock.to_client_id());
             addrs.push(raddr);
-            tokens.push(sock.token);
+            tokens.push(sock.to_mio_token());
         }
 
         let fin_state = FinState {
@@ -629,11 +595,11 @@ impl Miot {
         }
     }
 
-    fn incr_wstats(&mut self, wstats: &socket::Stats) {
+    fn incr_wstats(&mut self, items: usize, bytes: usize) {
         match &mut self.inner {
             Inner::Main(RunLoop { stats, .. }) => {
-                stats.n_wpkts += wstats.items;
-                stats.n_wbytes += wstats.bytes;
+                stats.n_wpkts += items;
+                stats.n_wbytes += bytes;
             }
             _ => unreachable!(),
         }

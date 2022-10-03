@@ -4,8 +4,8 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::ops::{Deref, DerefMut};
 use std::{fmt, result};
 
-use crate::{v5, IterTopicPath, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{IterTopicPath, Packetize};
 
 /// Type alias for PacketID as u16.
 pub type PacketID = u16;
@@ -85,15 +85,6 @@ impl ClientID {
     /// look like: `0c046132-816a-49eb-90c9-2d8161c50409`
     pub fn new_uuid_v4() -> ClientID {
         ClientID(uuid::Uuid::new_v4().to_string())
-    }
-
-    /// Gather client_id from MQTT v5 `connect` packet. If v5 client has not provided
-    /// a `client_id` in its connect-packet, fall back to [ClientID::new_uuid_v4]
-    pub fn from_v5_connect(connect: &v5::Connect) -> ClientID {
-        match connect.payload.client_id.len() {
-            0 => ClientID::new_uuid_v4(),
-            _ => connect.payload.client_id.clone(),
-        }
     }
 }
 

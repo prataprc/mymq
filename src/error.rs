@@ -154,10 +154,11 @@ macro_rules! log_error {
 macro_rules! app_fatal {
     ($self:expr, $($args:expr),+) => {{
         match $($args),+ {
-            Ok(_) => (),
+            Ok(val) => Some(val),
             Err(err) => {
                 $self.as_app_tx().send("fatal".to_string()).ok();
                 log::error!("{} fatal error {} ", $self.prefix, err);
+                None
             }
         }
     }};

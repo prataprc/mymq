@@ -26,8 +26,8 @@ impl ToJson for Handshake {
     fn to_config_json(&self) -> String {
         format!(
             concat!("{{ {:?}: {}, {:?}: {} }}"),
-            "sock_mqtt_connect_timeout",
-            self.config.sock_mqtt_connect_timeout,
+            "connect_timeout",
+            self.config.connect_timeout,
             "mqtt_max_packet_size",
             self.config.mqtt_max_packet_size,
         )
@@ -49,7 +49,7 @@ impl Threadable for Handshake {
         let mut sock = self.sock.take().unwrap();
         let timeout = {
             let now = time::Instant::now();
-            let connect_timeout = self.config.sock_mqtt_connect_timeout;
+            let connect_timeout = self.config.connect_timeout;
             now + time::Duration::from_secs(connect_timeout as u64)
         };
         let raddr = sock.peer_addr().unwrap();
@@ -154,7 +154,7 @@ impl Handshake {
         let max_size = self.config.mqtt_max_packet_size;
         let timeout = {
             let now = time::Instant::now();
-            let connect_timeout = self.config.sock_mqtt_connect_timeout;
+            let connect_timeout = self.config.connect_timeout;
             now + time::Duration::from_secs(connect_timeout as u64)
         };
 

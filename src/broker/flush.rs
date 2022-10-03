@@ -1,11 +1,21 @@
+//! Flusher threading model.
+//!
+//! ```
+//!                        spawn()            to_tx()
+//! from_config() -> Init -----+----> Handle ---------> Tx ----+
+//!                            |                        ^      | to_tx()
+//!                            |                        |      |
+//!                            V                        +------+
+//!                           Main
+//! ```
+
 use log::{debug, error, info, trace, warn};
 
 use std::{io, mem, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{socket, AppTx, Config, QueueStatus, Socket};
-use crate::broker::{Error, ErrorKind, ReasonCode, Result};
-use crate::broker::{Packetize, ToJson, SLEEP_10MS};
+use crate::broker::{socket, AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
+use crate::broker::{Error, ErrorKind, Packetize, ReasonCode, Result, ToJson};
 
 use crate::v5;
 
@@ -26,10 +36,10 @@ enum Inner {
     Init,
     // Held by Cluster
     Handle(Thread<Flusher, Request, Result<Response>>),
-    // Held by each shard.
-    Tx(Tx<Request, Result<Response>>),
     // Thread
     Main(RunLoop),
+    // Held by each shard.
+    Tx(Tx<Request, Result<Response>>),
     // Held by Cluser, replacing both Handle and Main.
     Close(FinState),
 }
@@ -37,9 +47,6 @@ enum Inner {
 struct RunLoop {
     /// Statistics
     stats: Stats,
-
-    /// Back channel communicate with application.
-    app_tx: AppTx,
 }
 
 pub struct FinState {
@@ -73,14 +80,14 @@ impl FinState {
 impl Default for Flusher {
     fn default() -> Flusher {
         let config = Config::default();
-        let mut def = Flusher {
+        let mut val = Flusher {
             name: config.name.clone(),
             prefix: String::default(),
             config,
             inner: Inner::Init,
         };
-        def.prefix = def.prefix();
-        def
+        val.prefix = val.prefix();
+        val
     }
 }
 
@@ -90,8 +97,8 @@ impl Drop for Flusher {
         match inner {
             Inner::Init => trace!("{} drop ...", self.prefix),
             Inner::Handle(_thrd) => debug!("{} drop ...", self.prefix),
-            Inner::Tx(_tx) => debug!("{} drop ...", self.prefix),
             Inner::Main(_run_loop) => info!("{} drop ...", self.prefix),
+            Inner::Tx(_tx) => debug!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
         }
     }
@@ -100,16 +107,16 @@ impl Drop for Flusher {
 impl ToJson for Flusher {
     fn to_config_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {} }}"),
-            "sock_mqtt_flush_timeout",
-            self.config.sock_mqtt_flush_timeout,
-            "mqtt_max_packet_size",
-            self.config.mqtt_max_packet_size
+            concat!(r#"{{ "name": {:?},  {:?}: {} }}"#),
+            self.config.name, "flush_timeout", self.config.flush_timeout,
         )
     }
 
     fn to_stats_json(&self) -> String {
-        "{{}}".to_string()
+        match &self.inner {
+            Inner::Close(fin_state) => fin_state.to_json(),
+            _ => "{{}}".to_string(),
+        }
     }
 }
 
@@ -128,12 +135,12 @@ impl Flusher {
         Ok(val)
     }
 
-    pub fn spawn(self, app_tx: AppTx) -> Result<Flusher> {
+    pub fn spawn(self, _app_tx: AppTx) -> Result<Flusher> {
         let mut flush = Flusher {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop { stats: Stats::default(), app_tx }),
+            inner: Inner::Main(RunLoop { stats: Stats::default() }),
         };
         flush.prefix = flush.prefix();
         let thrd = Thread::spawn(&self.prefix, flush);
@@ -145,6 +152,8 @@ impl Flusher {
             inner: Inner::Handle(thrd),
         };
         flush.prefix = flush.prefix();
+
+        debug!("{} handle to flusher thread", flush.prefix);
 
         Ok(flush)
     }
@@ -165,6 +174,7 @@ impl Flusher {
         flush.prefix = flush.prefix();
 
         debug!("{} cloned for {}", flush.prefix, who);
+
         flush
     }
 }
@@ -179,35 +189,24 @@ pub enum Response {
     FlushStats(socket::Stats),
 }
 
-pub struct FlushConnectionArgs {
-    pub socket: Socket,
-    pub err: Option<Error>,
-}
-
 // calls to interface with flusher-thread.
 impl Flusher {
-    pub fn flush_connection(&self, args: FlushConnectionArgs) -> Result<()> {
+    pub fn flush_connection(&self, socket: Socket, err: Option<Error>) -> Result<()> {
+        let req = Request::FlushConnection { socket, err };
         match &self.inner {
-            Inner::Handle(thrd) => thrd.request(Request::FlushConnection {
-                socket: args.socket,
-                err: args.err,
-            })??,
-            Inner::Tx(tx) => tx.request(Request::FlushConnection {
-                socket: args.socket,
-                err: args.err,
-            })??,
+            Inner::Handle(thrd) => thrd.request(req)??,
+            Inner::Tx(tx) => tx.request(req)??,
             _ => unreachable!(),
         };
 
         Ok(())
     }
 
-    pub fn close_wait(mut self) -> Flusher {
-        let inner = mem::replace(&mut self.inner, Inner::Init);
-        match inner {
+    pub fn close_wait(mut self) -> Result<Flusher> {
+        match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Handle(thrd) => {
-                thrd.request(Request::Close).ok();
-                thrd.close_wait()
+                thrd.request(Request::Close)??;
+                Ok(thrd.close_wait())
             }
             _ => unreachable!(),
         }
@@ -227,7 +226,7 @@ impl Threadable for Flusher {
         'outer: loop {
             let mut status = get_requests(&self.prefix, &rx, CONTROL_CHAN_SIZE);
             let reqs = status.take_values();
-            debug!("{} n:{} requests processed", self.prefix, reqs.len());
+            trace!("{} n:{} requests processed", self.prefix, reqs.len());
 
             for req in reqs.into_iter() {
                 match req {
@@ -273,8 +272,8 @@ impl Flusher {
         use crate::broker::socket::Stats as SockStats;
 
         let now = time::Instant::now();
+        let flush_timeout = self.config.flush_timeout;
         let max_size = self.config.mqtt_max_packet_size;
-        let flush_timeout = self.config.sock_mqtt_flush_timeout;
 
         let (mut socket, conn_err) = match req {
             Request::FlushConnection { socket, err } => (socket, err),
@@ -348,8 +347,6 @@ impl Flusher {
         };
         info!("{} closing flusher", self.prefix);
 
-        mem::drop(run_loop.app_tx);
-
         let fin_state = FinState { stats: run_loop.stats };
         info!("{} stats:{}", self.prefix, fin_state.to_json());
 
@@ -386,14 +383,6 @@ impl Flusher {
             Inner::Close(_) => "close",
         };
         format!("<f:{}:{}>", self.name, state)
-    }
-
-    #[allow(dead_code)]
-    fn as_app_tx(&self) -> &AppTx {
-        match &self.inner {
-            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
-            _ => unreachable!(),
-        }
     }
 }
 

@@ -4,8 +4,7 @@ use log::info;
 use std::time;
 use std::{fmt, io, result};
 
-use crate::{v5, Packetize, VarU32};
-use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{self, Error, ErrorKind, Packetize, ReasonCode, Result, VarU32};
 
 /// Type implement a state machine to asynchronously read from socket using [mio].
 #[derive(Debug)]

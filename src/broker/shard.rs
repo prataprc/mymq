@@ -1272,6 +1272,11 @@ impl Shard {
     fn handle_add_session_a(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
         use crate::broker::miot::AddConnectionArgs;
 
+        let AddSessionArgs { sock, connect } = match r {
+            Request::AddSession(args) => args,
+            _ => unreachable!(),
+        };
+
         // create the session
         let (mut session, upstream, downstream) = {
             let (args, upstream, downstream) = self.to_args_active(&r);
@@ -1279,10 +1284,6 @@ impl Shard {
             (session, upstream, downstream)
         };
 
-        let AddSessionArgs { sock, connect } = match r {
-            Request::AddSession(args) => args,
-            _ => unreachable!(),
-        };
         let raddr = sock.peer_addr().unwrap();
 
         // send back the connection acknowledgment CONNACK here.
@@ -1355,8 +1356,6 @@ impl Shard {
     }
 
     fn handle_flush_session(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
-        use crate::broker::flush::FlushConnectionArgs;
-
         let (socket, err) = match r {
             Request::FlushSession { socket, err } => (socket, err),
             _ => unreachable!(),
@@ -1370,8 +1369,7 @@ impl Shard {
             Inner::MainActive(active_loop) => active_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        let args = FlushConnectionArgs { socket, err };
-        app_fatal!(&self, flusher.flush_connection(args));
+        app_fatal!(&self, flusher.flush_connection(socket, err));
 
         let msg = Message::new_rem_session(self.shard_id, client_id);
         cons_io.ctrl_msgs.push(msg);
@@ -1510,20 +1508,20 @@ impl Shard {
         let (upstream, session_rx) = {
             let size = self.config.mqtt_pkt_batch_size as usize;
             let waker = self.to_waker();
-            socket::pkt_channel(self.shard_id, size, waker)
+            socket::new_packet_queue(self.shard_id, size, waker)
         };
         // This queue is wired up with miot-thread. This queue carries v5::Packet,
         // and there is a separate queue for every session.
         let (miot_tx, downstream) = {
             let size = self.config.mqtt_pkt_batch_size as usize;
             let waker = self.as_miot().to_waker();
-            socket::pkt_channel(self.shard_id, size, waker)
+            socket::new_packet_queue(self.shard_id, size, waker)
         };
 
         let args = match req {
             Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
                 shard_id: self.shard_id,
-                client_id: ClientID::from_v5_connect(&connect),
+                client_id: ClientID::from(&connect),
                 raddr: sock.peer_addr().unwrap(),
                 config: self.config.clone(),
                 miot_tx,

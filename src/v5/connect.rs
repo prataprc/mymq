@@ -267,6 +267,17 @@ impl fmt::Display for Connect {
     }
 }
 
+impl<'a> From<&'a Connect> for ClientID {
+    /// Gather client_id from MQTT v5 `connect` packet. If v5 client has not provided
+    /// a `client_id` in its connect-packet, fall back to [ClientID::new_uuid_v4]
+    fn from(connect: &v5::Connect) -> ClientID {
+        match connect.payload.client_id.len() {
+            0 => ClientID::new_uuid_v4(),
+            _ => connect.payload.client_id.clone(),
+        }
+    }
+}
+
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Connect {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {

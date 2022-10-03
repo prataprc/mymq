@@ -94,10 +94,16 @@ pub trait ToJson {
 
 #[macro_use]
 mod error;
+#[macro_use]
+mod config;
+mod protocol;
+mod queue;
 mod timer;
 mod types;
 
 pub use error::{Error, ErrorKind, ReasonCode};
+pub use protocol::{Protocol, QPacket, Socket};
+pub use queue::{new_packet_queue, PacketRx, PacketTx, QueueStatus};
 pub use timer::Timer;
 pub use types::{Blob, ClientID, PacketID, TopicFilter, TopicName, VarU32};
 

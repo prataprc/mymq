@@ -7,6 +7,7 @@ use std::{cmp, fmt, result};
 
 use crate::{Blob, ClientID, Packetize, TopicFilter, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{PacketRx, PacketTx, QPacket, QueueStatus};
 
 use crate::util::advance;
 
@@ -107,8 +108,13 @@ macro_rules! enc_prop {
 }
 pub(crate) use enc_prop;
 
+mod config;
 mod packet;
+mod protocol;
+
+pub use config::{mqtt_listen_address4, Config};
 pub use packet::{MQTTRead, MQTTWrite};
+pub use protocol::{Protocol, Socket};
 
 mod auth;
 mod connack;

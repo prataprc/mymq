@@ -315,7 +315,8 @@ impl Cluster {
             }
         }
 
-        info!("{} port:{} listening ... ", self.prefix, self.config.port);
+        // TODO uncomment this.
+        // info!("{} port:{} listening ... ", self.prefix, self.config.port);
 
         Ok(cluster)
     }
@@ -473,13 +474,16 @@ impl Threadable for Cluster {
 
         info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
 
+        let timeout: Option<time::Duration> = None;
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
+
         loop {
-            let timeout: Option<time::Duration> = None;
-            if let Err(err) = self.as_mut_poll().poll(&mut events, timeout) {
-                self.as_app_tx().send("fatal".to_string()).ok();
-                error!("{} fata error {} ", self.prefix, err);
-                break;
+            match self.as_mut_poll().poll(&mut events, timeout) {
+                err @ Err(_) => {
+                    app_fatal!(&self, err);
+                    break;
+                }
+                _ => (),
             }
 
             match self.mio_events(&rx, &events) {
@@ -715,7 +719,10 @@ impl Cluster {
 
         let flusher = {
             let val = mem::replace(&mut run_loop.flusher, Flusher::default());
-            val.close_wait()
+            match app_fatal!(self, val.close_wait()) {
+                Some(flusher) => flusher,
+                None => return Response::Ok,
+            }
         };
 
         let fin_state = FinState {
