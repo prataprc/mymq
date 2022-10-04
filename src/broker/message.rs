@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, fmt, net, result};
 use crate::broker::SessionArgsReplica;
 #[allow(unused_imports)]
 use crate::broker::Shard;
-use crate::broker::{ClientID, PacketID, QPacket, QoS};
-use crate::broker::{Config, InpSeqno, OutSeqno, QueueStatus};
+use crate::broker::{Config, InpSeqno, OutSeqno};
+use crate::{ClientID, PacketID, QPacket, QoS, QueueStatus};
 
 use crate::v5;
 

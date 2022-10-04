@@ -4,8 +4,9 @@ use mio::event::Events;
 use std::{fmt, io, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Cluster, Config, QueueStatus};
-use crate::broker::{Error, ErrorKind, Result, ToJson};
+use crate::broker::{AppTx, Cluster, Config};
+use crate::{Error, ErrorKind, Result};
+use crate::{QueueStatus, ToJson};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;

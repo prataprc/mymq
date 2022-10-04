@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::{cmp, fs, net, path, result};
 
-use crate::broker::{util, Error, ErrorKind, Result};
+use crate::{Error, ErrorKind, Result};
 
 /// Cluster configuration.
 #[derive(Clone, Eq, PartialEq)]
@@ -119,11 +119,13 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
+        use crate::util::num_cores_ceiled;
+
         let node = ConfigNode::default();
         Config {
             name: "mymqd".to_string(),
             max_nodes: Self::DEF_MAX_NODES,
-            num_shards: util::num_cores_ceiled(),
+            num_shards: num_cores_ceiled(),
             nodes: vec![node],
             connect_timeout: Self::DEF_CONNECT_TIMEOUT,
             flush_timeout: Self::DEF_FLUSH_TIMEOUT,
@@ -144,6 +146,8 @@ impl TryFrom<toml::Value> for Config {
     type Error = Error;
 
     fn try_from(val: toml::Value) -> Result<Config> {
+        use crate::util::ceil_power_of_2;
+
         let mut def = Config::default();
         match val.as_table() {
             Some(t) => {
@@ -222,7 +226,7 @@ impl TryFrom<toml::Value> for Config {
             None => (),
         };
 
-        def.num_shards = u32::try_from(util::ceil_power_of_2(def.num_shards)).unwrap();
+        def.num_shards = u32::try_from(ceil_power_of_2(def.num_shards)).unwrap();
 
         Ok(def)
     }

@@ -6,11 +6,10 @@ use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, fmt, mem, net, path, result, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{rebalance, ticker};
-use crate::broker::{util, Timer, ToJson, TopicName};
+use crate::broker::{rebalance, ticker, Flusher, Listener, Shard, Ticker};
 use crate::broker::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
-use crate::broker::{Error, ErrorKind, Result};
-use crate::broker::{Flusher, Listener, QueueStatus, Shard, Socket, Ticker};
+use crate::{util, QueueStatus, Socket, Timer, ToJson, TopicName};
+use crate::{Error, ErrorKind, Result};
 
 use crate::v5;
 

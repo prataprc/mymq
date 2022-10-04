@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::{fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Config, QueueStatus, Shard, Socket};
-use crate::broker::{ClientID, ToJson};
-use crate::broker::{Error, ErrorKind, Result};
+use crate::broker::{AppTx, Config, Shard};
+use crate::{ClientID, QueueStatus, Socket, ToJson};
+use crate::{Error, ErrorKind, Result};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;

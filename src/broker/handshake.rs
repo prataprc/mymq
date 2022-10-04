@@ -4,8 +4,8 @@ use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{Cluster, Config, SLEEP_10MS};
-use crate::broker::{Error, ErrorKind, ReasonCode, Result};
-use crate::broker::{Packetize, ToJson};
+use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{Packetize, ToJson};
 
 use crate::v5;
 

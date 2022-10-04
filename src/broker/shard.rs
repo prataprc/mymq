@@ -1,16 +1,16 @@
 use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, fmt, mem, net, result, sync::Arc};
+use std::{collections::BTreeMap, fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, socket};
 use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::broker::{ClientID, Timer, ToJson};
-use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx, QueueStatus, Socket};
-use crate::broker::{ConsensIO, InpSeqno, PktRx, PktTx, Timestamp};
-use crate::broker::{Error, ErrorKind, ReasonCode, Result};
+use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx};
+use crate::broker::{ConsensIO, InpSeqno, Timestamp};
 use crate::broker::{RouteIO, SessionArgsActive, SessionArgsReplica};
+use crate::{ClientID, PacketRx, PacketTx, QueueStatus, Socket, Timer, ToJson};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 use crate::v5;
 
@@ -582,7 +582,6 @@ impl ActiveContext {
 impl Shard {
     fn active_loop(mut self, rx: ThreadRx, mut msg_rx: MsgRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
-        use std::time;
 
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
 
@@ -1111,7 +1110,6 @@ impl Shard {
 impl Shard {
     fn replica_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
-        use std::time;
 
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
 

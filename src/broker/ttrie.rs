@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::{borrow::Borrow, thread};
 
-use crate::broker::{ClientID, IterTopicPath, Spinlock};
+use crate::broker::Spinlock;
+use crate::{ClientID, IterTopicPath};
 
 use crate::{v5, v5::Subscription};
 
@@ -53,8 +54,6 @@ impl SubscribedTrie {
     where
         K: IterTopicPath<'b>,
     {
-        use std::sync::TryLockError;
-
         let _guard = loop {
             match self.mu.try_lock() {
                 Ok(guard) => break guard,
@@ -76,8 +75,6 @@ impl SubscribedTrie {
     where
         K: IterTopicPath<'a>,
     {
-        use std::sync::TryLockError;
-
         let _guard = loop {
             match self.mu.try_lock() {
                 Ok(guard) => break guard,
@@ -216,8 +213,6 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'b>,
     {
-        use std::sync::TryLockError;
-
         let _guard = loop {
             match self.mu.try_lock() {
                 Ok(guard) => break guard,
@@ -235,8 +230,6 @@ impl RetainedTrie {
     where
         K: IterTopicPath<'a>,
     {
-        use std::sync::TryLockError;
-
         let _guard = loop {
             match self.mu.try_lock() {
                 Ok(guard) => break guard,

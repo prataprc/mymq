@@ -44,7 +44,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::{fmt, result};
 
-use crate::broker::Result;
+use crate::Result;
 
 // TODO: Experiment with different atomic::Ordering to improve performance.
 // TODO: experiment with thread::yield_now().

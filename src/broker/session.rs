@@ -4,13 +4,31 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::{cmp, fmt, mem, net, result};
 
-use crate::broker::{ClientID, PacketID, Timer, TopicFilter, TopicName};
 use crate::broker::{Config, InpSeqno, RetainedTrie, RouteIO, SubscribedTrie};
-use crate::broker::{Error, ErrorKind, ReasonCode, Result};
-use crate::broker::{KeepAlive, Message, OutSeqno, PktRx, PktTx, QueueStatus};
-use crate::broker::{SessionArgsActive, SessionArgsReplica};
+use crate::broker::{KeepAlive, Message, OutSeqno};
+use crate::{ClientID, PacketID, Timer, TopicFilter, TopicName};
+use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{PacketRx, PacketTx, QueueStatus};
 
 use crate::v5;
+
+pub struct SessionArgsActive {
+    pub raddr: net::SocketAddr,
+    pub config: Config,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+    pub miot_tx: PacketTx,
+    pub session_rx: PacketRx,
+    pub connect: v5::Connect,
+}
+
+pub struct SessionArgsReplica {
+    pub raddr: net::SocketAddr,
+    pub config: Config,
+    pub client_id: ClientID,
+    pub shard_id: u32,
+    pub connect: v5::Connect,
+}
 
 type QueueMsg = QueueStatus<Message>;
 type HandleArgs<'a, S> = (&'a mut S, &'a mut RouteIO, v5::Packet);

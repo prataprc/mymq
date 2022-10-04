@@ -1,8 +1,6 @@
 //! Broker implementation. Overview of broker [design].
 
-use std::{net, path, sync::mpsc};
-
-use crate::v5;
+use std::{path, sync::mpsc};
 
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
@@ -34,7 +32,7 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
-    fn new(dst_shard_id: u32, last_routed: InpSeqno) -> Timestamp {
+    pub fn new(dst_shard_id: u32, last_routed: InpSeqno) -> Timestamp {
         Timestamp { dst_shard_id, last_routed, last_acked: 0 }
     }
 }
@@ -57,62 +55,45 @@ pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
 }
 
-pub struct SessionArgsActive {
-    pub raddr: net::SocketAddr,
-    pub config: Config,
-    pub client_id: ClientID,
-    pub shard_id: u32,
-    pub miot_tx: PacketTx,
-    pub session_rx: PacketRx,
-    pub connect: v5::Connect,
-}
-
-pub struct SessionArgsReplica {
-    pub raddr: net::SocketAddr,
-    pub config: Config,
-    pub client_id: ClientID,
-    pub shard_id: u32,
-    pub connect: v5::Connect,
-}
-
 pub mod design;
 
 mod config;
-mod flush;
-mod keep_alive;
-mod message;
-mod session;
-mod spinlock;
-mod thread;
-mod ttrie;
-
-mod cluster;
-mod handshake;
-mod listener;
-mod miot;
-mod rebalance;
-mod shard;
-mod ticker;
+//mod flush;
+//mod keep_alive;
+//mod message;
+//mod session;
+//mod spinlock;
+//mod thread;
+//mod ttrie;
+//
+//mod cluster;
+//mod handshake;
+//mod listener;
+//mod miot;
+//mod rebalance;
+//mod shard;
+//mod ticker;
 
 // TODO: mod consensus;
 // TODO: mod rr;
 
-pub use cluster::{Cluster, Node};
+//pub use cluster::{Cluster, Node};
 pub use config::{Config, ConfigNode};
-pub use flush::Flusher;
-pub use handshake::Handshake;
-pub use keep_alive::KeepAlive;
-pub use listener::Listener;
-pub use message::{msg_channel, ConsensIO, Message, MsgRx, MsgTx, RouteIO};
-pub use miot::Miot;
-pub use session::Session;
-pub use shard::Shard;
-pub use spinlock::Spinlock;
-pub use thread::{Rx, Thread, Threadable, Tx};
-pub use ticker::Ticker;
-pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
-
-pub use crate::{util, IterTopicPath};
-pub use crate::{ClientID, PacketID, Packetize, Timer, ToJson, TopicFilter, TopicName};
-pub use crate::{Error, ErrorKind, ReasonCode, Result};
-pub use crate::{PacketRx, PacketTx, Protocol, QPacket, QueueStatus, Socket};
+//pub use flush::Flusher;
+//pub use handshake::Handshake;
+//pub use keep_alive::KeepAlive;
+//pub use listener::Listener;
+//pub use message::{msg_channel, ConsensIO, Message, MsgRx, MsgTx, RouteIO};
+//pub use miot::Miot;
+//pub use session::Session;
+//pub use shard::Shard;
+//pub use spinlock::Spinlock;
+//pub use thread::{Rx, Thread, Threadable, Tx};
+//pub use ticker::Ticker;
+//pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
+//pub use session::{SessionArgsActive, SessionArgsReplica};
+//
+//pub use crate::{util, IterTopicPath};
+//pub use crate::{ClientID, PacketID, Packetize, Timer, ToJson, TopicFilter, TopicName};
+//pub use crate::{Error, ErrorKind, ReasonCode, Result};
+//pub use crate::{PacketRx, PacketTx, Protocol, QPacket, QueueStatus, Socket};

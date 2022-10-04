@@ -14,8 +14,9 @@ use log::{debug, error, info, trace, warn};
 use std::{io, mem, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{socket, AppTx, Config, QueueStatus, Socket, SLEEP_10MS};
-use crate::broker::{Error, ErrorKind, Packetize, ReasonCode, Result, ToJson};
+use crate::broker::{socket, AppTx, Config, SLEEP_10MS};
+use crate::{Error, ErrorKind, ReasonCode, Result};
+use crate::{Packetize, QueueStatus, Socket, ToJson};
 
 use crate::v5;
 
