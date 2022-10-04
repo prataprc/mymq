@@ -3,11 +3,9 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::{borrow::Borrow, thread};
 
 use crate::broker::Spinlock;
-use crate::{ClientID, IterTopicPath};
+use crate::{ClientID, IterTopicPath, QPacket, Subscription};
 
-use crate::{v5, v5::Subscription};
-
-// NOTE: MQTT-Spec-v5. If the Retain Handling option is 0, any existing retained messages
+// NOTE: If the Retain Handling option is 0, any existing retained messages
 // matching the Topic Filter MUST be re-sent, but Applicaton Messages MUST NOT be
 // lost due to replacing the Subscription.
 
@@ -180,13 +178,13 @@ impl SubscribedTrie {
 pub struct RetainedTrie {
     mu: Arc<Mutex<u32>>,
     stats: Stats,
-    inner: Arc<Spinlock<Arc<Inner<v5::Publish>>>>,
+    inner: Arc<Spinlock<Arc<Inner<QPacket>>>>, // QPacket == Publish message
 }
 
 impl Default for RetainedTrie {
     fn default() -> RetainedTrie {
         let inner = Inner {
-            root: Arc::new(Node::<v5::Publish>::Root { children: Vec::default() }),
+            root: Arc::new(Node::<QPacket>::Root { children: Vec::default() }),
         };
         let mu = Arc::new(Mutex::new(0));
         RetainedTrie {
@@ -209,7 +207,7 @@ impl RetainedTrie {
 }
 
 impl RetainedTrie {
-    pub fn set<'b, K>(&self, key: &'b K, value: v5::Publish)
+    pub fn set<'b, K>(&self, key: &'b K, value: QPacket)
     where
         K: IterTopicPath<'b>,
     {
@@ -243,7 +241,7 @@ impl RetainedTrie {
         self.do_remove(key)
     }
 
-    pub fn match_topic_filter<'b, K>(&self, key: &'b K) -> Vec<v5::Publish>
+    pub fn match_topic_filter<'b, K>(&self, key: &'b K) -> Vec<QPacket>
     where
         K: IterTopicPath<'b>,
     {
@@ -275,7 +273,7 @@ impl RetainedTrie {
 }
 
 impl RetainedTrie {
-    fn do_set<'b, K>(&self, key: &'b K, value: v5::Publish)
+    fn do_set<'b, K>(&self, key: &'b K, value: QPacket)
     where
         K: IterTopicPath<'b>,
     {
@@ -441,7 +439,7 @@ impl<V> Node<V> {
                 (true, None)
             }
             Node::Child { values, .. } => {
-                // MQTT-spec-v5: If a Server receives a SUBSCRIBE packet containing a
+                // If a Server receives a SUBSCRIBE packet containing a
                 // Topic Filter that is identical to a Non-shared Subscription's Topic
                 // Filter for the current Session, then it MUST replace that existing
                 // Subscription with a new Subscription.

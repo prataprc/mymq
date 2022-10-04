@@ -1,9 +1,9 @@
-use std::{cmp, fmt, result};
+use std::{fmt, result};
 
 use crate::util::advance;
 use crate::v5::{Auth, Disconnect, SubAck, Subscribe, UnSubscribe, UnsubAck};
-use crate::v5::{ConnAck, Connect, PingReq, PingResp, Pub, Publish, RetainForwardRule};
-use crate::{Blob, ClientID, Packetize, QoS, TopicFilter, TopicName, VarU32};
+use crate::v5::{ConnAck, Connect, PingReq, PingResp, Pub, Publish};
+use crate::{Blob, Packetize, QoS, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Enumeration of different MQTT Protocol version.
@@ -37,92 +37,6 @@ impl From<MqttProtocol> for u8 {
             MqttProtocol::V4 => 4,
             MqttProtocol::V5 => 5,
         }
-    }
-}
-
-/// Type captures an active subscription by client.
-#[derive(Clone, Debug, Default)]
-pub struct Subscription {
-    /// Uniquely identifies this subscription for the subscribing client. Within entire
-    /// cluster, `(client_id, topic_filter)` is uqniue.
-    pub topic_filter: TopicFilter,
-
-    /// Subscribing client's unique ID.
-    pub client_id: ClientID,
-    /// Shard ID hosting this client and its session.
-    pub shard_id: u32,
-
-    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
-    pub subscription_id: Option<u32>,
-    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
-    pub qos: QoS,
-    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
-    pub no_local: bool,
-    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
-    pub retain_as_published: bool,
-    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
-    pub retain_forward_rule: RetainForwardRule,
-}
-
-impl AsRef<ClientID> for Subscription {
-    fn as_ref(&self) -> &ClientID {
-        &self.client_id
-    }
-}
-
-impl PartialEq for Subscription {
-    fn eq(&self, other: &Self) -> bool {
-        self.topic_filter == other.topic_filter
-            && self.client_id == other.client_id
-            && self.shard_id == other.shard_id
-            // subscription options
-            && self.subscription_id == other.subscription_id
-            && self.qos == other.qos
-            && self.no_local == other.no_local
-            && self.retain_as_published == other.retain_as_published
-            && self.retain_forward_rule == other.retain_forward_rule
-    }
-}
-
-impl Eq for Subscription {}
-
-impl PartialOrd for Subscription {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        match self.client_id.cmp(&other.client_id) {
-            cmp::Ordering::Equal => Some(self.topic_filter.cmp(&other.topic_filter)),
-            val => Some(val),
-        }
-    }
-}
-
-impl Ord for Subscription {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-#[cfg(any(feature = "fuzzy", test))]
-impl<'a> Arbitrary<'a> for Subscription {
-    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        let val = Subscription {
-            topic_filter: uns.arbitrary()?,
-            client_id: uns.arbitrary()?,
-            shard_id: uns.arbitrary()?,
-            subscription_id: uns.arbitrary()?,
-            qos: uns.arbitrary()?,
-            no_local: uns.arbitrary()?,
-            retain_as_published: uns.arbitrary()?,
-            retain_forward_rule: uns.arbitrary()?,
-        };
-
-        Ok(val)
-    }
-}
-
-impl Subscription {
-    pub fn route_qos(&self, publish: &Publish, mqtt_maximum_qos: u8) -> QoS {
-        let server_qos = QoS::try_from(mqtt_maximum_qos).unwrap();
-        cmp::min(cmp::min(server_qos, publish.qos), self.qos)
     }
 }
 
@@ -763,6 +677,7 @@ pub enum Property {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Property {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::ClientID;
         use PropertyType::*;
 
         let content_types: Vec<String> =

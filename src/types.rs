@@ -366,7 +366,7 @@ impl<'a> Arbitrary<'a> for TopicFilter {
 }
 
 impl TopicFilter {
-    /// Validate topic-filter based on TopicName specified by MQTT v5.
+    /// Validate topic-filter based on TopicFilter specified by MQTT v5.
     pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
@@ -529,6 +529,130 @@ impl VarU32 {
     /// This is a maximum value held by variable length 32-bit unsigned-integer. One
     /// bit is sacrificed for each byte.
     pub const MAX: VarU32 = VarU32(268_435_455);
+}
+
+/// RetainForwardRule part of Subscription option defined by MQTT spec.
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RetainForwardRule {
+    OnEverySubscribe = 0,
+    OnNewSubscribe = 1,
+    Never = 2,
+}
+
+impl Default for RetainForwardRule {
+    fn default() -> RetainForwardRule {
+        RetainForwardRule::OnEverySubscribe
+    }
+}
+
+impl TryFrom<u8> for RetainForwardRule {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<RetainForwardRule> {
+        let val = match val {
+            0 => RetainForwardRule::OnEverySubscribe,
+            1 => RetainForwardRule::OnNewSubscribe,
+            2 => RetainForwardRule::Never,
+            val => err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "val:{} invalid retain-forward-value",
+                val
+            )?,
+        };
+
+        Ok(val)
+    }
+}
+
+impl From<RetainForwardRule> for u8 {
+    fn from(val: RetainForwardRule) -> u8 {
+        match val {
+            RetainForwardRule::OnEverySubscribe => 0,
+            RetainForwardRule::OnNewSubscribe => 1,
+            RetainForwardRule::Never => 2,
+        }
+    }
+}
+
+/// Type captures an active subscription by client.
+#[derive(Clone, Debug, Default)]
+pub struct Subscription {
+    /// Uniquely identifies this subscription for the subscribing client. Within entire
+    /// cluster, `(client_id, topic_filter)` is uqniue.
+    pub topic_filter: TopicFilter,
+
+    /// Subscribing client's unique ID.
+    pub client_id: ClientID,
+    /// Shard ID hosting this client and its session.
+    pub shard_id: u32,
+
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
+    pub subscription_id: Option<u32>,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
+    pub qos: QoS,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
+    pub no_local: bool,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
+    pub retain_as_published: bool,
+    /// Comes from SUBSCRIBE packet, Refer to MQTT spec.
+    pub retain_forward_rule: RetainForwardRule,
+}
+
+impl AsRef<ClientID> for Subscription {
+    fn as_ref(&self) -> &ClientID {
+        &self.client_id
+    }
+}
+
+impl PartialEq for Subscription {
+    fn eq(&self, other: &Self) -> bool {
+        self.topic_filter == other.topic_filter
+            && self.client_id == other.client_id
+            && self.shard_id == other.shard_id
+            // subscription options
+            && self.subscription_id == other.subscription_id
+            && self.qos == other.qos
+            && self.no_local == other.no_local
+            && self.retain_as_published == other.retain_as_published
+            && self.retain_forward_rule == other.retain_forward_rule
+    }
+}
+
+impl Eq for Subscription {}
+
+impl PartialOrd for Subscription {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        match self.client_id.cmp(&other.client_id) {
+            cmp::Ordering::Equal => Some(self.topic_filter.cmp(&other.topic_filter)),
+            val => Some(val),
+        }
+    }
+}
+
+impl Ord for Subscription {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl<'a> Arbitrary<'a> for Subscription {
+    fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        let val = Subscription {
+            topic_filter: uns.arbitrary()?,
+            client_id: uns.arbitrary()?,
+            shard_id: uns.arbitrary()?,
+            subscription_id: uns.arbitrary()?,
+            qos: uns.arbitrary()?,
+            no_local: uns.arbitrary()?,
+            retain_as_published: uns.arbitrary()?,
+            retain_forward_rule: uns.arbitrary()?,
+        };
+
+        Ok(val)
+    }
 }
 
 impl Packetize for u8 {

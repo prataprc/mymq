@@ -3,9 +3,9 @@ use log::{error, info};
 use std::{io, net, thread, time};
 
 use crate::broker::thread::{Rx, Threadable};
-use crate::broker::{Cluster, Config, SLEEP_10MS};
+use crate::broker::{Cluster, Config};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{Packetize, ToJson};
+use crate::{Packetize, Protocol, ToJson, SLEEP_10MS};
 
 use crate::v5;
 
@@ -16,20 +16,19 @@ use crate::v5;
 /// completed, connection is handed over to the [Cluster].
 pub struct Handshake {
     pub prefix: String,
-    pub sock: Option<mio::net::TcpStream>,
     pub raddr: net::SocketAddr,
     pub config: Config,
+
+    pub proto: Protocol,
     pub cluster: Cluster,
+    pub sock: Option<mio::net::TcpStream>,
 }
 
 impl ToJson for Handshake {
     fn to_config_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {} }}"),
-            "connect_timeout",
-            self.config.connect_timeout,
-            "mqtt_max_packet_size",
-            self.config.mqtt_max_packet_size,
+            concat!("{{ {:?}: {:?}, {:?}: {}, {:?}: {} }}"),
+            "name", self.config.name, "connect_timeout", self.config.connect_timeout,
         )
     }
 
@@ -44,6 +43,16 @@ impl Threadable for Handshake {
 
     fn main_loop(mut self, _rx: Rx<(), ()>) -> Self {
         use crate::broker::cluster::AddConnectionArgs;
+
+        info!("{} raddr:{} handing over to cluster ...", prefix, raddr);
+        let res = err!(
+            IPCFail,
+            try: self.cluster.add_connection(socket),
+            "cluster.add_connection"
+        );
+        if let Err(err) = res {
+            info!("{} raddr:{} hand over failed err:{}", prefix, raddr, err);
+        }
 
         let mut packetr = v5::MQTTRead::new(self.config.mqtt_max_packet_size);
         let mut sock = self.sock.take().unwrap();
@@ -146,42 +155,4 @@ impl Threadable for Handshake {
     }
 }
 
-impl Handshake {
-    fn send_connack<W>(&self, code: v5::ConnAckReasonCode, sock: &mut W) -> Result<()>
-    where
-        W: io::Write,
-    {
-        let max_size = self.config.mqtt_max_packet_size;
-        let timeout = {
-            let now = time::Instant::now();
-            let connect_timeout = self.config.connect_timeout;
-            now + time::Duration::from_secs(connect_timeout as u64)
-        };
-
-        let cack = v5::ConnAck::from_reason_code(code);
-        let mut packetw = v5::MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
-        loop {
-            let (val, would_block) = match packetw.write(sock) {
-                Ok(args) => args,
-                Err(err) => {
-                    error!("{} problem writing connack packet err:{}", self.prefix, err);
-                    break Err(err);
-                }
-            };
-            packetw = val;
-
-            if would_block && timeout < time::Instant::now() {
-                thread::sleep(SLEEP_10MS);
-            } else if would_block {
-                break err!(
-                    Disconnected,
-                    desc: "{} failed writing connack after {:?}",
-                    self.prefix, time::Instant::now()
-                );
-            } else {
-                info!("{} raddr:{} connection NACK", self.prefix, self.raddr);
-                break Ok(());
-            }
-        }
-    }
-}
+impl Handshake {}

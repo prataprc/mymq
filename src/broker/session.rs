@@ -5,10 +5,10 @@ use std::ops::{Deref, DerefMut};
 use std::{cmp, fmt, mem, net, result};
 
 use crate::broker::{Config, InpSeqno, RetainedTrie, RouteIO, SubscribedTrie};
-use crate::broker::{KeepAlive, Message, OutSeqno};
-use crate::{ClientID, PacketID, Timer, TopicFilter, TopicName};
+use crate::broker::{KeepAlive, KeepAliveArgs, Message, OutSeqno};
+use crate::{ClientID, PacketID, Subscription, Timer, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{PacketRx, PacketTx, QueueStatus};
+use crate::{PacketRx, PacketTx, QueueStatus, RetainForwardRule};
 
 use crate::v5;
 
@@ -87,7 +87,7 @@ pub struct Common {
     /// List of topic-filters subscribed by this client, when ever
     /// SUBSCRIBE/UNSUBSCRIBE messages are committed here, [Cluster::topic_filters]
     /// will also be updated.
-    cs_subscriptions: BTreeMap<TopicFilter, v5::Subscription>,
+    cs_subscriptions: BTreeMap<TopicFilter, Subscription>,
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
     /// every outgoing publish packet.
     cs_oug_seqno: OutSeqno,
@@ -616,14 +616,14 @@ impl Session {
                 self.state.as_mut_subscriptions().get(&filter.topic_filter).is_none();
 
             let publs = match rfr {
-                v5::RetainForwardRule::OnEverySubscribe => {
+                RetainForwardRule::OnEverySubscribe => {
                     shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
                 }
-                v5::RetainForwardRule::OnNewSubscribe if is_new_subscribe => {
+                RetainForwardRule::OnNewSubscribe if is_new_subscribe => {
                     shard.as_retained_topics().match_topic_filter(&filter.topic_filter)
                 }
-                v5::RetainForwardRule::OnNewSubscribe => Vec::default(),
-                v5::RetainForwardRule::Never => Vec::default(),
+                RetainForwardRule::OnNewSubscribe => Vec::default(),
+                RetainForwardRule::Never => Vec::default(),
             };
 
             retain_msgs.extend(publs.into_iter().map(|mut p| {
@@ -1008,7 +1008,7 @@ impl Session {
 
         for filter in sub.filters.iter() {
             let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
-            let subscription = v5::Subscription {
+            let subscription = Subscription {
                 topic_filter: filter.topic_filter.clone(),
 
                 client_id: self.client_id.clone(),
@@ -1063,7 +1063,7 @@ impl Session {
         let mut rcodes = Vec::with_capacity(unsub.filters.len());
 
         for filter in unsub.filters.iter() {
-            let mut subscription = v5::Subscription::default();
+            let mut subscription = Subscription::default();
             subscription.topic_filter = filter.clone();
             subscription.client_id = self.client_id.clone();
 
@@ -1088,7 +1088,7 @@ impl Session {
     }
 }
 
-type HandleSubArgs<'a> = (TopicFilter, &'a v5::Subscription);
+type HandleSubArgs<'a> = (TopicFilter, &'a Subscription);
 
 impl SessionState {
     pub fn incr_oug_qos0(&mut self) -> OutSeqno {
@@ -1233,7 +1233,7 @@ impl SessionState {
     fn commit_unsub<'a, S>(
         &mut self,
         shard: &mut S,
-        subr: v5::Subscription,
+        subr: Subscription,
     ) -> Result<v5::UnsubAckReasonCode>
     where
         S: Shard,
@@ -1333,7 +1333,7 @@ impl SessionState {
 }
 
 impl SessionState {
-    fn as_mut_subscriptions(&mut self) -> &mut BTreeMap<TopicFilter, v5::Subscription> {
+    fn as_mut_subscriptions(&mut self) -> &mut BTreeMap<TopicFilter, Subscription> {
         match self {
             SessionState::Active(active) => &mut active.cs_subscriptions,
             ss => unreachable!("{:?}", ss),
@@ -1369,7 +1369,7 @@ fn flush_to_miot(
     (packet_ids, status.map(msgs))
 }
 
-type PubMatches = BTreeMap<ClientID, (v5::Subscription, Vec<u32>)>;
+type PubMatches = BTreeMap<ClientID, (Subscription, Vec<u32>)>;
 
 // a. Only one message is sent to a client, even with multiple matches.
 // b. subscr_qos is maximum of all matching-subscribption.

@@ -1,7 +1,6 @@
-use std::net::{self, IpAddr, Ipv4Addr};
-
 use crate::{Error, ErrorKind, Result};
 
+#[derive(Clone)]
 pub struct Config {
     /// MQTT network port for each node in this cluster. Once the cluster is
     /// spawned it will listen on all the available interfaces using this port.
@@ -15,14 +14,6 @@ pub struct Config {
     /// * **Default**: [Config::DEF_MQTT_MAX_PACKET_SIZE]
     /// * **Mutable**: No
     pub mqtt_max_packet_size: u32,
-
-    /// MQTT packets are drainded from queues and connections in batches, so that
-    /// all queues will get evenly processed. This parameter defines the batch size
-    /// while draining the message queues.
-    ///
-    /// * **Default**: [Config::DEF_MQTT_PKT_BATCH_SIZE]
-    /// * **Mutable**: No
-    pub mqtt_pkt_batch_size: u32,
 
     /// Read timeout on MQTT socket, in seconds. For every new packet this timeout
     /// will kick in, and within the timeout period if a new packet is not completely
@@ -39,6 +30,14 @@ pub struct Config {
     /// * **Default**: None,
     /// * **Mutable**: No
     pub mqtt_sock_write_timeout: Option<u32>,
+
+    /// Connect handshake timeout on MQTT socket, in seconds. For every new
+    /// connection, this timer will kick in, and within the timeout period if
+    /// connect/ack handshake is not complete, connection will be closed.
+    ///
+    /// * **Default**: [Config::DEF_CONNECT_TIMEOUT]
+    /// * **Mutable**: No
+    pub mqtt_connect_timeout: u32,
 }
 
 impl Default for Config {
@@ -46,9 +45,9 @@ impl Default for Config {
         Config {
             mqtt_port: Self::DEF_MQTT_PORT,
             mqtt_max_packet_size: Self::DEF_MQTT_MAX_PACKET_SIZE,
-            mqtt_pkt_batch_size: Self::DEF_MQTT_PKT_BATCH_SIZE,
             mqtt_sock_read_timeout: None,
             mqtt_sock_write_timeout: None,
+            mqtt_connect_timeout: Self::DEF_MQTT_CONNECT_TIMEOUT,
         }
     }
 }
@@ -68,12 +67,6 @@ impl TryFrom<toml::Value> for Config {
                     as_integer().map(|n| n.to_string())
                 );
                 config_field!(
-                    t,
-                    mqtt_pkt_batch_size,
-                    def,
-                    as_integer().map(|n| n.to_string())
-                );
-                config_field!(
                     opt: t,
                     mqtt_sock_read_timeout,
                     def,
@@ -82,6 +75,12 @@ impl TryFrom<toml::Value> for Config {
                 config_field!(
                     opt: t,
                     mqtt_sock_write_timeout,
+                    def,
+                    as_integer().map(|n| n.to_string())
+                );
+                config_field!(
+                    t,
+                    mqtt_connect_timeout,
                     def,
                     as_integer().map(|n| n.to_string())
                 );
@@ -98,8 +97,8 @@ impl Config {
     pub const DEF_MQTT_PORT: u16 = 1883;
     /// Refer to [Config::mqtt_max_packet_size]
     pub const DEF_MQTT_MAX_PACKET_SIZE: u32 = 1024 * 1024; // default is 1MB.
-    /// Refer to [Config::mqtt_pkt_batch_size]
-    pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
+    /// Refer to [Config::mqtt_connect_timeout]
+    pub const DEF_MQTT_CONNECT_TIMEOUT: u32 = 5; // in seconds.
 }
 
 impl Config {
@@ -111,10 +110,4 @@ impl Config {
             Ok(())
         }
     }
-}
-
-/// Default listen address for MQTT packets: `0.0.0.0:1883`
-pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
-    let port = port.unwrap_or(Config::DEF_MQTT_PORT);
-    net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }

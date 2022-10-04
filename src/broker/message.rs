@@ -11,8 +11,6 @@ use crate::broker::Shard;
 use crate::broker::{Config, InpSeqno, OutSeqno};
 use crate::{ClientID, PacketID, QPacket, QoS, QueueStatus};
 
-use crate::v5;
-
 #[derive(Default)]
 pub struct RouteIO {
     pub disconnected: bool,
@@ -145,15 +143,15 @@ pub enum Message {
     /// Retain publish messages.
     Retain {
         out_seqno: OutSeqno,
-        publish: v5::Publish,
+        publish: QPacket,
     },
     /// Consensus Loop.
     Subscribe {
-        sub: v5::Subscribe,
+        sub: QPacket,
     },
     /// Consensus Loop.
     UnSubscribe {
-        unsub: v5::UnSubscribe,
+        unsub: QPacket,
     },
     /// Incoming PUBLISH packets, QoS > 0 are indexed in the shard instance.
     ShardIndex {
@@ -166,12 +164,12 @@ pub enum Message {
     // round-trip
     /// Incoming PUBLISH Packets received from clients and routed to other local sessions.
     Routed {
-        src_shard_id: u32,    // sending shard-id
-        dst_shard_id: u32,    // receiving shard-id
-        client_id: ClientID,  // receiving client-id
-        inp_seqno: InpSeqno,  // shard's inp_seqno
-        out_seqno: OutSeqno,  // shall be set on the receiving side.
-        publish: v5::Publish, // publish packet, as received from publishing client
+        src_shard_id: u32,   // sending shard-id
+        dst_shard_id: u32,   // receiving shard-id
+        client_id: ClientID, // receiving client-id
+        inp_seqno: InpSeqno, // shard's inp_seqno
+        out_seqno: OutSeqno, // shall be set on the receiving side.
+        publish: QPacket,    // publish packet, as received from publishing client
     },
     /// Message that is periodically published by a session to other local shards.
     LocalAck {
@@ -184,7 +182,7 @@ pub enum Message {
     /// sending them downstream.
     Oug {
         out_seqno: OutSeqno,
-        publish: v5::Publish,
+        publish: QPacket,
     },
 
     // Consensus
@@ -193,7 +191,7 @@ pub enum Message {
         config: Config,
         client_id: ClientID,
         shard_id: u32,
-        connect: v5::Connect,
+        connect: QPacket,
         clean_start: bool,
     },
     RemSession {
@@ -286,7 +284,7 @@ impl<'a> Arbitrary<'a> for Message {
 }
 
 impl Message {
-    pub fn new_conn_ack(connack: v5::ConnAck) -> Message {
+    pub fn new_conn_ack(connack: QPacket) -> Message {
         Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
     }
 

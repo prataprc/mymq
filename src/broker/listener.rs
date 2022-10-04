@@ -6,12 +6,12 @@ use std::{fmt, io, mem, net, result, sync::Arc, time};
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Cluster, Config};
 use crate::{Error, ErrorKind, Result};
-use crate::{QueueStatus, ToJson};
+use crate::{Protocol, QueueStatus, ToJson};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 
-/// Type binds to MQTT port and listens for incoming connection.
+/// Type binds to network port, like MQTT, and listens for incoming connection.
 ///
 /// This type is threadable and singleton.
 pub struct Listener {
@@ -19,6 +19,7 @@ pub struct Listener {
     name: String,
     prefix: String,
     config: Config,
+    proto: Protocol,
     inner: Inner,
 }
 
@@ -47,7 +48,7 @@ struct RunLoop {
     /// Mio poller for asynchronous handling, aggregate events from listener and
     /// thread-waker.
     poll: mio::Poll,
-    /// MQTT listener listening on `port`.
+    /// TCP listener listening on `port`.
     listener: mio::net::TcpListener,
     /// Tx-handle to send messages to cluster.
     cluster: Box<Cluster>,
@@ -98,6 +99,7 @@ impl Default for Listener {
             name: config.name.clone(),
             prefix: String::default(),
             config,
+            proto: Protocol::new_v5_protocol(toml::Value::default()),
             inner: Inner::Init,
         };
         def.prefix = def.prefix();
@@ -119,7 +121,13 @@ impl Drop for Listener {
 
 impl ToJson for Listener {
     fn to_config_json(&self) -> String {
-        format!(concat!("{{ {:?}: {} }}"), "port", self.config.port)
+        format!(
+            concat!("{{ {:?}: {:?}, {:?}: {} }}"),
+            "name",
+            self.config.name,
+            "port",
+            self.proto.to_listen_port()
+        )
     }
 
     fn to_stats_json(&self) -> String {
@@ -138,11 +146,12 @@ impl Listener {
 
     /// Create a listener from configuration. Listener shall be in `Init` state. To start
     /// this listener thread call [Listener::spawn].
-    pub fn from_config(config: &Config) -> Result<Listener> {
+    pub fn from_config(config: &Config, proto: Protocol) -> Result<Listener> {
         let mut val = Listener {
             name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
+            proto,
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -154,19 +163,23 @@ impl Listener {
         use mio::{Interest, Waker};
 
         let mut listener = {
-            let sock_addr: net::SocketAddr = self.server_address().parse().unwrap();
+            let sock_addr: net::SocketAddr = self.proto.to_listen_address();
             mio::net::TcpListener::bind(sock_addr)?
         };
 
-        let interests = Interest::READABLE;
-        let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
-        poll.registry().register(&mut listener, Self::TOKEN_LISTENER, interests)?;
+        let poll = {
+            let interests = Interest::READABLE;
+            let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
+            poll.registry().register(&mut listener, Self::TOKEN_LISTENER, interests)?;
+            poll
+        };
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
 
         let mut listener = Listener {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
+            proto: self.proto.clone(),
             inner: Inner::Main(RunLoop {
                 poll,
                 listener,
@@ -185,9 +198,12 @@ impl Listener {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
+            proto: self.proto.clone(),
             inner: Inner::Handle(waker, thrd),
         };
         listener.prefix = listener.prefix();
+
+        info!("{} port:{} listening ... ", self.prefix, self.proto.to_listen_port());
 
         Ok(listener)
     }
@@ -207,7 +223,7 @@ impl Listener {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(_waker, thrd) => {
-                thrd.request(Request::Close).ok();
+                app_fatal!(self, thrd.request(Request::Close).flatten());
                 thrd.close_wait()
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -325,17 +341,20 @@ impl Listener {
 
         match listener.accept() {
             Ok((sock, addr)) => {
-                info!("{} raddr:{} incoming CONNECT", self.prefix, addr);
+                info!("{} raddr:{} incoming connection", self.prefix, addr);
                 let raddr = sock.peer_addr().unwrap();
 
                 assert_eq!(raddr, addr);
+
                 // for every successful accept launch a handshake thread.
                 let hs = Handshake {
                     prefix: format!("<h:{}>", self.config.name),
-                    sock: Some(sock),
                     raddr,
                     config: self.config.clone(),
+
+                    proto: self.proto.clone(),
                     cluster: cluster.to_tx("handshake"),
+                    sock: Some(sock),
                 };
                 let thrd = Thread::spawn_sync("handshake", 1, hs);
                 thrd.drop(); // alternative to close_wait()
@@ -379,6 +398,16 @@ impl Listener {
 }
 
 impl Listener {
+    fn prefix(&self) -> String {
+        let state = match &self.inner {
+            Inner::Init => "init",
+            Inner::Handle(_, _) => "hndl",
+            Inner::Main(_) => "main",
+            Inner::Close(_) => "close",
+        };
+        format!("<l:{}:{}>", self.name, state)
+    }
+
     fn incr_n_polls(&mut self) {
         match &mut self.inner {
             Inner::Main(RunLoop { stats, .. }) => stats.n_polls += 1,
@@ -400,20 +429,6 @@ impl Listener {
             Inner::Close(finstate) => finstate.stats.n_requests += n,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
-    }
-
-    fn server_address(&self) -> String {
-        format!("0.0.0.0:{}", self.config.port)
-    }
-
-    fn prefix(&self) -> String {
-        let state = match &self.inner {
-            Inner::Init => "init",
-            Inner::Handle(_, _) => "hndl",
-            Inner::Main(_) => "main",
-            Inner::Close(_) => "close",
-        };
-        format!("<l:{}:{}>", self.name, state)
     }
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {

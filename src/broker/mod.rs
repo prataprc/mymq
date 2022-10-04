@@ -8,9 +8,6 @@ pub const POLL_EVENTS_SIZE: usize = 1024;
 /// Control Queue is processed in batches of this constant.
 pub const CONTROL_CHAN_SIZE: usize = 1024;
 
-/// Used by threads to sleep wait for an event to accur..
-pub const SLEEP_10MS: std::time::Duration = std::time::Duration::from_millis(10);
-
 /// Type alias for back-channel to application.
 ///
 /// While creating the Cluster, application can pass an mpsc channel to [Cluster] that
@@ -56,44 +53,38 @@ pub trait Shardable {
 }
 
 pub mod design;
-
-mod config;
-//mod flush;
-//mod keep_alive;
-//mod message;
-//mod session;
-//mod spinlock;
-//mod thread;
-//mod ttrie;
-//
-//mod cluster;
-//mod handshake;
-//mod listener;
-//mod miot;
-//mod rebalance;
-//mod shard;
-//mod ticker;
-
 // TODO: mod consensus;
 // TODO: mod rr;
 
-//pub use cluster::{Cluster, Node};
+mod config;
+mod spinlock;
+mod thread;
+mod ttrie;
 pub use config::{Config, ConfigNode};
-//pub use flush::Flusher;
-//pub use handshake::Handshake;
+pub use spinlock::Spinlock;
+pub use thread::{Rx, Thread, Threadable, Tx};
+pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
+
+//mod keep_alive;
+//mod message;
 //pub use keep_alive::KeepAlive;
-//pub use listener::Listener;
 //pub use message::{msg_channel, ConsensIO, Message, MsgRx, MsgTx, RouteIO};
+
+//mod flush;
+mod cluster;
+mod handshake;
+mod listener;
+//mod miot;
+//mod shard;
+//mod session;
+//mod ticker;
+mod rebalance;
+
+pub use cluster::{Cluster, Node};
+//pub use flush::Flusher;
+pub use handshake::Handshake;
+pub use listener::Listener;
 //pub use miot::Miot;
-//pub use session::Session;
 //pub use shard::Shard;
-//pub use spinlock::Spinlock;
-//pub use thread::{Rx, Thread, Threadable, Tx};
 //pub use ticker::Ticker;
-//pub use ttrie::{route_match, RetainedTrie, SubscribedTrie};
-//pub use session::{SessionArgsActive, SessionArgsReplica};
-//
-//pub use crate::{util, IterTopicPath};
-//pub use crate::{ClientID, PacketID, Packetize, Timer, ToJson, TopicFilter, TopicName};
-//pub use crate::{Error, ErrorKind, ReasonCode, Result};
-//pub use crate::{PacketRx, PacketTx, Protocol, QPacket, QueueStatus, Socket};
+//pub use session::{SessionArgsActive, SessionArgsReplica, Session};

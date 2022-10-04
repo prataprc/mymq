@@ -33,14 +33,6 @@ pub struct Config {
     /// * **Mutable**: No
     pub nodes: Vec<ConfigNode>,
 
-    /// Connect handshake timeout on message-queue socket, in seconds. For every new
-    /// connection, this timer will kick in, and within the timeout period if
-    /// connect/ack handshake is not complete, connection will be closed.
-    ///
-    /// * **Default**: [Config::DEF_CONNECT_TIMEOUT]
-    /// * **Mutable**: No
-    pub connect_timeout: u32,
-
     /// Flush timeout on message-queue socket, in seconds. If broker decides to shutdown
     /// a connection, because it is broken/half-broken or Malformed packets or due to
     /// ProtocolError, a flush thread will take over the connection and flush
@@ -51,6 +43,13 @@ pub struct Config {
     /// * **Default**: [Config::DEF_FLUSH_TIMEOUT]
     /// * **Mutable**: No
     pub flush_timeout: u32,
+
+    /// Packets are read and written to sockets in batches. This parameter defines the
+    /// batch size.
+    ///
+    /// * **Default**: [Config::DEF_PKT_BATCH_SIZE]
+    /// * **Mutable**: No
+    pub pkt_batch_size: u32,
 
     /// MQTT Keep Alive, in secs, that server can suggest to the client. If configured
     /// with non-zero value, clients should use this keep-alive instead of the client
@@ -127,8 +126,8 @@ impl Default for Config {
             max_nodes: Self::DEF_MAX_NODES,
             num_shards: num_cores_ceiled(),
             nodes: vec![node],
-            connect_timeout: Self::DEF_CONNECT_TIMEOUT,
             flush_timeout: Self::DEF_FLUSH_TIMEOUT,
+            pkt_batch_size: Self::DEF_PKT_BATCH_SIZE,
             mqtt_keep_alive: None,
             mqtt_keep_alive_factor: Self::DEF_MQTT_KEEP_ALIVE_FACTOR,
             mqtt_receive_maximum: Self::DEF_MQTT_RECEIVE_MAXIMUM,
@@ -154,13 +153,13 @@ impl TryFrom<toml::Value> for Config {
                 config_field!(t, name, def, as_str());
                 config_field!(t, max_nodes, def, as_integer().map(|n| n.to_string()));
                 config_field!(t, num_shards, def, as_integer().map(|n| n.to_string()));
+                config_field!(t, flush_timeout, def, as_integer().map(|n| n.to_string()));
                 config_field!(
                     t,
-                    connect_timeout,
+                    pkt_batch_size,
                     def,
                     as_integer().map(|n| n.to_string())
                 );
-                config_field!(t, flush_timeout, def, as_integer().map(|n| n.to_string()));
                 config_field!(
                     opt: t,
                     mqtt_keep_alive,
@@ -235,10 +234,10 @@ impl TryFrom<toml::Value> for Config {
 impl Config {
     /// Refer to [Config::max_nodes]
     pub const DEF_MAX_NODES: u32 = 1;
-    /// Refer to [Config::connect_timeout]
-    pub const DEF_CONNECT_TIMEOUT: u32 = 5; // in seconds.
     /// Refer to [Config::flush_timeout]
     pub const DEF_FLUSH_TIMEOUT: u32 = 10; // in seconds.
+    /// Refer to [Config::mqtt_pkt_batch_size]
+    pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::mqtt_keep_alive_factor]
     pub const DEF_MQTT_KEEP_ALIVE_FACTOR: F32 = F32(1.5); // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]

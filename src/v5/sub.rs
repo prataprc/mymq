@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::v5::{FixedHeader, Property, PropertyType, UserProperty};
-use crate::{Blob, Packetize, QoS, TopicFilter, VarU32};
+use crate::{Blob, Packetize, QoS, RetainForwardRule, TopicFilter, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Subscribe";
@@ -73,46 +73,6 @@ impl SubscriptionOpt {
 
     fn validate(&self) -> Result<()> {
         Ok(())
-    }
-}
-
-/// RetainForwardRule part of Subscription option defined by MQTT spec.
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum RetainForwardRule {
-    OnEverySubscribe = 0,
-    OnNewSubscribe = 1,
-    Never = 2,
-}
-
-impl Default for RetainForwardRule {
-    fn default() -> RetainForwardRule {
-        RetainForwardRule::OnEverySubscribe
-    }
-}
-
-impl TryFrom<u8> for RetainForwardRule {
-    type Error = Error;
-
-    fn try_from(val: u8) -> Result<RetainForwardRule> {
-        let val = match val {
-            0 => RetainForwardRule::OnEverySubscribe,
-            1 => RetainForwardRule::OnNewSubscribe,
-            2 => RetainForwardRule::Never,
-            _ => err!(MalformedPacket, code: MalformedPacket, "{} forbidden packet", PP)?,
-        };
-
-        Ok(val)
-    }
-}
-
-impl From<RetainForwardRule> for u8 {
-    fn from(val: RetainForwardRule) -> u8 {
-        match val {
-            RetainForwardRule::OnEverySubscribe => 0,
-            RetainForwardRule::OnNewSubscribe => 1,
-            RetainForwardRule::Never => 2,
-        }
     }
 }
 

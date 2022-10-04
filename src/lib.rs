@@ -54,6 +54,9 @@
 #![feature(map_first_last)]
 #![feature(result_flattening)]
 
+/// Used by threads to sleep wait for an event to accur..
+pub const SLEEP_10MS: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Type alias for Result returned by functions and methods defined in this package.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -106,6 +109,7 @@ pub use protocol::{Protocol, QPacket, Socket};
 pub use queue::{new_packet_queue, PacketRx, PacketTx, QueueStatus};
 pub use timer::Timer;
 pub use types::{Blob, ClientID, PacketID, QoS, TopicFilter, TopicName, VarU32};
+pub use types::{RetainForwardRule, Subscription};
 
 #[macro_use]
 pub mod v5;

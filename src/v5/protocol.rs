@@ -1,19 +1,203 @@
-use log::{error, trace};
+use log::{error, info, trace};
 
-use std::{collections::VecDeque, io, mem, net, time};
+use std::{io, mem, net, thread, time};
 
 use crate::v5::{self, Config};
-use crate::{ClientID, PacketRx, PacketTx, Packetize, QPacket, QueueStatus};
-use crate::{ErrorKind, Result};
+use crate::{Blob, ClientID, Packetize, QPacket, QueueStatus, SLEEP_10MS};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub type QueuePkt = QueueStatus<QPacket>;
 
 /// Type implement Protocol bridge between MQTT-v5 and broker.
+#[derive(Clone)]
 pub struct Protocol {
     config: Config,
 }
 
 impl Protocol {
+    pub fn new(config: toml::Value) -> Result<Protocol> {
+        let config = Config::try_from(config)?;
+        Ok(Protocol { config })
+    }
+}
+
+impl Protocol {
+    pub fn handshake(
+        &self,
+        prefix: &str,
+        mut conn: mio::net::TcpStream,
+    ) -> Result<Socket> {
+        use crate::v5::ConnAckReasonCode;
+
+        let raddr = conn.peer_addr().unwrap();
+        let laddr = conn.local_addr().unwrap();
+
+        let mut packetr = v5::MQTTRead::new(self.config.mqtt_max_packet_size);
+        let timeout = {
+            let now = time::Instant::now();
+            now + time::Duration::from_secs(self.config.mqtt_connect_timeout as u64)
+        };
+
+        info!("{} raddr:{} laddr:{} new connection", prefix, raddr, laddr);
+
+        loop {
+            packetr = match packetr.read(&mut conn) {
+                Ok((val, _would_block)) => val,
+                Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                    error!("{}, fail read, err:{}", prefix, err);
+                    let code = ConnAckReasonCode::try_from(err.code() as u8).unwrap();
+                    self.send_connack(prefix, raddr, code, &mut conn)?;
+                    break Err(err);
+                }
+                Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                    error!("{}, fail read, err:{}", prefix, err);
+                    let code = ConnAckReasonCode::try_from(err.code() as u8).unwrap();
+                    self.send_connack(prefix, raddr, code, &mut conn)?;
+                    break Err(err);
+                }
+                Err(err) => unreachable!("unexpected error {}", err),
+            };
+            match &packetr {
+                v5::MQTTRead::Init { .. } if time::Instant::now() < timeout => {
+                    thread::sleep(SLEEP_10MS);
+                }
+                v5::MQTTRead::Header { .. } if time::Instant::now() < timeout => {
+                    thread::sleep(SLEEP_10MS);
+                }
+                v5::MQTTRead::Remain { .. } if time::Instant::now() < timeout => {
+                    thread::sleep(SLEEP_10MS);
+                }
+                v5::MQTTRead::Fin { .. } => match packetr.parse() {
+                    Ok(v5::Packet::Connect(connect)) => match connect.validate() {
+                        Ok(()) => break self.new_socket(conn, connect),
+                        Err(err) => {
+                            error!("{}, invalid connect err:{}", prefix, err);
+                            let code = {
+                                let code = err.code();
+                                ConnAckReasonCode::try_from(code as u8).unwrap()
+                            };
+                            self.send_connack(prefix, raddr, code, &mut conn)?;
+                            break Err(err);
+                        }
+                    },
+                    Ok(pkt) => {
+                        let pt = pkt.to_packet_type();
+                        let err: Result<Socket> = err!(
+                            ProtocolError,
+                            code: ProtocolError,
+                            "{} packet:{:?} unexpect in connection",
+                            prefix,
+                            pt
+                        );
+                        let code = {
+                            let code = ReasonCode::ProtocolError;
+                            ConnAckReasonCode::try_from(code as u8).unwrap()
+                        };
+                        self.send_connack(prefix, raddr, code, &mut conn)?;
+                        break err;
+                    }
+                    Err(err) if err.kind() == ErrorKind::MalformedPacket => {
+                        error!("{} fail parse, err:{}", prefix, err);
+                        let code = ConnAckReasonCode::try_from(err.code() as u8).unwrap();
+                        self.send_connack(prefix, raddr, code, &mut conn)?;
+                        break Err(err);
+                    }
+                    Err(err) if err.kind() == ErrorKind::ProtocolError => {
+                        error!("{} fail parse, err:{}", prefix, err);
+                        let code = ConnAckReasonCode::try_from(err.code() as u8).unwrap();
+                        self.send_connack(prefix, raddr, code, &mut conn)?;
+                        break Err(err);
+                    }
+                    Err(err) => unreachable!("unexpected error {}", err),
+                },
+                _ => {
+                    let err: Result<Socket> = err!(
+                        InvalidInput,
+                        code: UnspecifiedError,
+                        "{} timeout:{:?} fail handshake",
+                        prefix,
+                        time::Instant::now()
+                    );
+                    let code = {
+                        let code = ReasonCode::UnspecifiedError;
+                        ConnAckReasonCode::try_from(code as u8).unwrap()
+                    };
+                    self.send_connack(prefix, raddr, code, &mut conn)?;
+                    break err;
+                }
+            };
+        }
+    }
+
+    fn send_connack<W>(
+        &self,
+        prefix: &str,
+        raddr: net::SocketAddr,
+        code: v5::ConnAckReasonCode,
+        conn: &mut W,
+    ) -> Result<()>
+    where
+        W: io::Write,
+    {
+        let max_size = self.config.mqtt_max_packet_size;
+        let timeout = {
+            let now = time::Instant::now();
+            let connect_timeout = self.config.mqtt_connect_timeout;
+            now + time::Duration::from_secs(connect_timeout as u64)
+        };
+
+        let cack = v5::ConnAck::from_reason_code(code);
+        let mut packetw = v5::MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size);
+        loop {
+            let (val, would_block) = match packetw.write(conn) {
+                Ok(args) => args,
+                Err(err) => {
+                    error!("{} problem writing connack packet err:{}", prefix, err);
+                    break Err(err);
+                }
+            };
+            packetw = val;
+
+            if would_block && timeout < time::Instant::now() {
+                thread::sleep(SLEEP_10MS);
+            } else if would_block {
+                break err!(
+                    Disconnected,
+                    desc: "{} failed writing connack after {:?}",
+                    prefix, time::Instant::now()
+                );
+            } else {
+                info!("{} raddr:{} connection NACK", prefix, raddr);
+                break Ok(());
+            }
+        }
+    }
+
+    fn new_socket(&self, conn: mio::net::TcpStream, cpkt: v5::Connect) -> Result<Socket> {
+        let socket = Socket {
+            client_id: ClientID::from(&cpkt),
+            config: self.config.clone(),
+            conn,
+            connect: cpkt,
+            token: mio::Token(0),
+            rd: Source::default(),
+            wt: Sink::default(),
+        };
+
+        Ok(socket)
+    }
+}
+
+impl Protocol {
+    pub fn to_listen_address(&self) -> net::SocketAddr {
+        let port = self.config.mqtt_port;
+        net::SocketAddr::new(net::IpAddr::V4(net::Ipv4Addr::new(0, 0, 0, 0)), port)
+    }
+
+    pub fn to_listen_port(&self) -> u16 {
+        self.config.mqtt_port
+    }
+
     pub fn max_packet_size(&self) -> u32 {
         self.config.mqtt_max_packet_size
     }
@@ -30,22 +214,18 @@ pub struct Socket {
     wt: Sink,
 }
 
+#[derive(Default)]
 struct Source {
     pr: v5::MQTTRead,
     timeout: time::Duration,
     deadline: Option<time::SystemTime>,
-    session_tx: PacketTx,
-    // All incoming MQTT packets on this socket first land here.
-    packets: VecDeque<v5::Packet>,
 }
 
+#[derive(Default)]
 struct Sink {
     pw: v5::MQTTWrite,
     timeout: time::Duration,
     deadline: Option<time::SystemTime>,
-    miot_rx: PacketRx,
-    // All out-going MQTT packets on this socket first land here.
-    packets: VecDeque<v5::Packet>,
 }
 
 impl mio::event::Source for Socket {
@@ -88,59 +268,20 @@ impl Socket {
     pub fn set_mio_token(&mut self, token: mio::Token) {
         self.token = token;
     }
+
+    pub fn to_protocol(&self) -> Protocol {
+        Protocol { config: self.config.clone() }
+    }
 }
 
 impl Socket {
-    // TODO
-    //let rd = socket::Source {
-    //    pr: v5::MQTTRead::new(max_packet_size),
-    //    timeout: time::Duration::default(),
-    //    deadline: None,
-    //    session_tx,
-    //    packets: VecDeque::default(),
-    //};
-    //let wt = socket::Sink {
-    //    pw: v5::MQTTWrite::new(&[], args.max_packet_size),
-    //    timeout: time::Duration::default(),
-    //    deadline: None,
-    //    miot_rx,
-    //    packets: VecDeque::default(),
-    //};
-
-    // returned QueueStatus shall not carry any packets, packets are booked in Socket
-    // Error shall be MalformedPacket or ProtocolError.
-    pub fn read_packets(&mut self, prefix: &str) -> Result<QueuePkt> {
-        let pkt_batch_size = self.config.mqtt_pkt_batch_size as usize;
-
-        // before reading from socket, send remaining packets to shard.
-        loop {
-            match self.send_upstream(prefix) {
-                QueueStatus::Ok(_) => (),
-                status @ QueueStatus::Block(_) => break Ok(status),
-                status @ QueueStatus::Disconnected(_) => break Ok(status),
-            }
-
-            let mut status = self.read_packet(prefix)?;
-            self.rd.packets.extend(status.take_values().into_iter());
-
-            match status {
-                QueueStatus::Ok(_) if self.rd.packets.len() < pkt_batch_size => (),
-                QueueStatus::Ok(_) => break Ok(self.send_upstream(prefix)),
-                QueueStatus::Block(_) => break Ok(self.send_upstream(prefix)),
-                status @ QueueStatus::Disconnected(_) if self.rd.packets.len() == 0 => {
-                    break Ok(status.replace(Vec::new()));
-                }
-                QueueStatus::Disconnected(_) => break Ok(self.send_upstream(prefix)),
-            };
-        }
-    }
-
+    // return a single packet, if fully received.
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
-    fn read_packet(&mut self, prefix: &str) -> Result<QueueStatus<v5::Packet>> {
+    pub fn read_packet(&mut self, prefix: &str) -> Result<QueuePkt> {
         use crate::v5::MQTTRead::{Fin, Header, Init, Remain};
 
-        let disconnected = QueueStatus::<v5::Packet>::Disconnected(Vec::new());
+        let disconnected = QueueStatus::<QPacket>::Disconnected(Vec::new());
 
         let pr = mem::replace(&mut self.rd.pr, v5::MQTTRead::default());
         let mut pr = match pr.read(&mut self.conn) {
@@ -164,7 +305,7 @@ impl Socket {
                 self.set_read_timeout(false, self.config.mqtt_sock_read_timeout);
                 let pkt = pr.parse()?;
                 pr = pr.reset();
-                QueueStatus::Ok(vec![pkt])
+                QueueStatus::Ok(vec![pkt.into()])
             }
             v5::MQTTRead::None => unreachable!(),
         };
@@ -172,139 +313,57 @@ impl Socket {
         let _none = mem::replace(&mut self.rd.pr, pr);
         Ok(status)
     }
-
-    // QueueStatus shall not carry any packets
-    fn send_upstream(&mut self, prefix: &str) -> QueueStatus<QPacket> {
-        let session_tx = self.rd.session_tx.clone(); // shard woken when dropped
-
-        let pkts: Vec<QPacket> = {
-            let pkts = mem::replace(&mut self.rd.packets, VecDeque::default());
-            pkts.into_iter().map(QPacket::from).collect()
-        };
-        let mut status = session_tx.try_sends(prefix, pkts);
-        self.rd.packets =
-            // left over packets
-            status.take_values().into_iter().map(v5::Packet::from).collect();
-
-        status
-    }
 }
 
 impl Socket {
-    // Return (QueueStatus, no-of-packets-written, no-of-bytes-written)
-    pub fn write_packets(&mut self, prefix: &str) -> (QueuePkt, usize, usize) {
-        // before reading from socket, send remaining packets to connection.
-        let (mut items, mut bytes) = (0_usize, 0_usize);
-        loop {
-            match self.flush_packets(prefix) {
-                (QueueStatus::Ok(_), a, b) => {
-                    items += a;
-                    bytes += b;
-                }
-                (status @ QueueStatus::Block(_), a, b) => {
-                    items += a;
-                    bytes += b;
-                    break (status, items, bytes);
-                }
-                (status @ QueueStatus::Disconnected(_), a, b) => {
-                    items += a;
-                    bytes += b;
-                    break (status, items, bytes);
-                }
-            }
-
-            let mut status = self.wt.miot_rx.try_recvs(prefix);
-            self.wt
-                .packets
-                .extend(status.take_values().into_iter().map(|p| v5::Packet::from(p)));
-
-            match status {
-                QueueStatus::Ok(_) => (),
-                QueueStatus::Block(_) => {
-                    let (status, a, b) = self.flush_packets(prefix);
-                    items += a;
-                    bytes += b;
-                    break (status, items, bytes);
-                }
-                status @ QueueStatus::Disconnected(_) => break (status, items, bytes),
-            }
-        }
-    }
-
-    // QueueStatus shall not carry any packets, (queue, items, bytes)
-    pub fn flush_packets(&mut self, prefix: &str) -> (QueuePkt, usize, usize) {
+    // QueueStatus shall not carry any packets
+    pub fn write_packet(&mut self, prefix: &str, blob: Option<Blob>) -> QueuePkt {
+        use crate::v5::MQTTWrite::{Fin, Init, Remain};
         use std::io::Write;
 
-        let mut iter =
-            mem::replace(&mut self.wt.packets, VecDeque::default()).into_iter();
+        let mut pw = match (blob, &self.wt.pw) {
+            (Some(blob), Fin { .. }) => {
+                if let Err(err) = self.conn.flush() {
+                    error!("{} fail conn.flush() err:{}", prefix, err);
+                    return QueueStatus::Disconnected(Vec::new());
+                }
 
-        let (mut items, mut bytes) = (0_usize, 0_usize);
-
-        let status = loop {
-            match self.write_packet(prefix) {
-                QueueStatus::Ok(_) => (),
-                s @ QueueStatus::Block(_) => break s.replace(Vec::new()),
-                s @ QueueStatus::Disconnected(_) => break s.replace(Vec::new()),
+                let pw = mem::replace(&mut self.wt.pw, v5::MQTTWrite::default());
+                pw.reset(blob.as_ref())
             }
-            if let Some(packet) = iter.next() {
-                let blob = match packet.encode() {
-                    Ok(blob) => blob,
-                    Err(err) => {
-                        let pt = packet.to_packet_type();
-                        error!("{} packet:{:?} skipping err:{}", prefix, pt, err);
-                        continue;
-                    }
-                };
-                bytes += blob.as_ref().len();
-                match self.conn.flush() {
-                    Ok(()) => {
-                        let mut pw = {
-                            let dflt = v5::MQTTWrite::default();
-                            mem::replace(&mut self.wt.pw, dflt)
-                        };
-                        items += 1;
-                        pw = pw.reset(blob.as_ref());
-                        let _none = mem::replace(&mut self.wt.pw, pw);
-                    }
-                    Err(_) => break QueueStatus::Disconnected(Vec::new()),
-                };
-            } else {
-                break QueueStatus::Ok(Vec::new());
-            }
+            (Some(_blob), _) => unreachable!(),
+            _ => mem::replace(&mut self.wt.pw, v5::MQTTWrite::default()),
         };
 
-        self.wt.packets.extend(iter);
+        let write_timeout = self.config.mqtt_sock_write_timeout;
+        let timeout = self.wt.timeout;
 
-        (status, items, bytes)
-    }
-
-    // QueueStatus shall not carry any packets
-    fn write_packet(&mut self, prefix: &str) -> QueueStatus<v5::Packet> {
-        use crate::v5::MQTTWrite::{Fin, Init, Remain};
-
-        let pw = mem::replace(&mut self.wt.pw, v5::MQTTWrite::default());
-        let (res, pw) = match pw.write(&mut self.conn) {
-            Ok((pw, _would_block)) => match &pw {
-                Init { .. } | Remain { .. } if !self.write_elapsed() => {
-                    trace!("{} write retrying", prefix);
-                    self.set_write_timeout(true, self.config.mqtt_sock_write_timeout);
-                    (QueueStatus::Block(Vec::new()), pw)
+        let (res, pw) = loop {
+            pw = match pw.write(&mut self.conn) {
+                Ok((pw, _would_block)) => match &pw {
+                    Init { .. } | Remain { .. } if !self.write_elapsed() => {
+                        trace!("{} write retrying", prefix);
+                        self.set_write_timeout(true, write_timeout);
+                        pw
+                        // TODO: thread yield ?
+                    }
+                    Init { .. } | Remain { .. } => {
+                        self.set_write_timeout(false, write_timeout);
+                        error!("{} wt_timeout:{:?} disconnecting..", prefix, timeout);
+                        break (QueueStatus::Disconnected(Vec::new()), pw);
+                    }
+                    Fin { .. } => {
+                        self.set_write_timeout(false, write_timeout);
+                        break (QueueStatus::Ok(Vec::new()), pw);
+                    }
+                    v5::MQTTWrite::None => unreachable!(),
+                },
+                Err(err) if err.kind() == ErrorKind::Disconnected => {
+                    let val = v5::MQTTWrite::default();
+                    break (QueueStatus::Disconnected(Vec::new()), val);
                 }
-                Init { .. } | Remain { .. } => {
-                    self.set_write_timeout(false, self.config.mqtt_sock_write_timeout);
-                    error!("{} wt_timeout:{:?} disconnecting..", prefix, self.wt.timeout);
-                    (QueueStatus::Disconnected(Vec::new()), pw)
-                }
-                Fin { .. } => {
-                    self.set_write_timeout(false, self.config.mqtt_sock_write_timeout);
-                    (QueueStatus::Ok(Vec::new()), pw)
-                }
-                v5::MQTTWrite::None => unreachable!(),
-            },
-            Err(err) if err.kind() == ErrorKind::Disconnected => {
-                (QueueStatus::Disconnected(Vec::new()), v5::MQTTWrite::default())
+                Err(err) => unreachable!("unexpected error: {}", err),
             }
-            Err(err) => unreachable!("unexpected error: {}", err),
         };
 
         let _none = mem::replace(&mut self.wt.pw, pw);

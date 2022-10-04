@@ -429,7 +429,7 @@ impl Client {
     ///
     ///     let filter: TopicFilter = "#".into();
     ///     let opt = {
-    ///         let fwdrule = v5::RetainForwardRule::OnNewSubscribe;
+    ///         let fwdrule = RetainForwardRule::OnNewSubscribe;
     ///         let retain_as_published = true;
     ///         let no_local = true;
     ///         let qos = QoS::AtMostOnce;

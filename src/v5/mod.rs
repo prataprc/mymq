@@ -104,10 +104,10 @@ mod packet;
 mod protocol;
 mod types;
 
-pub use config::{mqtt_listen_address4, Config};
+pub use config::Config;
 pub use packet::{MQTTRead, MQTTWrite};
 pub use protocol::{Protocol, Socket};
-pub use types::{FixedHeader, MqttProtocol, Packet, PacketType, Property, Subscription};
+pub use types::{FixedHeader, MqttProtocol, Packet, PacketType, Property};
 pub use types::{PayloadFormat, PropertyType, UserProperty};
 
 mod auth;
@@ -130,7 +130,6 @@ pub use disconnect::{DisconnProperties, DisconnReasonCode, Disconnect};
 pub use ping::{PingReq, PingResp};
 pub use pubaclc::{Pub, PubProperties};
 pub use publish::{Publish, PublishProperties};
-pub use sub::RetainForwardRule;
 pub use sub::{Subscribe, SubscribeFilter, SubscribeProperties, SubscriptionOpt};
 pub use suback::{SubAck, SubAckProperties, SubAckReasonCode};
 pub use unsub::{UnSubscribe, UnSubscribeProperties};
