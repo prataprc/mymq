@@ -105,14 +105,14 @@ pub use error::{Error, ErrorKind, ReasonCode};
 pub use protocol::{Protocol, QPacket, Socket};
 pub use queue::{new_packet_queue, PacketRx, PacketTx, QueueStatus};
 pub use timer::Timer;
-pub use types::{Blob, ClientID, PacketID, TopicFilter, TopicName, VarU32};
+pub use types::{Blob, ClientID, PacketID, QoS, TopicFilter, TopicName, VarU32};
 
 #[macro_use]
 pub mod v5;
 pub mod util;
 
-#[cfg(feature = "broker")]
-pub mod broker;
+//#[cfg(feature = "broker")]
+//pub mod broker;
 
 #[cfg(feature = "netw")]
 pub mod netw;

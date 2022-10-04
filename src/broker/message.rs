@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, fmt, net, result};
 use crate::broker::SessionArgsReplica;
 #[allow(unused_imports)]
 use crate::broker::Shard;
-use crate::broker::{ClientID, PacketID};
+use crate::broker::{ClientID, PacketID, QPacket, QoS};
 use crate::broker::{Config, InpSeqno, OutSeqno, QueueStatus};
 
 use crate::v5;
@@ -140,7 +140,7 @@ pub enum Message {
     /// SUBACK   - happens after SUBSCRIBE is commited to [Shard].
     /// UNSUBACK - happens after UNSUBSCRIBE is commited to [Shard].
     ClientAck {
-        packet: v5::Packet,
+        packet: QPacket,
     },
     /// Retain publish messages.
     Retain {
@@ -160,7 +160,7 @@ pub enum Message {
         src_client_id: ClientID,
         inp_seqno: InpSeqno,
         packet_id: PacketID,
-        qos: v5::QoS,
+        qos: QoS,
     },
 
     // round-trip

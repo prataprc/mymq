@@ -3,8 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{Blob, Error, ErrorKind, Packetize, ReasonCode, Result, VarU32};
 use crate::v5::{FixedHeader, PacketType, Property, PropertyType, UserProperty};
+use crate::{Blob, Packetize, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Auth";
 

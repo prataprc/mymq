@@ -2,10 +2,10 @@
 use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::ops::{Deref, DerefMut};
-use std::{fmt, result};
+use std::{cmp, fmt, mem, result};
 
+use crate::{util, IterTopicPath, Packetize};
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{IterTopicPath, Packetize};
 
 /// Type alias for PacketID as u16.
 pub type PacketID = u16;
@@ -393,6 +393,56 @@ impl TopicFilter {
     }
 }
 
+/// Quality of service
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum QoS {
+    AtMostOnce = 0,
+    AtLeastOnce = 1,
+    ExactlyOnce = 2,
+}
+
+impl Default for QoS {
+    fn default() -> QoS {
+        QoS::AtMostOnce
+    }
+}
+
+impl fmt::Display for QoS {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            QoS::AtMostOnce => write!(f, "at_most_once"),
+            QoS::AtLeastOnce => write!(f, "at_least_once"),
+            QoS::ExactlyOnce => write!(f, "exactly_once"),
+        }
+    }
+}
+
+impl TryFrom<u8> for QoS {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<QoS> {
+        let val = match val {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            2 => QoS::ExactlyOnce,
+            _ => err!(MalformedPacket, code: MalformedPacket, "reserved QoS")?,
+        };
+
+        Ok(val)
+    }
+}
+
+impl From<QoS> for u8 {
+    fn from(val: QoS) -> u8 {
+        match val {
+            QoS::AtMostOnce => 0,
+            QoS::AtLeastOnce => 1,
+            QoS::ExactlyOnce => 2,
+        }
+    }
+}
+
 /// Type implement variable-length unsigned 32-bit integer.
 ///
 /// Uses continuation bit at position 7 to continue reading next byte to frame 'u32'.
@@ -428,8 +478,6 @@ impl From<VarU32> for u32 {
 
 impl Packetize for VarU32 {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        use std::{cmp, mem};
-
         let stream: &[u8] = stream.as_ref();
 
         let n = cmp::min(stream.len(), mem::size_of::<u32>());
@@ -548,8 +596,6 @@ impl Packetize for u32 {
 
 impl Packetize for String {
     fn decode<T: AsRef<[u8]>>(stream: T) -> Result<(Self, usize)> {
-        use crate::util;
-
         let stream: &[u8] = stream.as_ref();
 
         let (len, _) = u16::decode(stream)?;
@@ -574,8 +620,6 @@ impl Packetize for String {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::util;
-
         if !self.chars().all(util::is_valid_utf8_code_point) {
             err!(ProtocolError, desc: "String::encode invalid utf8 string")?;
         }

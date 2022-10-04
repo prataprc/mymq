@@ -11,7 +11,7 @@ use std::os::unix::io::{FromRawSocket, IntoRawSocket};
 
 use std::{collections::VecDeque, fmt, io, mem, net, result, time};
 
-use crate::{v5, ClientID, PacketID, Packetize};
+use crate::{v5, ClientID, PacketID, Packetize, QoS};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
@@ -19,7 +19,7 @@ pub const CLIENT_MAX_PACKET_SIZE: u32 = 1024 * 1024;
 /// MQTT CONNECT flags and headers
 #[derive(Clone, Copy)]
 pub struct ConnectOptions {
-    pub will_qos: Option<v5::QoS>,
+    pub will_qos: Option<QoS>,
     pub will_retain: Option<bool>,
     pub keep_alive: u16,
 }
@@ -299,10 +299,10 @@ impl Client {
         }
         if self.is_will() {
             flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.connopts.will_qos.unwrap_or(v5::QoS::AtMostOnce) {
-                v5::QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
-                v5::QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
-                v5::QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
+            flags.push(match self.connopts.will_qos.unwrap_or(QoS::AtMostOnce) {
+                QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
+                QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
+                QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
             });
             match self.connopts.will_retain {
                 Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),

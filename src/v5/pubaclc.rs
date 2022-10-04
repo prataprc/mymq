@@ -3,9 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{self, FixedHeader, PacketType, Property, PropertyType};
-use crate::v5::{Blob, Packetize, UserProperty, VarU32};
-use crate::v5::{Error, ErrorKind, ReasonCode, Result};
+use crate::v5::{self, FixedHeader, PacketType, Property, PropertyType, UserProperty};
+use crate::{Blob, Packetize, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Error codes allowed in PUBACK packet
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]

@@ -1,6 +1,6 @@
-use std::net;
+use std::net::{self, IpAddr, Ipv4Addr};
 
-use crate::v5::{Error, ErrorKind, Result};
+use crate::{Error, ErrorKind, Result};
 
 pub struct Config {
     /// MQTT network port for each node in this cluster. Once the cluster is
@@ -115,8 +115,6 @@ impl Config {
 
 /// Default listen address for MQTT packets: `0.0.0.0:1883`
 pub fn mqtt_listen_address4(port: Option<u16>) -> net::SocketAddr {
-    use std::net::{IpAddr, Ipv4Addr};
-
     let port = port.unwrap_or(Config::DEF_MQTT_PORT);
     net::SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
 }

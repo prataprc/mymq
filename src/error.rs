@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 #[cfg(feature = "backtrace")]
 use std::backtrace::Backtrace;
 
-use std::{self, fmt, result};
+use std::{fmt, result};
 
 use crate::Result;
 

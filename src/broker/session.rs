@@ -646,7 +646,7 @@ impl Session {
         }
         self.book_packet_id(&pkt)?;
 
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
+        let server_qos = QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
 
         let publish = match pkt {
             v5::Packet::Publish(publish) => publish,
@@ -659,7 +659,7 @@ impl Session {
 
         self.book_retain(&publish)?;
 
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
+        let server_qos = QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
         let inp_seqno = shard.incr_inp_seqno();
         let topic_name = self.publish_topic_name(&publish)?;
 
@@ -704,13 +704,13 @@ impl Session {
         }
 
         match (publish.qos, n_subscrs) {
-            (v5::QoS::AtMostOnce, _) => (),
-            (v5::QoS::AtLeastOnce, 0) => {
+            (QoS::AtMostOnce, _) => (),
+            (QoS::AtLeastOnce, 0) => {
                 let puback = v5::Pub::new_pub_ack(publish.packet_id.unwrap());
                 route_io.oug_msgs.push(Message::new_pub_ack(puback));
             }
-            (v5::QoS::AtLeastOnce, _) => (),
-            (v5::QoS::ExactlyOnce, _) => todo!(),
+            (QoS::AtLeastOnce, _) => (),
+            (QoS::ExactlyOnce, _) => todo!(),
         }
 
         Ok(())
@@ -827,8 +827,8 @@ impl Session {
 
         match pkt {
             v5::Packet::Publish(publish) => match publish.qos {
-                v5::QoS::AtMostOnce => false,
-                v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                QoS::AtMostOnce => false,
+                QoS::AtLeastOnce | QoS::ExactlyOnce => {
                     let packet_id = publish.packet_id.unwrap();
                     matches!(active.inc_packet_ids.binary_search(&packet_id), Ok(_))
                 }
@@ -853,8 +853,8 @@ impl Session {
 
         match pkt {
             v5::Packet::Publish(publish) => match publish.qos {
-                v5::QoS::AtMostOnce => (),
-                v5::QoS::AtLeastOnce | v5::QoS::ExactlyOnce => {
+                QoS::AtMostOnce => (),
+                QoS::AtLeastOnce | QoS::ExactlyOnce => {
                     let packet_id = publish.packet_id.unwrap();
                     if let Err(off) = active.inc_packet_ids.binary_search(&packet_id) {
                         active.inc_packet_ids.insert(off, packet_id);
@@ -974,7 +974,7 @@ impl Session {
     where
         S: Shard,
     {
-        let server_qos = v5::QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
+        let server_qos = QoS::try_from(self.config.mqtt_maximum_qos).unwrap();
 
         let sub = match msg {
             Message::Subscribe { sub } => sub,
@@ -1006,9 +1006,9 @@ impl Session {
             self.state.commit_sub(shard, args)?;
 
             let rc = match subscription.qos {
-                v5::QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
-                v5::QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
-                v5::QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
+                QoS::AtMostOnce => v5::SubAckReasonCode::QoS0,
+                QoS::AtLeastOnce => v5::SubAckReasonCode::QoS1,
+                QoS::ExactlyOnce => v5::SubAckReasonCode::QoS2,
             };
             return_codes.push(rc)
         }
@@ -1397,7 +1397,7 @@ fn err_disconnect(code: Option<ReasonCode>) -> Result<()> {
     })
 }
 
-fn err_unsup_qos(prefix: &str, qos: v5::QoS) -> Result<()> {
+fn err_unsup_qos(prefix: &str, qos: QoS) -> Result<()> {
     err!(
         ProtocolError,
         code: QoSNotSupported,

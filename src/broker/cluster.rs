@@ -10,7 +10,7 @@ use crate::broker::{rebalance, ticker};
 use crate::broker::{util, Timer, ToJson, TopicName};
 use crate::broker::{AppTx, Config, ConfigNode, Hostable, RetainedTrie, SubscribedTrie};
 use crate::broker::{Error, ErrorKind, Result};
-use crate::broker::{Flusher, Listener, QueueStatus, Shard, Ticker};
+use crate::broker::{Flusher, Listener, QueueStatus, Shard, Socket, Ticker};
 
 use crate::v5;
 
@@ -401,11 +401,6 @@ pub enum Response {
     Ok,
 }
 
-pub struct AddConnectionArgs {
-    pub sock: mio::net::TcpStream,
-    pub pkt: v5::Connect,
-}
-
 // calls to interface with cluster-thread.
 impl Cluster {
     pub(crate) fn wake(&self) -> Result<()> {
@@ -415,10 +410,10 @@ impl Cluster {
         }
     }
 
-    pub(crate) fn add_connection(&self, args: AddConnectionArgs) -> Result<()> {
+    pub(crate) fn add_connection(&self, sock: Socket) -> Result<()> {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
-                let req = Request::AddConnection(args);
+                let req = Request::AddConnection(sock);
                 tx.request(req)??;
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -657,18 +652,18 @@ impl Cluster {
     fn handle_add_connection(&mut self, req: Request) -> Response {
         use crate::broker::shard::AddSessionArgs;
 
+        let sock = match req {
+            Request::AddConnection(sock) => sock,
+            _ => unreachable!(),
+        };
+        let raddr = sock.peer_addr();
+
         let RunLoop { active_shards, .. } = match &mut self.inner {
             Inner::Main(run_loop) => run_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let AddConnectionArgs { sock, pkt: connect } = match req {
-            Request::AddConnection(args) => args,
-            _ => unreachable!(),
-        };
-        let raddr = sock.peer_addr().unwrap();
-
-        let client_id = connect.payload.client_id.clone();
+        let client_id = sock.to_client_id();
         let shard_id =
             rebalance::Rebalancer::session_partition(&*client_id, self.config.num_shards);
 
@@ -686,7 +681,7 @@ impl Cluster {
         );
 
         // Add session to the shard.
-        if let Err(err) = shard.add_session(AddSessionArgs { sock, connect }) {
+        if let Err(err) = shard.add_session(sock) {
             error!("{} error adding session err:{}", self.prefix, err);
         }
 

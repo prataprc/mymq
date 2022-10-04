@@ -840,11 +840,11 @@ impl Shard {
                     append_index!(&mut rio.cons_io.oug_unsubs, client_id, msg);
                 }
                 Message::ShardIndex { inp_seqno, qos, .. } => match qos {
-                    v5::QoS::AtMostOnce => (),
-                    v5::QoS::AtLeastOnce => {
+                    QoS::AtMostOnce => (),
+                    QoS::AtLeastOnce => {
                         debug_assert!(index.insert(*inp_seqno, msg).is_none());
                     }
-                    v5::QoS::ExactlyOnce => {
+                    QoS::ExactlyOnce => {
                         debug_assert!(index.insert(*inp_seqno, msg).is_none());
                     }
                 },

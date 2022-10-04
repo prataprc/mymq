@@ -2,10 +2,9 @@ use log::{error, trace};
 
 use std::{collections::VecDeque, io, mem, net, time};
 
-use crate::v5::{self, ClientID, PacketRx, PacketTx, Packetize, QPacket, QueueStatus};
-use crate::v5::{ErrorKind, Result};
-
-use crate::v5::Config;
+use crate::v5::{self, Config};
+use crate::{ClientID, PacketRx, PacketTx, Packetize, QPacket, QueueStatus};
+use crate::{ErrorKind, Result};
 
 pub type QueuePkt = QueueStatus<QPacket>;
 
@@ -25,6 +24,7 @@ pub struct Socket {
     client_id: ClientID,
     config: Config,
     conn: mio::net::TcpStream,
+    connect: v5::Connect,
     token: mio::Token,
     rd: Source,
     wt: Sink,

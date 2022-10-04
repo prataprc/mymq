@@ -3,9 +3,9 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{Blob, FixedHeader, Property, PropertyType, UserProperty, VarU32};
-use crate::v5::{Error, ErrorKind, ReasonCode, Result};
-use crate::v5::{Packetize, TopicFilter};
+use crate::v5::{FixedHeader, Property, PropertyType, UserProperty};
+use crate::{Blob, Packetize, TopicFilter, VarU32};
+use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::UnSubscribe";
 
