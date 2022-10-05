@@ -1,4 +1,4 @@
-use std::{io, net};
+use std::{fmt, io, net, result};
 
 use crate::v5;
 use crate::{Blob, ClientID, Packetize, QueueStatus, Result};
@@ -132,6 +132,14 @@ impl Socket {
 #[derive(Clone)]
 pub enum QPacket {
     V5(v5::Packet),
+}
+
+impl fmt::Display for QPacket {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            QPacket::V5(pkt) => write!(f, "{}", pkt),
+        }
+    }
 }
 
 impl From<QPacket> for v5::Packet {

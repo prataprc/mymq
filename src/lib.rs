@@ -115,8 +115,8 @@ pub use types::{RetainForwardRule, Subscription};
 pub mod v5;
 pub mod util;
 
-//#[cfg(feature = "broker")]
-//pub mod broker;
+#[cfg(feature = "broker")]
+pub mod broker;
 
 #[cfg(feature = "netw")]
 pub mod netw;

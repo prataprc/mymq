@@ -237,7 +237,7 @@ impl Config {
     /// Refer to [Config::flush_timeout]
     pub const DEF_FLUSH_TIMEOUT: u32 = 10; // in seconds.
     /// Refer to [Config::mqtt_pkt_batch_size]
-    pub const DEF_MQTT_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
+    pub const DEF_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::mqtt_keep_alive_factor]
     pub const DEF_MQTT_KEEP_ALIVE_FACTOR: F32 = F32(1.5); // suggested by the spec.
     /// Refer to [Config::mqtt_receive_maximum]
