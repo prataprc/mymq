@@ -3,8 +3,8 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 
 use std::{fmt, result};
 
-use crate::v5::{self, FixedHeader, PacketType, Property, PropertyType, UserProperty};
-use crate::{Blob, Packetize, VarU32};
+use crate::v5::{FixedHeader, Property, PropertyType, UserProperty};
+use crate::{Blob, PacketType, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Error codes allowed in PUBACK packet
@@ -204,7 +204,7 @@ impl Packetize for Pub {
 impl Pub {
     pub fn new_pub_ack(packet_id: u16) -> Pub {
         Pub {
-            packet_type: v5::PacketType::PubAck,
+            packet_type: PacketType::PubAck,
             packet_id,
             code: (PubAckReasonCode::Success as u8).try_into().unwrap(),
             properties: None,
@@ -262,6 +262,8 @@ pub struct PubProperties {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for PubProperties {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::v5::valid_user_props;
+
         let rs_choice: Vec<String> =
             vec!["", "unit-testing"].into_iter().map(|s| s.to_string()).collect();
         let reason_string = match uns.arbitrary::<u8>()? % 2 {
@@ -273,7 +275,7 @@ impl<'a> Arbitrary<'a> for PubProperties {
         let n_user_props = uns.arbitrary::<usize>()? % 4;
         let val = PubProperties {
             reason_string,
-            user_properties: v5::valid_user_props(uns, n_user_props)?,
+            user_properties: valid_user_props(uns, n_user_props)?,
         };
 
         Ok(val)

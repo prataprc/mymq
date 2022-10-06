@@ -1,18 +1,19 @@
 use log::error;
 
-use std::{collections::VecDeque, mem, time};
+use std::{collections::VecDeque, mem, net, time};
 
 use crate::broker::Config;
 use crate::Result;
-use crate::{Blob, PacketRx, PacketTx, Packetize, QPacket, QueueStatus, Socket};
+use crate::{Blob, ClientID, QueueStatus};
+use crate::{PacketRx, PacketTx, Packetize, QPacket, Socket};
 
 type QueuePkt = QueueStatus<QPacket>;
 
 pub struct PQueue {
     config: Config,
     socket: Socket,
-    session_tx: PacketTx,
-    miot_rx: PacketRx,
+    session_tx: PacketTx, // Outbound channel to session thread
+    miot_rx: PacketRx,    // Inbound channel from session thread
     // All incoming MQTT packets on this socket first land here.
     inc_packets: VecDeque<QPacket>,
     // All out-going MQTT packets on this socket first land here.
@@ -20,10 +21,10 @@ pub struct PQueue {
 }
 
 pub struct PQueueArgs {
-    config: Config,
-    socket: Socket,
-    session_tx: PacketTx,
-    miot_rx: PacketRx,
+    pub config: Config,
+    pub socket: Socket,
+    pub session_tx: PacketTx,
+    pub miot_rx: PacketRx,
 }
 
 impl PQueue {
@@ -36,6 +37,21 @@ impl PQueue {
             inc_packets: VecDeque::default(),
             oug_packets: VecDeque::default(),
         }
+    }
+
+    #[inline]
+    pub fn peer_addr(&self) -> net::SocketAddr {
+        self.socket.peer_addr()
+    }
+
+    #[inline]
+    pub fn to_client_id(&self) -> ClientID {
+        self.socket.to_client_id()
+    }
+
+    #[inline]
+    pub fn as_mut_socket(&mut self) -> &mut Socket {
+        &mut self.socket
     }
 }
 

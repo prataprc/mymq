@@ -104,12 +104,13 @@ mod queue;
 mod timer;
 mod types;
 
+pub use config::Config;
 pub use error::{Error, ErrorKind, ReasonCode};
 pub use protocol::{Protocol, QPacket, Socket};
 pub use queue::{new_packet_queue, PacketRx, PacketTx, QueueStatus};
 pub use timer::Timer;
-pub use types::{Blob, ClientID, PacketID, QoS, TopicFilter, TopicName, VarU32};
-pub use types::{RetainForwardRule, Subscription};
+pub use types::{Blob, ClientID, PacketID, QoS, TopicFilter, TopicName, VarU32, F32};
+pub use types::{PacketType, RetainForwardRule, Subscription};
 
 #[macro_use]
 pub mod v5;

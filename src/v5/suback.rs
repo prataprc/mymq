@@ -4,8 +4,8 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::v5::UserProperty;
-use crate::v5::{FixedHeader, PacketType, Property, PropertyType, Subscribe};
-use crate::{Blob, Packetize, VarU32};
+use crate::v5::{FixedHeader, Property, PropertyType, Subscribe};
+use crate::{Blob, PacketType, Packetize, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::SubAck";
@@ -56,6 +56,14 @@ impl TryFrom<u8> for SubAckReasonCode {
         };
 
         Ok(v)
+    }
+}
+
+impl TryFrom<ReasonCode> for SubAckReasonCode {
+    type Error = Error;
+
+    fn try_from(value: ReasonCode) -> Result<Self> {
+        SubAckReasonCode::try_from(value as u8)
     }
 }
 
@@ -156,11 +164,14 @@ impl Packetize for SubAck {
 }
 
 impl SubAck {
-    pub fn from_sub(sub: &Subscribe, codes: Vec<SubAckReasonCode>) -> SubAck {
+    pub fn from_sub(sub: &Subscribe, codes: Vec<ReasonCode>) -> SubAck {
         SubAck {
             packet_id: sub.packet_id,
             properties: None,
-            return_codes: codes,
+            return_codes: codes
+                .into_iter()
+                .map(|code| SubAckReasonCode::try_from(code).unwrap())
+                .collect(),
         }
     }
 

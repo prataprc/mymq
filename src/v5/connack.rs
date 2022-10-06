@@ -179,6 +179,14 @@ impl TryFrom<u8> for ConnAckReasonCode {
     }
 }
 
+impl TryFrom<ReasonCode> for ConnAckReasonCode {
+    type Error = Error;
+
+    fn try_from(val: ReasonCode) -> Result<ConnAckReasonCode> {
+        (val as u8).try_into()
+    }
+}
+
 /// CONNACK packet
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConnAck {
@@ -293,7 +301,7 @@ impl Packetize for ConnAck {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::v5::{insert_fixed_header, PacketType};
+        use crate::{v5::insert_fixed_header, PacketType};
 
         let mut data = Vec::with_capacity(64);
 

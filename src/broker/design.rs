@@ -44,6 +44,7 @@
 //! * Given the ClientID and number of shards, mapping of `Session` to `Shard` is
 //!   computed with ZERO knowledge.
 //! * There should atleast be as many shards as the CPU cores in a node.
+//! * There shall be `one-master` and `zero-or-more-replicas` for each shard.
 //!
 //! **Threading model**
 //!
@@ -97,3 +98,27 @@
 //!
 //! Note that `Packet` are plain-vanilla MQTT packets. `Message` are wrapper around
 //! Packets and other meta-data that gets exchanged between shards/sessions.
+//!
+//! **Topology**
+//!
+//! Topology is distribution of shard's master and replicas across the cluster. For each
+//! shard, there shall be a [Topology] discription. After every rebalance, whether
+//! gracefull or fail-over, a new Topology shall be created that involves minimum
+//! shard migration.
+//!
+//! **Rebalancer**
+//!
+//! * Shard to node mapping is open-ended, Rebalancer can experiment with several
+//!   algorithms, but the end result shall be that:
+//!   * Shards, both master and its replicas, shall be distributed evenly across nodes.
+//!   * All shards hosted by the same node, shall have same master/replica topology.
+//! * Assign session to shard, computed only using ClientID and num_shards.
+//! * Assign a node for master shard.
+//! * Assign ZERO or more node for replica shards.
+//!
+//! **Shard-Migration**
+//!
+//! * Migration of master shard from one node to another.
+//! * Migration of replica shard from one node not another.
+//! * Demotion of master shard as replica-shard.
+//! * Promotion of replica-shard as master-shard.

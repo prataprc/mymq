@@ -389,7 +389,7 @@ impl Packetize for Connect {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::v5::{insert_fixed_header, PacketType};
+        use crate::{v5::insert_fixed_header, PacketType};
 
         self.validate()?;
 

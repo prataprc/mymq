@@ -1,10 +1,21 @@
+//! Listener threading model.
+//!
+//! ```
+//!                        spawn()
+//! from_config() -> Init -----+----> Handle
+//!                            |
+//!                            |
+//!                            V
+//!                           Main
+//! ```
+
 use log::{debug, error, info, trace};
 use mio::event::Events;
 
 use std::{fmt, io, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Cluster, Config};
+use crate::broker::{AppTx, ClusterAPI, Config};
 use crate::{Error, ErrorKind, Result};
 use crate::{Protocol, QueueStatus, ToJson};
 
@@ -14,26 +25,32 @@ type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
 /// Type binds to network port, like MQTT, and listens for incoming connection.
 ///
 /// This type is threadable and singleton.
-pub struct Listener {
+pub struct Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Human readable name for this mio thread.
     name: String,
     prefix: String,
     config: Config,
     proto: Protocol,
-    inner: Inner,
+    inner: Inner<C>,
 }
 
-enum Inner {
+enum Inner<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     Init,
-    // Held by Cluster
-    Handle(Arc<mio::Waker>, Thread<Listener, Request, Result<Response>>),
-    // Thread
-    Main(RunLoop),
-    // Held by Cluster, replacing both Handle and Main.
-    Close(FinState),
+    Main(RunLoop<C>), // Thread
+    Handle(Arc<mio::Waker>, Thread<Listener<C>, Request, Result<Response>>), // Held by C
+    Close(FinState),  // Held by Cluster, replacing both Handle and Main.
 }
 
-impl fmt::Debug for Inner {
+impl<C> fmt::Debug for Inner<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Inner::Init => write!(f, "Listener::Inner::Init"),
@@ -44,14 +61,17 @@ impl fmt::Debug for Inner {
     }
 }
 
-struct RunLoop {
+struct RunLoop<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Mio poller for asynchronous handling, aggregate events from listener and
     /// thread-waker.
     poll: mio::Poll,
     /// TCP listener listening on `port`.
     listener: mio::net::TcpListener,
     /// Tx-handle to send messages to cluster.
-    cluster: Box<Cluster>,
+    cluster: Box<C>,
 
     /// Statistics
     stats: Stats,
@@ -92,14 +112,18 @@ impl FinState {
     }
 }
 
-impl Default for Listener {
-    fn default() -> Listener {
+impl<C> Default for Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn default() -> Listener<C> {
         let config = Config::default();
         let mut def = Listener {
             name: config.name.clone(),
             prefix: String::default(),
             config,
-            proto: Protocol::new_v5_protocol(toml::Value::default()),
+            proto: Protocol::default(),
+
             inner: Inner::Init,
         };
         def.prefix = def.prefix();
@@ -107,7 +131,10 @@ impl Default for Listener {
     }
 }
 
-impl Drop for Listener {
+impl<C> Drop for Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
@@ -119,7 +146,10 @@ impl Drop for Listener {
     }
 }
 
-impl ToJson for Listener {
+impl<C> ToJson for Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn to_config_json(&self) -> String {
         format!(
             concat!("{{ {:?}: {:?}, {:?}: {} }}"),
@@ -138,7 +168,10 @@ impl ToJson for Listener {
     }
 }
 
-impl Listener {
+impl<C> Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Poll register token for waker event.
     pub const TOKEN_WAKE: mio::Token = mio::Token(1);
     /// Poll register for listener TcpStream.
@@ -146,12 +179,13 @@ impl Listener {
 
     /// Create a listener from configuration. Listener shall be in `Init` state. To start
     /// this listener thread call [Listener::spawn].
-    pub fn from_config(config: &Config, proto: Protocol) -> Result<Listener> {
+    pub fn from_config(config: &Config, proto: Protocol) -> Result<Listener<C>> {
         let mut val = Listener {
             name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
             proto,
+
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -159,10 +193,10 @@ impl Listener {
         Ok(val)
     }
 
-    pub fn spawn(self, cluster: Cluster, app_tx: AppTx) -> Result<Listener> {
+    pub fn spawn(self, cluster: C, app_tx: AppTx) -> Result<Listener<C>> {
         use mio::{Interest, Waker};
 
-        let mut listener = {
+        let mut sock_listn = {
             let sock_addr: net::SocketAddr = self.proto.to_listen_address();
             mio::net::TcpListener::bind(sock_addr)?
         };
@@ -170,7 +204,7 @@ impl Listener {
         let poll = {
             let interests = Interest::READABLE;
             let poll = err!(IOError, try: mio::Poll::new(), "fail creating mio::Poll")?;
-            poll.registry().register(&mut listener, Self::TOKEN_LISTENER, interests)?;
+            poll.registry().register(&mut sock_listn, Self::TOKEN_LISTENER, interests)?;
             poll
         };
         let waker = Arc::new(Waker::new(poll.registry(), Self::TOKEN_WAKE)?);
@@ -180,13 +214,13 @@ impl Listener {
             prefix: String::default(),
             config: self.config.clone(),
             proto: self.proto.clone(),
+
             inner: Inner::Main(RunLoop {
                 poll,
-                listener,
+                listener: sock_listn,
                 cluster: Box::new(cluster),
 
                 stats: Stats::default(),
-
                 app_tx,
             }),
         };
@@ -199,27 +233,15 @@ impl Listener {
             prefix: String::default(),
             config: self.config.clone(),
             proto: self.proto.clone(),
+
             inner: Inner::Handle(waker, thrd),
         };
         listener.prefix = listener.prefix();
 
-        info!("{} port:{} listening ... ", self.prefix, self.proto.to_listen_port());
-
         Ok(listener)
     }
-}
 
-pub enum Request {
-    Close,
-}
-
-pub enum Response {
-    Ok,
-}
-
-// calls to interface with listener-thread, and shall wake the thread
-impl Listener {
-    pub fn close_wait(mut self) -> Listener {
+    pub fn close_wait(mut self) -> Listener<C> {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(_waker, thrd) => {
@@ -231,14 +253,30 @@ impl Listener {
     }
 }
 
-impl Threadable for Listener {
+pub enum Request {
+    Close,
+}
+
+pub enum Response {
+    Ok,
+}
+
+impl<C> Threadable for Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     type Req = Request;
     type Resp = Result<Response>;
 
     fn main_loop(mut self, rx: ThreadRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
-        info!("{} spawn thread config:{}", self.prefix, self.to_config_json());
+        info!(
+            "{} port:{} spawn thread config:{} ... ",
+            self.prefix,
+            self.proto.to_listen_port(),
+            self.to_config_json()
+        );
 
         let mut events = Events::with_capacity(POLL_EVENTS_SIZE);
         loop {
@@ -250,10 +288,10 @@ impl Threadable for Listener {
             }
             self.incr_n_polls();
 
-            match self.mio_events(&rx, &events) {
-                true => break,
-                _exit => (),
-            };
+            // return exit or not
+            if self.mio_events(&rx, &events) {
+                break;
+            }
         }
 
         match &self.inner {
@@ -262,12 +300,15 @@ impl Threadable for Listener {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        info!("{} thread exit", self.prefix);
+        info!("{} thread exit !!", self.prefix);
         self
     }
 }
 
-impl Listener {
+impl<C> Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     // return (exit,)
     fn mio_events(&mut self, rx: &ThreadRx, events: &Events) -> bool {
         let mut count = 0_usize;
@@ -320,8 +361,7 @@ impl Listener {
         for req in reqs.into_iter() {
             match req {
                 (req @ Close, Some(tx)) => {
-                    let resp = self.handle_close(req);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    app_fatal!(self, tx.send(Ok(self.handle_close(req))));
                     closed = true;
                 }
                 (_, _) => unreachable!(),
@@ -340,9 +380,9 @@ impl Listener {
         };
 
         match listener.accept() {
-            Ok((sock, addr)) => {
+            Ok((conn, addr)) => {
                 info!("{} raddr:{} incoming connection", self.prefix, addr);
-                let raddr = sock.peer_addr().unwrap();
+                let raddr = conn.peer_addr().unwrap();
 
                 assert_eq!(raddr, addr);
 
@@ -354,7 +394,7 @@ impl Listener {
 
                     proto: self.proto.clone(),
                     cluster: cluster.to_tx("handshake"),
-                    sock: Some(sock),
+                    conn: Some(conn),
                 };
                 let thrd = Thread::spawn_sync("handshake", 1, hs);
                 thrd.drop(); // alternative to close_wait()
@@ -362,7 +402,12 @@ impl Listener {
                 stats.n_accepted += 1;
                 QueueStatus::Ok(Vec::new())
             }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                error!("{} accept interrupted", self.prefix);
+                QueueStatus::Block(Vec::new())
+            }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                trace!("{} accept wouldblock", self.prefix);
                 QueueStatus::Block(Vec::new())
             }
             Err(err) => {
@@ -373,15 +418,16 @@ impl Listener {
     }
 }
 
-impl Listener {
+impl<C> Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn handle_close(&mut self, _req: Request) -> Response {
         let run_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Main(run_loop) => run_loop,
             Inner::Close(_) => return Response::Ok,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-
-        info!("{} closing listener", self.prefix);
 
         mem::drop(run_loop.poll);
         mem::drop(run_loop.listener);
@@ -390,6 +436,7 @@ impl Listener {
 
         let fin_state = FinState { stats: run_loop.stats };
         info!("{} stats:{}", self.prefix, fin_state.to_json());
+        info!("{} closing listener", self.prefix);
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
@@ -397,7 +444,10 @@ impl Listener {
     }
 }
 
-impl Listener {
+impl<C> Listener<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",

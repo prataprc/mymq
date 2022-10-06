@@ -107,7 +107,7 @@ mod types;
 pub use config::Config;
 pub use packet::{MQTTRead, MQTTWrite};
 pub use protocol::{Protocol, Socket};
-pub use types::{FixedHeader, MqttProtocol, Packet, PacketType, Property};
+pub use types::{FixedHeader, MqttProtocol, Packet, Property};
 pub use types::{PayloadFormat, PropertyType, UserProperty};
 
 mod auth;

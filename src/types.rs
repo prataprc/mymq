@@ -393,6 +393,76 @@ impl TopicFilter {
     }
 }
 
+/// MQTT packet type
+#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketType {
+    Connect = 1,
+    ConnAck = 2,
+    Publish = 3,
+    PubAck = 4,
+    PubRec = 5,
+    PubRel = 6,
+    PubComp = 7,
+    Subscribe = 8,
+    SubAck = 9,
+    UnSubscribe = 10,
+    UnsubAck = 11,
+    PingReq = 12,
+    PingResp = 13,
+    Disconnect = 14,
+    Auth = 15,
+}
+
+impl TryFrom<u8> for PacketType {
+    type Error = Error;
+
+    fn try_from(val: u8) -> Result<PacketType> {
+        let val = match val {
+            1 => PacketType::Connect,
+            2 => PacketType::ConnAck,
+            3 => PacketType::Publish,
+            4 => PacketType::PubAck,
+            5 => PacketType::PubRec,
+            6 => PacketType::PubRel,
+            7 => PacketType::PubComp,
+            8 => PacketType::Subscribe,
+            9 => PacketType::SubAck,
+            10 => PacketType::UnSubscribe,
+            11 => PacketType::UnsubAck,
+            12 => PacketType::PingReq,
+            13 => PacketType::PingResp,
+            14 => PacketType::Disconnect,
+            15 => PacketType::Auth,
+            _ => err!(MalformedPacket, code: MalformedPacket, "forbidden packet-type")?,
+        };
+
+        Ok(val)
+    }
+}
+
+impl From<PacketType> for u8 {
+    fn from(val: PacketType) -> u8 {
+        match val {
+            PacketType::Connect => 1,
+            PacketType::ConnAck => 2,
+            PacketType::Publish => 3,
+            PacketType::PubAck => 4,
+            PacketType::PubRec => 5,
+            PacketType::PubRel => 6,
+            PacketType::PubComp => 7,
+            PacketType::Subscribe => 8,
+            PacketType::SubAck => 9,
+            PacketType::UnSubscribe => 10,
+            PacketType::UnsubAck => 11,
+            PacketType::PingReq => 12,
+            PacketType::PingResp => 13,
+            PacketType::Disconnect => 14,
+            PacketType::Auth => 15,
+        }
+    }
+}
+
 /// Quality of service
 #[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -792,5 +862,50 @@ impl Packetize for Vec<u8> {
                 Ok(Blob::Large { data })
             }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct F32(f32);
+
+impl Deref for F32 {
+    type Target = f32;
+
+    fn deref(&self) -> &f32 {
+        &self.0
+    }
+}
+
+impl DerefMut for F32 {
+    fn deref_mut(&mut self) -> &mut f32 {
+        &mut self.0
+    }
+}
+
+impl From<f32> for F32 {
+    fn from(val: f32) -> F32 {
+        F32(val)
+    }
+}
+
+impl From<F32> for f32 {
+    fn from(val: F32) -> f32 {
+        val.0
+    }
+}
+
+impl PartialEq for F32 {
+    fn eq(&self, other: &F32) -> bool {
+        self.total_cmp(other) == cmp::Ordering::Equal
+    }
+}
+
+impl Eq for F32 {}
+
+impl std::str::FromStr for F32 {
+    type Err = std::num::ParseFloatError;
+
+    fn from_str(src: &str) -> result::Result<F32, std::num::ParseFloatError> {
+        Ok(F32(f32::from_str(src)?))
     }
 }

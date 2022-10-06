@@ -4,18 +4,15 @@ use uuid::Uuid;
 use std::{collections::BTreeMap, fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{message, session, socket};
+use crate::broker::{message, session, ClusterAPI, ShardAPI};
 use crate::broker::{AppTx, Config, RetainedTrie, Session, Shardable, SubscribedTrie};
-use crate::broker::{Cluster, Flusher, Message, Miot, MsgRx};
-use crate::broker::{ConsensIO, InpSeqno, Timestamp};
-use crate::broker::{RouteIO, SessionArgsActive, SessionArgsReplica};
-use crate::{ClientID, PacketRx, PacketTx, QueueStatus, Socket, Timer, ToJson};
+use crate::broker::{ConsensIO, Flusher, InpSeqno, Message, Miot, MsgRx, Timestamp};
+use crate::broker::{PQueue, RouteIO, SessionArgsMaster, SessionArgsReplica};
+use crate::{ClientID, PacketRx, PacketTx, QoS, QueueStatus, Socket, Timer, ToJson};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-use crate::v5;
-
-type ThreadRx = Rx<Request, Result<Response>>;
-type QueueReq = crate::broker::thread::QueueReq<Request, Result<Response>>;
+type ThreadRx<C> = Rx<Request<C>, Result<Response>>;
+type QueueReq<C> = crate::broker::thread::QueueReq<Request<C>, Result<Response>>;
 
 macro_rules! append_index {
     ($index:expr, $key:expr, $val:expr) => {{
@@ -43,55 +40,71 @@ macro_rules! appends_index {
 ///
 /// Handle incoming MQTT packets, route them to other shards, send back acknowledgement,
 /// and publish them to other clients.
-pub struct Shard {
+pub struct Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Human readable name for shard.
     pub name: String,
-    /// Shard id, must unique withing the [Cluster].
+    /// Shard id, must unique withing the Cluster.
     pub shard_id: u32,
     /// Unique id for this shard. All shards in a cluster MUST be unique.
     pub uuid: Uuid,
 
     prefix: String,
     config: Config,
-    inner: Inner,
+
+    inner: Inner<C>,
 }
 
-pub enum Inner {
+pub enum Inner<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     Init,
     // Held by Cluster.
-    Handle(Handle),
+    Handle(Handle<C>),
     // Held by Miot and Ticker
-    Tx(Arc<mio::Waker>, Tx<Request, Result<Response>>),
+    Tx(Arc<mio::Waker>, Tx<Request<C>, Result<Response>>),
     // Held by all Shard threads.
     MsgTx(Arc<mio::Waker>, message::MsgTx),
     // Thread.
-    MainActive(ActiveLoop),
-    MainReplica(ReplicaLoop),
+    MainMaster(MasterLoop<C>),
+    MainReplica(ReplicaLoop<C>),
     // Held by Cluster, replacing both Handle and Main.
-    Close(FinState),
+    Close(FinState<C>),
 }
 
-impl fmt::Debug for Inner {
+impl<C> fmt::Debug for Inner<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Inner::Init => write!(f, "Shard::Inner::Init"),
             Inner::Handle(_) => write!(f, "Shard::Inner::Handle"),
             Inner::Tx(_, _) => write!(f, "Shard::Inner::Handle"),
             Inner::MsgTx(_, _) => write!(f, "Shard::Inner::Handle"),
-            Inner::MainActive(_) => write!(f, "Shard::Inner::MainActive"),
+            Inner::MainMaster(_) => write!(f, "Shard::Inner::MainMaster"),
             Inner::MainReplica(_) => write!(f, "Shard::Inner::MainReplica"),
             Inner::Close(_) => write!(f, "Shard::Inner::Close"),
         }
     }
 }
 
-pub struct Handle {
+pub struct Handle<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     waker: Arc<mio::Waker>,
-    thrd: Thread<Shard, Request, Result<Response>>,
+    thrd: Thread<Shard<C>, Request<C>, Result<Response>>,
     msg_tx: Option<message::MsgTx>,
 }
 
-pub struct ActiveLoop {
+pub struct MasterLoop<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Mio poller for asynchronous handling, all events are from consensus port and
     /// thread-waker.
     poll: mio::Poll,
@@ -99,17 +112,18 @@ pub struct ActiveLoop {
     waker: Arc<mio::Waker>,
     /// Cluster::Tx handle to communicate back to cluster. Shall be dropped after
     /// close_wait call, when the thread returns, will point to Inner::Init.
-    cluster: Box<Cluster>,
+    cluster: Box<C>,
     /// Flusher::Tx handle to communicate with flusher.
     flusher: Flusher,
     /// Inner::Handle to corresponding miot-thread. Shall be dropped after close_wait
     /// call, when the thread returns, will point to Inner::Init.
-    miot: Miot,
+    miot: Miot<Shard<C>>,
 
     /// Collection of sessions and corresponding clients managed by this shard. Shall be
     /// dropped after close_wait call, when the thread returns it will be empty.
     sessions: BTreeMap<ClientID, Session>,
     reconnects: Timer<ClientID, Session>,
+
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for every
     /// incoming PUBLISH (QoS-1 & 2) packet.
     inp_seqno: InpSeqno,
@@ -144,10 +158,10 @@ pub struct ActiveLoop {
     ///   client.
     ack_timestamps: Vec<Timestamp>,
 
-    // Message::Routed, will messages published by broken sessions.
+    /// Message::Routed, will messages published by broken sessions.
     will_messages: Timer<ClientID, Message>,
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
-    shard_queues: BTreeMap<u32, Shard>,
+    shard_queues: BTreeMap<u32, Shard<C>>,
     /// MVCC clone of Cluster::cc_topic_filters
     cc_topic_filters: SubscribedTrie,
     /// MVCC clone of Cluster::cc_retained_topics
@@ -160,7 +174,10 @@ pub struct ActiveLoop {
 }
 
 #[allow(dead_code)]
-pub struct ReplicaLoop {
+pub struct ReplicaLoop<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     /// Mio poller for asynchronous handling, all events are from consensus port and
     /// thread-waker.
     poll: mio::Poll,
@@ -168,7 +185,7 @@ pub struct ReplicaLoop {
     waker: Arc<mio::Waker>,
     /// Cluster::Tx handle to communicate back to cluster. Shall be dropped after
     /// close_wait call, when the thread returns, will point to Inner::Init.
-    cluster: Box<Cluster>,
+    cluster: Box<C>,
 
     /// Collection of sessions and corresponding clients managed by this shard. Shall be
     /// dropped after close_wait call, when the thread returns it will be empty.
@@ -181,8 +198,11 @@ pub struct ReplicaLoop {
     app_tx: AppTx,
 }
 
-pub struct FinState {
-    pub miot: Miot,
+pub struct FinState<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    pub miot: Miot<Shard<C>>,
     pub sessions: BTreeMap<ClientID, session::Stats>,
     pub reconnects: Vec<session::Stats>,
     pub inp_seqno: InpSeqno,
@@ -191,13 +211,10 @@ pub struct FinState {
     pub stats: Stats,
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct Stats {
-    pub n_events: usize,
-    pub n_requests: usize,
-}
-
-impl FinState {
+impl<C> FinState<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn to_json(&self) -> String {
         format!(
             concat!("{{ {:?}: {}, {:?}: {}, {:?}: {}, {:?}: {} }}"),
@@ -213,15 +230,26 @@ impl FinState {
     }
 }
 
-impl Default for Shard {
-    fn default() -> Shard {
+#[derive(Clone, Copy, Default)]
+pub struct Stats {
+    pub n_events: usize,
+    pub n_requests: usize,
+}
+
+impl<C> Default for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn default() -> Shard<C> {
         let config = Config::default();
         let mut def = Shard {
             name: config.name.clone(),
             shard_id: u32::default(),
             uuid: Uuid::new_v4(),
+
             prefix: String::default(),
             config,
+
             inner: Inner::Init,
         };
         def.prefix = def.prefix();
@@ -229,13 +257,19 @@ impl Default for Shard {
     }
 }
 
-impl Shardable for Shard {
+impl<C> Shardable for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn uuid(&self) -> Uuid {
         self.uuid
     }
 }
 
-impl Drop for Shard {
+impl<C> Drop for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
@@ -243,21 +277,26 @@ impl Drop for Shard {
             Inner::Handle(_hndl) => debug!("{} drop ...", self.prefix),
             Inner::Tx(_waker, _tx) => debug!("{} drop ...", self.prefix),
             Inner::MsgTx(_waker, _tx) => debug!("{} drop ...", self.prefix),
-            Inner::MainActive(_active_loop) => info!("{} drop ...", self.prefix),
-            Inner::MainReplica(_replica_loop) => info!("{} drop ...", self.prefix),
+            Inner::MainMaster(_master) => info!("{} drop ...", self.prefix),
+            Inner::MainReplica(_replica) => info!("{} drop ...", self.prefix),
             Inner::Close(_fin_state) => debug!("{} drop ...", self.prefix),
         }
     }
 }
 
-impl ToJson for Shard {
+impl<C> ToJson for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn to_config_json(&self) -> String {
         format!(
-            concat!("{{ {:?}: {}, {:?}: {} }}"),
+            concat!("{{ {:?}: {:?}, {:?}: {}, {:?}: {} }}"),
+            "name",
+            self.config.name,
             "num_shards",
             self.config.num_shards,
-            "mqtt_pkt_batch_size",
-            self.config.mqtt_pkt_batch_size,
+            "pkt_batch_size",
+            self.config.pkt_batch_size,
         )
     }
 
@@ -266,24 +305,32 @@ impl ToJson for Shard {
     }
 }
 
-pub struct SpawnArgs {
-    pub cluster: Cluster,
+pub struct SpawnArgs<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    pub cluster: C,
     pub flusher: Flusher,
     pub cc_topic_filters: SubscribedTrie,
     pub cc_retained_topics: RetainedTrie,
 }
 
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     const WAKE_TOKEN: mio::Token = mio::Token(1);
 
-    pub fn from_config(config: &Config, shard_id: u32) -> Result<Shard> {
-        let def = Shard::default();
+    pub fn from_config(config: &Config, shard_id: u32) -> Result<Shard<C>> {
+        let def: Shard<C> = Shard::default();
         let mut val = Shard {
             name: config.name.clone(),
             shard_id,
             uuid: def.uuid,
+
             prefix: def.prefix.clone(),
             config: config.clone(),
+
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -291,7 +338,7 @@ impl Shard {
         Ok(val)
     }
 
-    pub fn spawn_active(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
+    pub fn spawn_master(self, args: SpawnArgs<C>, app_tx: &AppTx) -> Result<Shard<C>> {
         let num_shards = self.config.num_shards;
 
         let poll = mio::Poll::new()?;
@@ -301,7 +348,7 @@ impl Shard {
         // to another local-session. Note that the queue is shared by all the sessions
         // in this shard, hence the queue-capacity is correspondingly large.
         let (msg_tx, msg_rx) = {
-            let size = self.config.mqtt_pkt_batch_size * num_shards;
+            let size = self.config.pkt_batch_size * num_shards;
             message::msg_channel(self.shard_id, size as usize, Arc::clone(&waker))
         };
         let mut shard = Shard {
@@ -310,7 +357,7 @@ impl Shard {
             uuid: self.uuid,
             prefix: String::default(),
             config: self.config.clone(),
-            inner: Inner::MainActive(ActiveLoop {
+            inner: Inner::MainMaster(MasterLoop {
                 poll,
                 waker: Arc::clone(&waker),
                 cluster: Box::new(args.cluster),
@@ -365,7 +412,7 @@ impl Shard {
         Ok(shard)
     }
 
-    pub fn spawn_replica(self, args: SpawnArgs, app_tx: &AppTx) -> Result<Shard> {
+    pub fn spawn_replica(self, args: SpawnArgs<C>, app_tx: &AppTx) -> Result<Shard<C>> {
         let poll = mio::Poll::new()?;
         let waker = Arc::new(mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)?);
 
@@ -448,11 +495,14 @@ impl Shard {
     }
 }
 
-pub enum Request {
-    SetMiot(Miot, MsgRx),
-    SetShardQueues(BTreeMap<u32, Shard>),
-    AddSession(AddSessionArgs),
-    FlushSession { socket: Socket, err: Option<Error> },
+pub enum Request<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    SetMiot(Miot<Shard<C>>, MsgRx),
+    SetShardQueues(BTreeMap<u32, Shard<C>>),
+    AddSession(Socket),
+    FlushSession { pq: PQueue, err: Option<Error> },
     Close,
 }
 
@@ -460,13 +510,11 @@ pub enum Response {
     Ok,
 }
 
-pub struct AddSessionArgs {
-    pub sock: mio::net::TcpStream,
-    pub connect: v5::Connect,
-}
-
 // calls to interface with shard-thread.
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     pub fn wake(&self) -> Result<()> {
         match &self.inner {
             Inner::Handle(Handle { waker, .. }) => Ok(waker.wake()?),
@@ -475,7 +523,7 @@ impl Shard {
         }
     }
 
-    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard>) {
+    pub fn set_shard_queues(&self, shards: BTreeMap<u32, Shard<C>>) {
         match &self.inner {
             Inner::Handle(Handle { thrd, .. }) => {
                 let req = Request::SetShardQueues(shards);
@@ -485,24 +533,21 @@ impl Shard {
         }
     }
 
-    pub fn add_session(&self, args: AddSessionArgs) -> Result<()> {
+    pub fn add_session(&self, sock: Socket) {
         match &self.inner {
             Inner::Handle(Handle { thrd, .. }) => {
-                let req = Request::AddSession(args);
-                match thrd.request(req)?? {
-                    Response::Ok => Ok(()),
-                }
+                let req = Request::AddSession(sock);
+                app_fatal!(self, thrd.request(req).flatten());
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
-    pub fn flush_session(&self, socket: Socket, err: Option<Error>) -> Result<()> {
+    pub fn flush_session(&self, pq: PQueue, err: Option<Error>) {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
-                let req = Request::FlushSession { socket, err };
-                tx.post(req)?;
-                Ok(())
+                let req = Request::FlushSession { pq, err };
+                app_fatal!(self, tx.post(req));
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
@@ -515,43 +560,43 @@ impl Shard {
         }
     }
 
-    pub fn close_wait(mut self) -> Shard {
+    pub fn close_wait(mut self) -> Shard<C> {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
             Inner::Handle(Handle { thrd, .. }) => {
-                let req = Request::Close;
-                match thrd.request(req).ok().map(|x| x.ok()).flatten() {
-                    Some(Response::Ok) => thrd.close_wait(),
-                    _ => unreachable!("{} unxpected response", self.prefix),
-                }
+                app_fatal!(self, thrd.request(Request::Close));
+                thrd.close_wait()
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
 
-impl Threadable for Shard {
-    type Req = Request;
+impl<C> Threadable for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    type Req = Request<C>;
     type Resp = Result<Response>;
 
-    fn main_loop(mut self, rx: ThreadRx) -> Self {
+    fn main_loop(mut self, rx: ThreadRx<C>) -> Self {
         match &self.inner {
-            Inner::MainActive(_) => {
+            Inner::MainMaster(_) => {
                 // this a work around to wire up all the threads without using unsafe.
                 let msg_rx = match rx.recv().unwrap() {
                     (Request::SetMiot(miot, msg_rx), Some(tx)) => {
-                        let active_loop = match &mut self.inner {
-                            Inner::MainActive(active_loop) => active_loop,
+                        let master_loop = match &mut self.inner {
+                            Inner::MainMaster(master_loop) => master_loop,
                             inner => unreachable!("{} {:?}", self.prefix, inner),
                         };
-                        active_loop.miot = miot;
+                        master_loop.miot = miot;
                         app_fatal!(&self, tx.send(Ok(Response::Ok)));
                         msg_rx
                     }
                     _ => unreachable!(),
                 };
 
-                self.active_loop(rx, msg_rx)
+                self.master_loop(rx, msg_rx)
             }
             Inner::MainReplica(_) => self.replica_loop(rx),
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -559,17 +604,23 @@ impl Threadable for Shard {
     }
 }
 
-struct ActiveContext {
+struct MasterContext<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     msg_rx: MsgRx,
-    inner: Inner,
+    inner: Inner<C>,
     session: Session,
     cons_io: ConsensIO,
     disconnected: bool,
 }
 
-impl ActiveContext {
-    fn new(msg_rx: MsgRx, inner: Inner) -> ActiveContext {
-        ActiveContext {
+impl<C> MasterContext<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn new(msg_rx: MsgRx, inner: Inner<C>) -> MasterContext<C> {
+        MasterContext {
             msg_rx,
             inner,
             session: Session::default(),
@@ -579,8 +630,11 @@ impl ActiveContext {
     }
 }
 
-impl Shard {
-    fn active_loop(mut self, rx: ThreadRx, mut msg_rx: MsgRx) -> Self {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn master_loop(mut self, rx: ThreadRx<C>, mut msg_rx: MsgRx) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
@@ -602,12 +656,12 @@ impl Shard {
             };
 
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
-            let mut args = ActiveContext::new(msg_rx, inner);
+            let mut args = MasterContext::new(msg_rx, inner);
 
-            self.active_pre_cs(&mut args, &mut cons_io);
-            self.active_cs(&mut args, &mut cons_io);
+            self.master_pre_cs(&mut args, &mut cons_io);
+            self.master_cs(&mut args, &mut cons_io);
             self.return_local_acks(&mut args, &mut cons_io);
-            self.active_post_cs(&mut args, &mut cons_io);
+            self.master_post_cs(&mut args, &mut cons_io);
             self.inc_publish_ack(&mut args, &mut cons_io);
             self.expire_reconnects();
 
@@ -620,7 +674,7 @@ impl Shard {
         }
 
         match &self.inner {
-            Inner::MainActive(_) => self.handle_close_a(Request::Close),
+            Inner::MainMaster(_) => self.handle_close_a(Request::Close),
             Inner::Close(_) => Response::Ok,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -629,9 +683,9 @@ impl Shard {
         self
     }
 
-    fn active_pre_cs(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
+    fn master_pre_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
         let sessions = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -671,7 +725,7 @@ impl Shard {
 
         self.clean_failed_sessions(fail_sessions, cons_io);
         let _empty = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -680,9 +734,9 @@ impl Shard {
         let _empty = mem::replace(cons_io, route_io.cons_io);
     }
 
-    fn active_cs(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
+    fn master_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
         let sessions = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -717,16 +771,16 @@ impl Shard {
 
         self.clean_failed_sessions(fail_sessions, cons_io);
         let _empty = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
     }
 
-    fn active_post_cs(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
+    fn master_post_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
         let sessions = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -796,17 +850,19 @@ impl Shard {
 
         self.clean_failed_sessions(fail_sessions, cons_io);
         let _empty = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
     }
 
-    fn book_incoming_msgs(&mut self, args: &mut ActiveContext, rio: &mut RouteIO) {
-        let ActiveLoop { index, shard_back_log, ack_timestamps, .. } =
+    fn book_incoming_msgs(&mut self, args: &mut MasterContext<C>, rio: &mut RouteIO) {
+        use crate::PacketType;
+
+        let MasterLoop { index, shard_back_log, ack_timestamps, .. } =
             match &mut self.inner {
-                Inner::MainActive(active_loop) => active_loop,
+                Inner::MainMaster(master_loop) => master_loop,
                 inner => unreachable!("{} {:?}", self.prefix, inner),
             };
 
@@ -819,12 +875,11 @@ impl Shard {
 
         for mut msg in oug_msgs.into_iter() {
             match &mut msg {
-                Message::ClientAck { packet: v5::Packet::PingResp } => {
-                    oug_acks.push(msg);
-                }
-                Message::ClientAck { packet: v5::Packet::PubAck(_) } => {
-                    oug_acks.push(msg);
-                }
+                Message::ClientAck { packet } => match packet.to_packet_type() {
+                    PacketType::PingResp => oug_acks.push(msg),
+                    PacketType::PubAck => oug_acks.push(msg),
+                    _ => unreachable!(),
+                },
                 Message::Retain { out_seqno, publish } if publish.is_qos0() => {
                     *out_seqno = args.session.incr_oug_qos0();
                     oug_retain0.push(msg);
@@ -883,8 +938,8 @@ impl Shard {
 
     // Flush outgoing messages, in `shard_back_log` from this shard to other shards.
     fn send_to_shards(&mut self) {
-        let ActiveLoop { shard_back_log, shard_queues, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
+        let MasterLoop { shard_back_log, shard_queues, .. } = match &mut self.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
@@ -905,9 +960,9 @@ impl Shard {
         }
     }
 
-    fn rx_messages(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
-        let ActiveLoop { ack_timestamps, .. } = match &mut args.inner {
-            Inner::MainActive(active_loop) => active_loop,
+    fn rx_messages(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+        let MasterLoop { ack_timestamps, .. } = match &mut args.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
@@ -947,9 +1002,13 @@ impl Shard {
         };
     }
 
-    fn return_local_acks(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
-        let ActiveLoop { shard_back_log, .. } = match &mut args.inner {
-            Inner::MainActive(active_loop) => active_loop,
+    fn return_local_acks(
+        &mut self,
+        args: &mut MasterContext<C>,
+        cons_io: &mut ConsensIO,
+    ) {
+        let MasterLoop { shard_back_log, .. } = match &mut args.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
@@ -976,10 +1035,10 @@ impl Shard {
         self.send_to_shards();
     }
 
-    fn inc_publish_ack(&mut self, args: &mut ActiveContext, cons_io: &mut ConsensIO) {
-        let (index, ack_timestamps) = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { index, ack_timestamps, .. }) => {
-                (index, ack_timestamps)
+    fn inc_publish_ack(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+        let (index, sessions, ack_timestamps) = match &mut args.inner {
+            Inner::MainMaster(MasterLoop { index, sessions, ack_timestamps, .. }) => {
+                (index, sessions, ack_timestamps)
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -996,7 +1055,11 @@ impl Shard {
 
             inp_seqnos.push(*inp_seqno);
             if let Message::ShardIndex { src_client_id, packet_id, .. } = msg {
-                let msg = Message::new_pub_ack(v5::Pub::new_pub_ack(*packet_id));
+                let msg = {
+                    let session = sessions.get(src_client_id).unwrap();
+                    let pkt = session.as_protocol().new_pub_ack(*packet_id);
+                    Message::new_pub_ack(pkt)
+                };
                 match oug_acks.get_mut(src_client_id) {
                     Some(val) => val.push(msg),
                     None => {
@@ -1011,10 +1074,11 @@ impl Shard {
         }
 
         mem::drop(index);
+        mem::drop(sessions);
         mem::drop(ack_timestamps);
 
         let sessions = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1041,7 +1105,7 @@ impl Shard {
 
         self.clean_failed_sessions(fail_sessions, cons_io);
         let _empty = match &mut args.inner {
-            Inner::MainActive(ActiveLoop { sessions, .. }) => {
+            Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1049,8 +1113,8 @@ impl Shard {
     }
 
     fn expire_reconnects(&mut self) {
-        let ActiveLoop { reconnects, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
+        let MasterLoop { reconnects, .. } = match &mut self.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
@@ -1061,7 +1125,7 @@ impl Shard {
 
     fn remove_session(&mut self, client_id: &ClientID) {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop {
+            Inner::MainMaster(MasterLoop {
                 index,
                 sessions,
                 reconnects,
@@ -1107,8 +1171,11 @@ impl Shard {
     }
 }
 
-impl Shard {
-    fn replica_loop(mut self, rx: ThreadRx) -> Self {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn replica_loop(mut self, rx: ThreadRx<C>) -> Self {
         use crate::broker::POLL_EVENTS_SIZE;
 
         info!("{} spawn config:{}", self.prefix, self.to_config_json());
@@ -1150,11 +1217,14 @@ impl Shard {
     }
 }
 
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     // (exit,)
     fn mio_events(
         &mut self,
-        rx: &ThreadRx,
+        rx: &ThreadRx<C>,
         events: &mio::Events,
         cons_io: &mut ConsensIO,
     ) -> bool {
@@ -1178,9 +1248,9 @@ impl Shard {
     // Return (queue-status, disconnected)
     fn drain_control_chan(
         &mut self,
-        rx: &ThreadRx,
+        rx: &ThreadRx<C>,
         cons_io: &mut ConsensIO,
-    ) -> (QueueReq, bool) {
+    ) -> (QueueReq<C>, bool) {
         use crate::broker::{thread::pending_requests, CONTROL_CHAN_SIZE};
         use Request::*;
 
@@ -1218,7 +1288,10 @@ impl Shard {
 }
 
 // Handle incoming messages
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn clean_failed_sessions(
         &mut self,
         mut fail_sessions: Vec<FailSession>,
@@ -1231,8 +1304,8 @@ impl Shard {
             let miot = self.as_mut_miot();
 
             match miot.remove_connection(&session.client_id) {
-                Ok(Some(socket)) => {
-                    let req = Request::FlushSession { socket, err };
+                Ok(Some(pq)) => {
+                    let req = Request::FlushSession { pq, err };
                     self.handle_flush_session(req, cons_io);
                 }
                 Ok(None) => {
@@ -1251,42 +1324,49 @@ impl Shard {
 }
 
 // Handle out-going messages
-impl Shard {
-    fn handle_set_shard_queues(&mut self, req: Request) -> Response {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    fn handle_set_shard_queues(&mut self, req: Request<C>) -> Response {
         let shard_queues = match req {
             Request::SetShardQueues(shard_queues) => shard_queues,
             _ => unreachable!(),
         };
 
         match &mut self.inner {
-            Inner::MainActive(active_loop) => {
-                active_loop.shard_queues = shard_queues;
+            Inner::MainMaster(master_loop) => {
+                master_loop.shard_queues = shard_queues;
                 Response::Ok
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
-    fn handle_add_session_a(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
-        use crate::broker::miot::AddConnectionArgs;
+    fn handle_add_session_a(
+        &mut self,
+        req: Request<C>,
+        cons_io: &mut ConsensIO,
+    ) -> Response {
+        use crate::broker::PQueueArgs;
 
-        let AddSessionArgs { sock, connect } = match r {
-            Request::AddSession(args) => args,
+        let sock = match req {
+            Request::AddSession(sock) => sock,
             _ => unreachable!(),
         };
 
         // create the session
-        let (mut session, upstream, downstream) = {
-            let (args, upstream, downstream) = self.to_args_active(&r);
-            let session = self.new_session_a(args, cons_io);
+        let (mut session, session_tx, miot_rx) = {
+            let (args, upstream, downstream) = self.to_args_master(&sock);
+            let session = self.new_session_a(&sock, args, cons_io);
             (session, upstream, downstream)
         };
 
-        let raddr = sock.peer_addr().unwrap();
+        let raddr = sock.peer_addr();
 
         // send back the connection acknowledgment CONNACK here.
         {
-            let packet = session.success_ack(&connect);
+            let packet = sock.success_ack();
             let status = session.tx_oug_acks(vec![Message::new_conn_ack(packet)]);
 
             match status {
@@ -1302,20 +1382,17 @@ impl Shard {
 
         // add_connection to miot
         {
-            let client_id = session.client_id.clone();
-            let def = Config::DEF_MQTT_MAX_PACKET_SIZE;
-            let args = AddConnectionArgs {
-                client_id,
-                conn: sock,
-                upstream,
-                downstream,
-                max_packet_size: session.as_connect().max_packet_size(def),
+            let args = PQueueArgs {
+                config: self.config.clone(),
+                socket: sock,
+                session_tx,
+                miot_rx,
             };
-            app_fatal!(&self, self.as_miot().add_connection(args));
+            self.as_miot().add_connection(args);
         }
 
-        let ActiveLoop { sessions, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
+        let MasterLoop { sessions, .. } = match &mut self.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
         sessions.insert(session.client_id.clone(), session);
@@ -1326,75 +1403,68 @@ impl Shard {
 
     #[allow(dead_code)] // TODO: wire this up with consensus loop
     fn handle_add_session_r(&mut self, msg: Message) -> Response {
-        let (raddr, config, client_id, shard_id, connect) = match msg {
-            Message::AddSession {
-                raddr, config, client_id, shard_id, connect, ..
-            } => (raddr, config, client_id, shard_id, connect),
-            _ => unreachable!(),
-        };
         let session = {
-            let args = SessionArgsReplica {
-                raddr,
-                config,
-                client_id: client_id.clone(),
-                shard_id,
-                connect,
-            };
+            let args = msg.into_session_args_replica();
             self.new_session_r(args)
         };
+        let raddr = session.raddr;
 
         let ReplicaLoop { sessions, .. } = match &mut self.inner {
             Inner::MainReplica(replica_loop) => replica_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        sessions.insert(client_id, session);
+        sessions.insert(session.client_id.clone(), session);
         info!("{} raddr:{} adding new replica session to shard", self.prefix, raddr);
 
         Response::Ok
     }
 
-    fn handle_flush_session(&mut self, r: Request, cons_io: &mut ConsensIO) -> Response {
-        let (socket, err) = match r {
-            Request::FlushSession { socket, err } => (socket, err),
+    fn handle_flush_session(
+        &mut self,
+        r: Request<C>,
+        cons_io: &mut ConsensIO,
+    ) -> Response {
+        let (pq, err) = match r {
+            Request::FlushSession { pq, err } => (pq, err),
             _ => unreachable!(),
         };
 
-        let client_id = socket.client_id.clone();
+        let client_id = pq.to_client_id();
 
         self.remove_session(&client_id);
 
-        let ActiveLoop { flusher, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
+        let MasterLoop { flusher, .. } = match &mut self.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-        app_fatal!(&self, flusher.flush_connection(socket, err));
+        flusher.flush_connection(pq, err);
 
         let msg = Message::new_rem_session(self.shard_id, client_id);
         cons_io.ctrl_msgs.push(msg);
         Response::Ok
     }
 
-    fn handle_close_a(&mut self, _req: Request) -> Response {
-        let mut active_loop = match mem::replace(&mut self.inner, Inner::Init) {
-            Inner::MainActive(active_loop) => active_loop,
+    fn handle_close_a(&mut self, _req: Request<C>) -> Response {
+        let mut master_loop = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         info!("{} closing shard", self.prefix);
 
-        let miot = mem::replace(&mut active_loop.miot, Miot::default()).close_wait();
+        let miot = mem::replace(&mut master_loop.miot, Miot::default()).close_wait();
 
-        mem::drop(active_loop.poll);
-        mem::drop(active_loop.waker);
-        mem::drop(active_loop.cluster);
-        mem::drop(active_loop.flusher);
+        mem::drop(master_loop.poll);
+        mem::drop(master_loop.waker);
+        mem::drop(master_loop.cluster);
+        mem::drop(master_loop.flusher);
 
-        mem::drop(active_loop.shard_queues);
-        mem::drop(active_loop.cc_topic_filters);
-        mem::drop(active_loop.cc_retained_topics);
+        mem::drop(master_loop.shard_queues);
+        mem::drop(master_loop.cc_topic_filters);
+        mem::drop(master_loop.cc_retained_topics);
 
         let mut new_sessions = BTreeMap::default();
-        for (client_id, sess) in active_loop.sessions.into_iter() {
+        for (client_id, sess) in master_loop.sessions.into_iter() {
             match sess.close() {
                 Ok(stat) => {
                     new_sessions.insert(client_id, stat);
@@ -1409,7 +1479,7 @@ impl Shard {
         }
 
         let mut stats = Vec::default();
-        for session in active_loop.reconnects.close() {
+        for session in master_loop.reconnects.close() {
             let client_id = session.client_id.clone();
             match session.close() {
                 Ok(stat) => stats.push(stat),
@@ -1425,10 +1495,10 @@ impl Shard {
             miot,
             sessions: new_sessions,
             reconnects: stats,
-            inp_seqno: active_loop.inp_seqno,
+            inp_seqno: master_loop.inp_seqno,
             shard_back_log: BTreeMap::default(), // TODO
-            ack_timestamps: active_loop.ack_timestamps,
-            stats: active_loop.stats,
+            ack_timestamps: master_loop.ack_timestamps,
+            stats: master_loop.stats,
         };
         info!("{} stats:{}", self.prefix, fin_state.to_json());
 
@@ -1439,7 +1509,7 @@ impl Shard {
     }
 
     #[allow(dead_code)] // TODO: wire this up with consensus loop
-    fn handle_close_r(&mut self, _req: Request) -> Response {
+    fn handle_close_r(&mut self, _req: Request<C>) -> Response {
         let replica_loop = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::MainReplica(replica_loop) => replica_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1498,35 +1568,45 @@ impl Shard {
     }
 }
 
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     // Return (new_session, session_tx (upstream), miot_rx (downstream))
-    fn to_args_active(&mut self, req: &Request) -> (SessionArgsActive, PktTx, PktRx) {
-        // This queue is wired up with miot-thread. This queue carries v5::Packet,
+    fn to_args_master(
+        &mut self,
+        sock: &Socket,
+    ) -> (SessionArgsMaster, PacketTx, PacketRx) {
+        use crate::new_packet_queue;
+
+        // This queue is wired up with miot-thread. This queue carries QPacket,
         // and there is a separate queue for every session.
         let (upstream, session_rx) = {
-            let size = self.config.mqtt_pkt_batch_size as usize;
+            let size = self.config.pkt_batch_size as usize;
             let waker = self.to_waker();
-            socket::new_packet_queue(self.shard_id, size, waker)
+            new_packet_queue(self.shard_id, size, waker)
         };
-        // This queue is wired up with miot-thread. This queue carries v5::Packet,
+        // This queue is wired up with miot-thread. This queue carries QPacket,
         // and there is a separate queue for every session.
         let (miot_tx, downstream) = {
-            let size = self.config.mqtt_pkt_batch_size as usize;
+            let size = self.config.pkt_batch_size as usize;
             let waker = self.as_miot().to_waker();
-            socket::new_packet_queue(self.shard_id, size, waker)
+            new_packet_queue(self.shard_id, size, waker)
         };
 
-        let args = match req {
-            Request::AddSession(AddSessionArgs { sock, connect }) => SessionArgsActive {
-                shard_id: self.shard_id,
-                client_id: ClientID::from(&connect),
-                raddr: sock.peer_addr().unwrap(),
-                config: self.config.clone(),
-                miot_tx,
-                session_rx,
-                connect: connect.clone(),
-            },
-            _ => unreachable!(),
+        let args = SessionArgsMaster {
+            shard_id: self.shard_id,
+            client_id: sock.to_client_id(),
+            raddr: sock.peer_addr(),
+            config: self.config.clone(),
+            proto: sock.to_protocol(),
+
+            miot_tx,
+            session_rx,
+
+            client_receive_maximum: sock.receive_maximum(),
+            client_keep_alive: sock.keep_alive(),
+            client_session_expiry_interval: sock.session_expiry_interval(),
         };
 
         (args, upstream, downstream)
@@ -1534,26 +1614,27 @@ impl Shard {
 
     fn new_session_a(
         &mut self,
-        args: SessionArgsActive,
+        sock: &Socket,
+        args: SessionArgsMaster,
         cons_io: &mut ConsensIO,
     ) -> Session {
         // add_connection further down shall wake miot-thread.
-        let ActiveLoop { reconnects, miot, .. } = match &mut self.inner {
-            Inner::MainActive(active_loop) => active_loop,
+        let MasterLoop { reconnects, miot, .. } = match &mut self.inner {
+            Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         let client_id = args.client_id.clone();
-        let clean_start = args.connect.flags.is_clean_start();
+        let clean_start = sock.is_clean_start();
         let reconnect = reconnects.contains(&client_id);
 
         // new_add_session
         let mut msg = Message::AddSession {
+            shard_id: args.shard_id,
+            client_id: args.client_id.clone(),
             raddr: args.raddr,
             config: args.config.clone(),
-            client_id: args.client_id.clone(),
-            shard_id: args.shard_id,
-            connect: args.connect.clone(),
+            proto: args.proto.clone(),
             clean_start: false,
         };
 
@@ -1570,7 +1651,7 @@ impl Shard {
                     "{} old_raddr:{} new_raddr:{} session clean_start",
                     self.prefix, old_session.raddr, args.raddr
                 );
-                (Session::default().into_active(args), true)
+                (Session::default().into_master(args), true)
             }
             Ok(None) if reconnect => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
@@ -1584,19 +1665,19 @@ impl Shard {
                     "{} old_raddr:{} new_raddr:{} session reconnect",
                     self.prefix, old_session.raddr, args.raddr
                 );
-                (old_session.into_active(args), false)
+                (old_session.into_master(args), false)
             }
             Ok(None) => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
                 cons_io.ctrl_msgs.push(msg);
 
-                (Session::default().into_active(args), true)
+                (Session::default().into_master(args), true)
             }
-            Ok(Some(socket)) => {
+            Ok(Some(pq)) => {
                 let err: Result<()> = err_session_takeover(&self.prefix, args.raddr);
-                let req = Request::FlushSession { socket, err: err.err() };
+                let req = Request::FlushSession { pq, err: err.err() };
                 self.handle_flush_session(req, cons_io);
-                (Session::default().into_active(args), true)
+                (Session::default().into_master(args), true)
             }
             Err(err) => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
@@ -1604,7 +1685,7 @@ impl Shard {
 
                 self.as_app_tx().send("fatal".to_string()).ok();
                 error!("{} fatal error {} ", self.prefix, err);
-                (Session::default().into_active(args), true)
+                (Session::default().into_master(args), true)
             }
         };
 
@@ -1638,30 +1719,36 @@ impl Shard {
     }
 }
 
-impl Shard {
-    pub fn as_cluster(&self) -> &Cluster {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
+    pub fn as_cluster(&self) -> &C {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { cluster, .. }) => cluster,
+            Inner::MainMaster(MasterLoop { cluster, .. }) => cluster,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }
 
-impl session::Shard for Shard {
+impl<C> ShardAPI for Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn to_shard_id(self) -> u32 {
         self.shard_id
     }
 
     fn as_topic_filters(&self) -> &SubscribedTrie {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { cc_topic_filters, .. }) => cc_topic_filters,
+            Inner::MainMaster(MasterLoop { cc_topic_filters, .. }) => cc_topic_filters,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn as_retained_topics(&self) -> &RetainedTrie {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { cc_retained_topics, .. }) => {
+            Inner::MainMaster(MasterLoop { cc_retained_topics, .. }) => {
                 cc_retained_topics
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1670,7 +1757,7 @@ impl session::Shard for Shard {
 
     fn incr_inp_seqno(&mut self) -> u64 {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { inp_seqno, .. }) => {
+            Inner::MainMaster(MasterLoop { inp_seqno, .. }) => {
                 let seqno = *inp_seqno;
                 *inp_seqno = inp_seqno.saturating_add(1);
                 seqno
@@ -1678,16 +1765,27 @@ impl session::Shard for Shard {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
+
+    fn wake(&self) -> Result<()> {
+        self.wake()
+    }
+
+    fn flush_session(&self, pq: PQueue, err: Option<Error>) {
+        self.flush_session(pq, err)
+    }
 }
 
-impl Shard {
+impl<C> Shard<C>
+where
+    C: 'static + Send + ClusterAPI,
+{
     fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",
             Inner::Handle(_) => "hndl",
             Inner::Tx(_, _) => "tx",
             Inner::MsgTx(_, _) => "msgtx",
-            Inner::MainActive(_) => "active",
+            Inner::MainMaster(_) => "master",
             Inner::MainReplica(_) => "replica",
             Inner::Close(_) => "close",
         };
@@ -1696,7 +1794,7 @@ impl Shard {
 
     fn incr_n_events(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { stats, .. }) => stats.n_events += count,
+            Inner::MainMaster(MasterLoop { stats, .. }) => stats.n_events += count,
             Inner::MainReplica(ReplicaLoop { stats, .. }) => stats.n_events += count,
             Inner::Close(finstate) => finstate.stats.n_events += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1705,7 +1803,7 @@ impl Shard {
 
     fn incr_n_requests(&mut self, count: usize) {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { stats, .. }) => stats.n_requests += count,
+            Inner::MainMaster(MasterLoop { stats, .. }) => stats.n_requests += count,
             Inner::MainReplica(ReplicaLoop { stats, .. }) => stats.n_requests += count,
             Inner::Close(finstate) => finstate.stats.n_requests += count,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1714,35 +1812,35 @@ impl Shard {
 
     fn as_mut_poll(&mut self) -> &mut mio::Poll {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { poll, .. }) => poll,
+            Inner::MainMaster(MasterLoop { poll, .. }) => poll,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn as_app_tx(&self) -> &AppTx {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { app_tx, .. }) => app_tx,
+            Inner::MainMaster(MasterLoop { app_tx, .. }) => app_tx,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
-    fn as_miot(&self) -> &Miot {
+    fn as_miot(&self) -> &Miot<Shard<C>> {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { miot, .. }) => miot,
+            Inner::MainMaster(MasterLoop { miot, .. }) => miot,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
-    fn as_mut_miot(&mut self) -> &Miot {
+    fn as_mut_miot(&mut self) -> &Miot<Shard<C>> {
         match &mut self.inner {
-            Inner::MainActive(ActiveLoop { miot, .. }) => miot,
+            Inner::MainMaster(MasterLoop { miot, .. }) => miot,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 
     fn to_waker(&self) -> Arc<mio::Waker> {
         match &self.inner {
-            Inner::MainActive(ActiveLoop { waker, .. }) => Arc::clone(waker),
+            Inner::MainMaster(MasterLoop { waker, .. }) => Arc::clone(waker),
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

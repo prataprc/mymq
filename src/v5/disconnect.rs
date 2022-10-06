@@ -129,6 +129,22 @@ impl TryFrom<u8> for DisconnReasonCode {
     }
 }
 
+impl TryFrom<ReasonCode> for DisconnReasonCode {
+    type Error = Error;
+
+    fn try_from(val: ReasonCode) -> Result<DisconnReasonCode> {
+        DisconnReasonCode::try_from(val as u8)
+    }
+}
+
+impl TryFrom<DisconnReasonCode> for ReasonCode {
+    type Error = Error;
+
+    fn try_from(val: DisconnReasonCode) -> Result<ReasonCode> {
+        ReasonCode::try_from(val as u8)
+    }
+}
+
 /// DISCONNECT Packet
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Disconnect {
@@ -191,6 +207,10 @@ impl Disconnect {
         }
     }
 
+    pub fn reason_string(&self) -> Option<String> {
+        self.properties.as_ref()?.reason_string.clone()
+    }
+
     fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -228,7 +248,7 @@ impl Packetize for Disconnect {
     }
 
     fn encode(&self) -> Result<Blob> {
-        use crate::v5::{insert_fixed_header, PacketType::Disconnect};
+        use crate::{v5::insert_fixed_header, PacketType::Disconnect};
 
         let mut data = Vec::with_capacity(64);
 

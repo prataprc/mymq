@@ -6,17 +6,14 @@ use std::sync::{mpsc, Arc};
 use std::{collections::BTreeMap, fmt, net, result};
 
 use crate::broker::SessionArgsReplica;
-#[allow(unused_imports)]
-use crate::broker::Shard;
 use crate::broker::{Config, InpSeqno, OutSeqno};
-use crate::{ClientID, PacketID, QPacket, QoS, QueueStatus};
+use crate::{ClientID, PacketID, Protocol, QPacket, QoS, QueueStatus};
 
 #[derive(Default)]
 pub struct RouteIO {
     pub disconnected: bool,
-    // Message::ClientAck carrying PingResp
+    // Message::ClientAck carrying PingResp, PubAck-QoS-1
     // Message::{Subscribe, Retain, UnSubscribe, ShardIndex, Routed}
-    // Message::ClientAck carrying PubAck for QoS1
     pub oug_msgs: Vec<Message>,
     pub cons_io: ConsensIO,
 }
@@ -59,14 +56,8 @@ pub struct MsgTx {
 impl Drop for MsgTx {
     fn drop(&mut self) {
         if self.count > 0 {
-            match self.waker.wake() {
-                Ok(()) => (),
-                Err(err) => {
-                    error!(
-                        "shard-{} waking the receiving shard err:{}",
-                        self.shard_id, err
-                    )
-                }
+            if let Err(err) = self.waker.wake() {
+                error!("shard-{} waking the receiving shard err:{}", self.shard_id, err)
             }
         }
     }
@@ -75,6 +66,7 @@ impl Drop for MsgTx {
 impl MsgTx {
     pub fn try_sends(&mut self, msgs: Vec<Message>) -> QueueStatus<Message> {
         let mut iter = msgs.into_iter();
+
         loop {
             match iter.next() {
                 Some(msg) => match self.tx.try_send(msg) {
@@ -145,11 +137,11 @@ pub enum Message {
         out_seqno: OutSeqno,
         publish: QPacket,
     },
-    /// Consensus Loop.
+    /// Consensus Loop, carrying SUBSCRIBE packet.
     Subscribe {
         sub: QPacket,
     },
-    /// Consensus Loop.
+    /// Consensus Loop, carrying UNSUBSCRIBE packet.
     UnSubscribe {
         unsub: QPacket,
     },
@@ -187,11 +179,11 @@ pub enum Message {
 
     // Consensus
     AddSession {
+        shard_id: u32,
+        client_id: ClientID,
         raddr: net::SocketAddr,
         config: Config,
-        client_id: ClientID,
-        shard_id: u32,
-        connect: QPacket,
+        proto: Protocol,
         clean_start: bool,
     },
     RemSession {
@@ -204,13 +196,16 @@ impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
             Message::ClientAck { .. } => write!(f, "Message::ClientAck"),
+            Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::Subscribe { .. } => write!(f, "Message::Subscribe"),
             Message::UnSubscribe { .. } => write!(f, "Message::UnSubscribe"),
-            Message::Retain { .. } => write!(f, "Message::Retain"),
             Message::ShardIndex { .. } => write!(f, "Message::ShardIndex"),
+
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
+
             Message::Oug { .. } => write!(f, "Message::Oug"),
+
             Message::AddSession { .. } => write!(f, "Message::AddSession"),
             Message::RemSession { .. } => write!(f, "Message::RemSession"),
         }
@@ -220,56 +215,67 @@ impl fmt::Debug for Message {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Message {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
+        use crate::v5;
         use std::str::FromStr;
 
         let val = match uns.arbitrary::<u8>()? % 10 {
             0 => Message::ClientAck {
-                packet: match uns.arbitrary::<u8>()? % 8 {
-                    0 => v5::Packet::ConnAck(uns.arbitrary()?),
-                    1 => v5::Packet::PubAck(uns.arbitrary()?),
-                    2 => v5::Packet::PubRec(uns.arbitrary()?),
-                    3 => v5::Packet::PubRel(uns.arbitrary()?),
-                    4 => v5::Packet::PubComp(uns.arbitrary()?),
-                    5 => v5::Packet::SubAck(uns.arbitrary()?),
-                    6 => v5::Packet::UnsubAck(uns.arbitrary()?),
-                    7 => v5::Packet::PingResp,
-                    _ => unreachable!(),
+                packet: {
+                    let packet = match uns.arbitrary::<u8>()? % 8 {
+                        0 => v5::Packet::ConnAck(uns.arbitrary()?),
+                        1 => v5::Packet::PubAck(uns.arbitrary()?),
+                        2 => v5::Packet::PubRec(uns.arbitrary()?),
+                        3 => v5::Packet::PubRel(uns.arbitrary()?),
+                        4 => v5::Packet::PubComp(uns.arbitrary()?),
+                        5 => v5::Packet::SubAck(uns.arbitrary()?),
+                        6 => v5::Packet::UnsubAck(uns.arbitrary()?),
+                        7 => v5::Packet::PingResp,
+                        _ => unreachable!(),
+                    };
+                    QPacket::V5(packet)
                 },
             },
-            1 => Message::Oug {
+            1 => Message::Retain {
                 out_seqno: uns.arbitrary()?,
-                publish: uns.arbitrary()?,
+                publish: QPacket::V5(v5::Packet::Publish(uns.arbitrary()?)),
             },
-            2 => Message::Subscribe { sub: uns.arbitrary()? },
-            3 => Message::UnSubscribe { unsub: uns.arbitrary()? },
-            4 => Message::Retain {
-                out_seqno: uns.arbitrary()?,
-                publish: uns.arbitrary()?,
+            2 => Message::Subscribe {
+                sub: QPacket::V5(v5::Packet::Subscribe(uns.arbitrary()?)),
             },
-            5 => Message::ShardIndex {
+            3 => Message::UnSubscribe {
+                unsub: QPacket::V5(v5::Packet::UnSubscribe(uns.arbitrary()?)),
+            },
+            4 => Message::ShardIndex {
                 src_client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
                 packet_id: uns.arbitrary()?,
                 qos: uns.arbitrary()?,
             },
-            6 => Message::Routed {
+
+            5 => Message::Routed {
                 src_shard_id: uns.arbitrary()?,
                 dst_shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
                 out_seqno: uns.arbitrary()?,
-                publish: uns.arbitrary()?,
+                publish: QPacket::V5(v5::Publish(uns.arbitrary()?)),
             },
-            7 => Message::LocalAck {
+            6 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,
                 last_acked: uns.arbitrary()?,
             },
+
+            7 => Message::Oug {
+                out_seqno: uns.arbitrary()?,
+                publish: QPacket::V5(v5::Publish(uns.arbitrary()?)),
+            },
+
             8 => Message::AddSession {
+                shard_id: uns.arbitrary()?,
+                client_id: uns.arbitrary()?,
                 raddr: net::SocketAddr::from_str("192.168.2.10:1883").unwrap(),
                 config: Config::default(), // TODO: make config arbitrary
-                client_id: uns.arbitrary()?,
-                shard_id: uns.arbitrary()?,
-                connect: uns.arbitrary()?,
+                proto: Protocol::default(),
                 clean_start: uns.arbitrary()?,
             },
             9 => Message::RemSession {
@@ -285,45 +291,45 @@ impl<'a> Arbitrary<'a> for Message {
 
 impl Message {
     pub fn new_conn_ack(connack: QPacket) -> Message {
-        Message::ClientAck { packet: v5::Packet::ConnAck(connack) }
+        Message::ClientAck { packet: connack }
     }
 
-    pub fn new_ping_resp() -> Message {
-        Message::ClientAck { packet: v5::Packet::PingResp }
+    pub fn new_ping_resp(ping: QPacket) -> Message {
+        Message::ClientAck { packet: ping }
     }
 
-    pub fn new_sub(sub: v5::Subscribe) -> Message {
-        Message::Subscribe { sub }
+    pub fn new_pub_ack(puback: QPacket) -> Message {
+        Message::ClientAck { packet: puback }
     }
 
-    pub fn new_retain_publish(publish: v5::Publish) -> Message {
+    pub fn new_suback(suback: QPacket) -> Message {
+        Message::ClientAck { packet: suback }
+    }
+
+    pub fn new_unsuback(unsuback: QPacket) -> Message {
+        Message::ClientAck { packet: unsuback }
+    }
+
+    pub fn new_retain_publish(publish: QPacket) -> Message {
         Message::Retain { out_seqno: 0, publish }
     }
 
-    pub fn new_unsub(unsub: v5::UnSubscribe) -> Message {
+    pub fn new_sub(sub: QPacket) -> Message {
+        Message::Subscribe { sub }
+    }
+
+    pub fn new_unsub(unsub: QPacket) -> Message {
         Message::UnSubscribe { unsub }
     }
 
-    pub fn new_index(id: &ClientID, s: InpSeqno, p: &v5::Publish) -> Option<Message> {
-        let packet_id = p.packet_id?;
-        Some(Message::ShardIndex {
+    pub fn new_index(id: &ClientID, s: InpSeqno, publish: &QPacket) -> Message {
+        let packet_id = publish.to_packet_id().unwrap();
+        Message::ShardIndex {
             src_client_id: id.clone(),
             inp_seqno: s,
             packet_id,
-            qos: p.qos,
-        })
-    }
-
-    pub fn new_suback(suback: v5::SubAck) -> Message {
-        Message::ClientAck { packet: v5::Packet::SubAck(suback) }
-    }
-
-    pub fn new_unsuback(unsuback: v5::UnsubAck) -> Message {
-        Message::ClientAck { packet: v5::Packet::UnsubAck(unsuback) }
-    }
-
-    pub fn new_pub_ack(puback: v5::Pub) -> Message {
-        Message::ClientAck { packet: v5::Packet::PubAck(puback) }
+            qos: publish.to_qos(),
+        }
     }
 
     pub fn new_routed() -> Message {
@@ -341,7 +347,9 @@ impl Message {
     pub fn new_rem_session(shard_id: u32, client_id: ClientID) -> Message {
         Message::RemSession { shard_id, client_id }
     }
+}
 
+impl Message {
     pub fn set_clean_start(&mut self, cstart: bool) {
         match self {
             Message::AddSession { clean_start, .. } => *clean_start = cstart,
@@ -349,22 +357,10 @@ impl Message {
         }
     }
 
-    pub fn into_oug(self, out_seqno: OutSeqno, packet_id: PacketID) -> Message {
-        let mut publish = match self {
-            Message::Routed { publish, out_seqno: 0, .. } => publish,
-            Message::Retain { publish, out_seqno: 0, .. } => publish,
-            _ => unreachable!(),
-        };
-
-        assert!(publish.to_packet_id().is_none());
-        publish.set_packet_id(packet_id);
-        Message::Oug { out_seqno, publish }
-    }
-
-    pub fn to_v5_packet(&self) -> v5::Packet {
+    pub fn to_packet(&self) -> QPacket {
         match self {
             Message::ClientAck { packet, .. } => packet.clone(),
-            Message::Oug { publish, .. } => v5::Packet::Publish(publish.clone()),
+            Message::Oug { publish, .. } => publish.clone(),
             _ => unreachable!(),
         }
     }
@@ -377,12 +373,38 @@ impl Message {
             _ => unreachable!(),
         }
     }
+}
+
+impl Message {
+    pub fn into_oug(self, out_seqno: OutSeqno, packet_id: PacketID) -> Message {
+        let mut publish = match self {
+            Message::Routed { publish, out_seqno: 0, .. } => publish,
+            Message::Retain { publish, out_seqno: 0, .. } => publish,
+            _ => unreachable!(),
+        };
+
+        assert!(publish.to_packet_id().is_none());
+        publish.set_packet_id(packet_id);
+        Message::Oug { out_seqno, publish }
+    }
 
     pub fn into_session_args_replica(self) -> SessionArgsReplica {
         match self {
             Message::AddSession {
-                raddr, config, client_id, shard_id, connect, ..
-            } => SessionArgsReplica { raddr, config, client_id, shard_id, connect },
+                shard_id,
+                client_id,
+                raddr,
+                config,
+                proto,
+                clean_start,
+            } => SessionArgsReplica {
+                shard_id,
+                client_id,
+                raddr,
+                config,
+                proto,
+                clean_start,
+            },
             _ => unreachable!(),
         }
     }

@@ -1,9 +1,11 @@
-use std::time;
+use std::{net, time};
 
-use crate::broker::SessionArgsActive;
+use crate::Protocol;
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-/// Type implement keep-alive as per MQTT specification.
+/// Type implement keep-alive timer. A passive timer used by application to detect
+/// keep-alive timeouts by calling [KeepAlive::check_expired]. Typically used to
+/// keep track of network in-activity.
 pub struct KeepAlive {
     pub prefix: String,
     pub keep_alive: Option<u16>,
@@ -12,25 +14,28 @@ pub struct KeepAlive {
 }
 
 impl KeepAlive {
-    pub fn new(args: &SessionArgsActive) -> KeepAlive {
-        let factor = args.config.mqtt_keep_alive_factor();
-        let (keep_alive, interval) = match args.config.mqtt_keep_alive() {
+    /// Create a new keep-alive timer.
+    pub fn new(proto: &Protocol, raddr: net::SocketAddr, keep_alive: u16) -> KeepAlive {
+        let factor = proto.keep_alive_factor();
+        let (keep_alive, interval) = match proto.keep_alive() {
             Some(val) => (Some(val as u16), Some(((val as f32) * factor) as u16)),
-            None if args.connect.keep_alive == 0 => (None, None),
+            None if keep_alive == 0 => (None, None),
             None => {
-                let ka = args.connect.keep_alive;
+                let ka = u16::try_from(keep_alive).unwrap();
                 (Some(ka), Some(((ka as f32) * factor) as u16))
             }
         };
-        let prefix = format!("{}:keepalive", args.raddr);
+
         KeepAlive {
-            prefix,
+            prefix: format!("{}:keepalive", raddr),
             keep_alive,
             interval,
             alive_at: time::Instant::now(),
         }
     }
 
+    /// Check whether this keep-alive timer has elapsed. Application should call this
+    /// method to learn the timeout status. Returns elapsed time since timeout expiry.
     pub fn check_expired(&self) -> Result<time::Duration> {
         match self.interval {
             Some(intrvl) => {
@@ -51,6 +56,7 @@ impl KeepAlive {
         }
     }
 
+    /// Reset the timeout. To be called when ever a network event has occured.
     pub fn live(&mut self) {
         self.alive_at = time::Instant::now();
     }

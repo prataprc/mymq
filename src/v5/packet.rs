@@ -6,7 +6,7 @@ use std::{fmt, io, result};
 
 use crate::v5;
 use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{Packetize, VarU32};
+use crate::{PacketType, Packetize, VarU32};
 
 /// Type implement a state machine to asynchronously read from socket using [mio].
 #[derive(Debug)]
@@ -211,63 +211,63 @@ impl MQTTRead {
     pub fn parse(&self) -> Result<v5::Packet> {
         let (pkt, n, m) = match self {
             MQTTRead::Fin { data, fh, .. } => match fh.unwrap().0 {
-                v5::PacketType::Connect => {
+                PacketType::Connect => {
                     let (pkt, n) = v5::Connect::decode(&data)?;
                     (v5::Packet::Connect(pkt), n, data.len())
                 }
-                v5::PacketType::ConnAck => {
+                PacketType::ConnAck => {
                     let (pkt, n) = v5::ConnAck::decode(&data)?;
                     (v5::Packet::ConnAck(pkt), n, data.len())
                 }
-                v5::PacketType::Publish => {
+                PacketType::Publish => {
                     let (pkt, n) = v5::Publish::decode(&data)?;
                     (v5::Packet::Publish(pkt), n, data.len())
                 }
-                v5::PacketType::PubAck => {
+                PacketType::PubAck => {
                     let (pkt, n) = v5::Pub::decode(&data)?;
                     (v5::Packet::PubAck(pkt), n, data.len())
                 }
-                v5::PacketType::PubRec => {
+                PacketType::PubRec => {
                     let (pkt, n) = v5::Pub::decode(&data)?;
                     (v5::Packet::PubRec(pkt), n, data.len())
                 }
-                v5::PacketType::PubRel => {
+                PacketType::PubRel => {
                     let (pkt, n) = v5::Pub::decode(&data)?;
                     (v5::Packet::PubRel(pkt), n, data.len())
                 }
-                v5::PacketType::PubComp => {
+                PacketType::PubComp => {
                     let (pkt, n) = v5::Pub::decode(&data)?;
                     (v5::Packet::PubComp(pkt), n, data.len())
                 }
-                v5::PacketType::Subscribe => {
+                PacketType::Subscribe => {
                     let (pkt, n) = v5::Subscribe::decode(&data)?;
                     (v5::Packet::Subscribe(pkt), n, data.len())
                 }
-                v5::PacketType::SubAck => {
+                PacketType::SubAck => {
                     let (pkt, n) = v5::SubAck::decode(&data)?;
                     (v5::Packet::SubAck(pkt), n, data.len())
                 }
-                v5::PacketType::UnSubscribe => {
+                PacketType::UnSubscribe => {
                     let (pkt, n) = v5::UnSubscribe::decode(&data)?;
                     (v5::Packet::UnSubscribe(pkt), n, data.len())
                 }
-                v5::PacketType::UnsubAck => {
+                PacketType::UnsubAck => {
                     let (pkt, n) = v5::UnsubAck::decode(&data)?;
                     (v5::Packet::UnsubAck(pkt), n, data.len())
                 }
-                v5::PacketType::PingReq => {
+                PacketType::PingReq => {
                     let (_pkt, n) = v5::PingReq::decode(&data)?;
                     (v5::Packet::PingReq, n, data.len())
                 }
-                v5::PacketType::PingResp => {
+                PacketType::PingResp => {
                     let (_pkt, n) = v5::PingResp::decode(&data)?;
                     (v5::Packet::PingResp, n, data.len())
                 }
-                v5::PacketType::Disconnect => {
+                PacketType::Disconnect => {
                     let (pkt, n) = v5::Disconnect::decode(&data)?;
                     (v5::Packet::Disconnect(pkt), n, data.len())
                 }
-                v5::PacketType::Auth => {
+                PacketType::Auth => {
                     let (pkt, n) = v5::Auth::decode(&data)?;
                     (v5::Packet::Auth(pkt), n, data.len())
                 }

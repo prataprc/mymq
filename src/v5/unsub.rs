@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::v5::{FixedHeader, Property, PropertyType, UserProperty};
-use crate::{Blob, Packetize, TopicFilter, VarU32};
+use crate::{Blob, ClientID, Packetize, Subscription, TopicFilter, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::UnSubscribe";
@@ -120,6 +120,18 @@ impl UnSubscribe {
                 self.properties = None
             }
         }
+    }
+
+    pub fn to_unsubscriptions(&self, client_id: ClientID) -> Vec<Subscription> {
+        let mut subscrs = Vec::default();
+        for filter in self.filters.iter() {
+            let mut subscr = Subscription::default();
+            subscr.topic_filter = filter.clone();
+            subscr.client_id = client_id.clone();
+            subscrs.push(subscr);
+        }
+
+        subscrs
     }
 
     fn validate(&self) -> Result<()> {

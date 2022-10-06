@@ -3,7 +3,8 @@ use std::{fmt, result};
 use crate::util::advance;
 use crate::v5::{Auth, Disconnect, SubAck, Subscribe, UnSubscribe, UnsubAck};
 use crate::v5::{ConnAck, Connect, PingReq, PingResp, Pub, Publish};
-use crate::{Blob, Packetize, QoS, TopicName, VarU32};
+use crate::ClientID;
+use crate::{Blob, PacketType, Packetize, QoS, Subscription, TopicName, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 /// Enumeration of different MQTT Protocol version.
@@ -36,76 +37,6 @@ impl From<MqttProtocol> for u8 {
         match val {
             MqttProtocol::V4 => 4,
             MqttProtocol::V5 => 5,
-        }
-    }
-}
-
-/// MQTT packet type
-#[cfg_attr(any(feature = "fuzzy", test), derive(Arbitrary))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacketType {
-    Connect = 1,
-    ConnAck = 2,
-    Publish = 3,
-    PubAck = 4,
-    PubRec = 5,
-    PubRel = 6,
-    PubComp = 7,
-    Subscribe = 8,
-    SubAck = 9,
-    UnSubscribe = 10,
-    UnsubAck = 11,
-    PingReq = 12,
-    PingResp = 13,
-    Disconnect = 14,
-    Auth = 15,
-}
-
-impl TryFrom<u8> for PacketType {
-    type Error = Error;
-
-    fn try_from(val: u8) -> Result<PacketType> {
-        let val = match val {
-            1 => PacketType::Connect,
-            2 => PacketType::ConnAck,
-            3 => PacketType::Publish,
-            4 => PacketType::PubAck,
-            5 => PacketType::PubRec,
-            6 => PacketType::PubRel,
-            7 => PacketType::PubComp,
-            8 => PacketType::Subscribe,
-            9 => PacketType::SubAck,
-            10 => PacketType::UnSubscribe,
-            11 => PacketType::UnsubAck,
-            12 => PacketType::PingReq,
-            13 => PacketType::PingResp,
-            14 => PacketType::Disconnect,
-            15 => PacketType::Auth,
-            _ => err!(MalformedPacket, code: MalformedPacket, "forbidden packet-type")?,
-        };
-
-        Ok(val)
-    }
-}
-
-impl From<PacketType> for u8 {
-    fn from(val: PacketType) -> u8 {
-        match val {
-            PacketType::Connect => 1,
-            PacketType::ConnAck => 2,
-            PacketType::Publish => 3,
-            PacketType::PubAck => 4,
-            PacketType::PubRec => 5,
-            PacketType::PubRel => 6,
-            PacketType::PubComp => 7,
-            PacketType::Subscribe => 8,
-            PacketType::SubAck => 9,
-            PacketType::UnSubscribe => 10,
-            PacketType::UnsubAck => 11,
-            PacketType::PingReq => 12,
-            PacketType::PingResp => 13,
-            PacketType::Disconnect => 14,
-            PacketType::Auth => 15,
         }
     }
 }
@@ -298,6 +229,88 @@ impl Packet {
         }
     }
 
+    pub fn to_packet_id(&self) -> Option<u16> {
+        match self {
+            Packet::Publish(publish) => publish.packet_id,
+            Packet::Subscribe(sub) => Some(sub.packet_id),
+            Packet::UnSubscribe(unsub) => Some(unsub.packet_id),
+            Packet::PubAck(puback) => Some(puback.packet_id),
+            Packet::SubAck(suback) => Some(suback.packet_id),
+            Packet::UnsubAck(unsuback) => Some(unsuback.packet_id),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_qos(&self) -> QoS {
+        match self {
+            Packet::Publish(publish) => publish.qos,
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_subscription_id(&self) -> Option<u32> {
+        match self {
+            Packet::Subscribe(sub) => sub.to_subscription_id(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_subscriptions(&self) -> Vec<Subscription> {
+        match self {
+            Packet::Subscribe(sub) => sub.to_subscriptions(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_unsubscriptions(&self, client_id: ClientID) -> Vec<Subscription> {
+        match self {
+            Packet::UnSubscribe(unsub) => unsub.to_unsubscriptions(client_id),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_topic_alias(&self) -> Option<u16> {
+        match self {
+            Packet::Publish(publish) => publish.to_topic_alias(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_disconnect_code(&self) -> ReasonCode {
+        match self {
+            Packet::Disconnect(disconnect) => disconnect.code,
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn to_reason_string(&self) -> Option<String> {
+        match self {
+            Packet::Disconnect(disconnect) => disconnect.reason_string(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn as_topic_name(&self) -> &TopicName {
+        match self {
+            Packet::Publish(publish) => &publish.as_topic_name(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn is_qos0(&self) -> bool {
+        match self {
+            Packet::Publish(publish) => publish.is_qos0(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn is_qos12(&self) -> bool {
+        match self {
+            Packet::Publish(publish) => publish.is_qos12(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         match self {
@@ -316,6 +329,60 @@ impl Packet {
             Packet::PingResp => (),
             Packet::Disconnect(val) => val.normalize(),
             Packet::Auth(val) => val.normalize(),
+        }
+    }
+}
+
+impl Packet {
+    pub fn set_packet_id(&mut self, packet_id: u16) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_packet_id(packet_id);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_retain(&mut self, retain: bool) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.retain = retain;
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_fixed_header(&mut self, retain: bool, qos: QoS, dup: bool) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_fixed_header(retain, qos, dup);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_subscription_ids(ids);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    #[inline]
+    pub fn is_retain(&self) -> bool {
+        match self {
+            Packet::Publish(publish) => publish.retain,
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    #[inline]
+    pub fn message_expiry_interval(&self) -> Option<u32> {
+        match self {
+            Packet::Publish(publish) => publish.message_expiry_interval(),
+            pkt => unreachable!("{}", pkt),
         }
     }
 }

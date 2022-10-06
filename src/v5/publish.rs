@@ -219,9 +219,11 @@ impl Publish {
         }
     }
 
-    #[inline]
-    pub fn to_packet_id(&self) -> Option<u16> {
-        self.packet_id
+    pub fn to_topic_alias(&self) -> Option<u16> {
+        match &self.properties {
+            Some(props) => props.topic_alias,
+            None => None,
+        }
     }
 
     #[inline]
@@ -241,13 +243,6 @@ impl Publish {
 
     pub fn message_expiry_interval(&self) -> Option<u32> {
         self.properties.as_ref()?.message_expiry_interval()
-    }
-
-    pub fn topic_alias(&self) -> Option<u16> {
-        match &self.properties {
-            Some(props) => props.topic_alias,
-            None => None,
-        }
     }
 
     fn validate(&self) -> Result<()> {

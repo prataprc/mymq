@@ -4,12 +4,13 @@ use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
 use std::{fmt, result};
 
 use crate::v5::{FixedHeader, Property, PropertyType, UserProperty};
-use crate::{Blob, Packetize, QoS, RetainForwardRule, TopicFilter, VarU32};
+use crate::Subscription;
+use crate::{Blob, ClientID, Packetize, QoS, RetainForwardRule, TopicFilter, VarU32};
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
 const PP: &'static str = "Packet::Subscribe";
 
-/// Subscription options carried in SUBSCRIBE Packet
+/// Subscription-options carried in SUBSCRIBE Packet
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct SubscriptionOpt(u8);
 
@@ -225,6 +226,36 @@ impl Subscribe {
         }
 
         self
+    }
+
+    pub fn to_subscriptions(&self) -> Vec<Subscription> {
+        let subscription_id: Option<u32> = self.to_subscription_id();
+
+        let mut subscrs = Vec::default();
+        for filter in self.filters.iter() {
+            let (rfr, retain_as_published, no_local, qos) = filter.opt.unwrap();
+            let val = Subscription {
+                topic_filter: filter.topic_filter.clone(),
+
+                client_id: ClientID::default(),
+                shard_id: u32::default(),
+                subscription_id: subscription_id,
+                qos,
+                no_local,
+                retain_as_published,
+                retain_forward_rule: rfr,
+            };
+            subscrs.push(val);
+        }
+
+        subscrs
+    }
+
+    pub fn to_subscription_id(&self) -> Option<u32> {
+        match &self.properties {
+            Some(props) => props.subscription_id.clone().map(|x| *x),
+            None => None,
+        }
     }
 
     #[cfg(any(feature = "fuzzy", test))]

@@ -9,16 +9,14 @@
 //!                           Main
 //! ```
 
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, trace, warn};
 
-use std::{io, mem, thread, time};
+use std::{fmt, mem, result, thread};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
-use crate::broker::{socket, AppTx, Config};
-use crate::{Error, ErrorKind, ReasonCode, Result};
-use crate::{Packetize, QueueStatus, Socket, ToJson, SLEEP_10MS};
-
-use crate::v5;
+use crate::broker::{AppTx, Config, PQueue};
+use crate::{Error, ReasonCode, Result};
+use crate::{QueueStatus, ToJson, SLEEP_10MS};
 
 type ThreadRx = Rx<Request, Result<Response>>;
 
@@ -35,19 +33,29 @@ pub struct Flusher {
 
 enum Inner {
     Init,
-    // Held by Cluster
-    Handle(Thread<Flusher, Request, Result<Response>>),
-    // Thread
-    Main(RunLoop),
-    // Held by each shard.
-    Tx(Tx<Request, Result<Response>>),
-    // Held by Cluser, replacing both Handle and Main.
-    Close(FinState),
+    Main(RunLoop),                                      // Thread
+    Handle(Thread<Flusher, Request, Result<Response>>), // Held by Cluster
+    Tx(Tx<Request, Result<Response>>),                  // Held by each shard.
+    Close(FinState), // Held by Cluster, replacing both Handle and Main.
+}
+
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Flusher::Inner::Init"),
+            Inner::Handle(_) => write!(f, "Flusher::Inner::Handle"),
+            Inner::Main(_) => write!(f, "Flusher::Inner::Main"),
+            Inner::Tx(_) => write!(f, "Flusher::Inner::Tx"),
+            Inner::Close(_) => write!(f, "Flusher::Inner::Close"),
+        }
+    }
 }
 
 struct RunLoop {
     /// Statistics
     stats: Stats,
+    /// Back channel communicate with application.
+    app_tx: AppTx,
 }
 
 pub struct FinState {
@@ -108,8 +116,8 @@ impl Drop for Flusher {
 impl ToJson for Flusher {
     fn to_config_json(&self) -> String {
         format!(
-            concat!(r#"{{ "name": {:?},  {:?}: {} }}"#),
-            self.config.name, "flush_timeout", self.config.flush_timeout,
+            concat!(r#"{{ {:?}: {:?}, {:?}: {} }}"#),
+            "name", self.config.name, "flush_timeout", self.config.flush_timeout,
         )
     }
 
@@ -129,6 +137,7 @@ impl Flusher {
             name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
+
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -136,12 +145,13 @@ impl Flusher {
         Ok(val)
     }
 
-    pub fn spawn(self, _app_tx: AppTx) -> Result<Flusher> {
+    pub fn spawn(self, app_tx: AppTx) -> Result<Flusher> {
         let mut flush = Flusher {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
-            inner: Inner::Main(RunLoop { stats: Stats::default() }),
+
+            inner: Inner::Main(RunLoop { stats: Stats::default(), app_tx }),
         };
         flush.prefix = flush.prefix();
         let thrd = Thread::spawn(&self.prefix, flush);
@@ -160,17 +170,16 @@ impl Flusher {
     }
 
     pub fn to_tx(&self, who: &str) -> Self {
-        let inner = match &self.inner {
-            Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
-            Inner::Tx(tx) => Inner::Tx(tx.clone()),
-            _ => unreachable!(),
-        };
-
         let mut flush = Flusher {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
-            inner,
+
+            inner: match &self.inner {
+                Inner::Handle(thrd) => Inner::Tx(thrd.to_tx()),
+                Inner::Tx(tx) => Inner::Tx(tx.clone()),
+                _ => unreachable!(),
+            },
         };
         flush.prefix = flush.prefix();
 
@@ -181,33 +190,30 @@ impl Flusher {
 }
 
 pub enum Request {
-    FlushConnection { socket: Socket, err: Option<Error> },
+    FlushConnection { pq: PQueue, err: Option<Error> },
     Close,
 }
 
 pub enum Response {
     Ok,
-    FlushStats(socket::Stats),
 }
 
 // calls to interface with flusher-thread.
 impl Flusher {
-    pub fn flush_connection(&self, socket: Socket, err: Option<Error>) -> Result<()> {
-        let req = Request::FlushConnection { socket, err };
+    pub fn flush_connection(&self, pq: PQueue, err: Option<Error>) {
+        let req = Request::FlushConnection { pq, err };
         match &self.inner {
-            Inner::Handle(thrd) => thrd.request(req)??,
-            Inner::Tx(tx) => tx.request(req)??,
+            Inner::Handle(thrd) => app_fatal!(self, thrd.request(req).flatten()),
+            Inner::Tx(tx) => app_fatal!(self, tx.request(req).flatten()),
             _ => unreachable!(),
         };
-
-        Ok(())
     }
 
-    pub fn close_wait(mut self) -> Result<Flusher> {
+    pub fn close_wait(mut self) -> Flusher {
         match mem::replace(&mut self.inner, Inner::Init) {
             Inner::Handle(thrd) => {
-                thrd.request(Request::Close)??;
-                Ok(thrd.close_wait())
+                app_fatal!(self, thrd.request(Request::Close).flatten());
+                thrd.close_wait()
             }
             _ => unreachable!(),
         }
@@ -232,18 +238,11 @@ impl Threadable for Flusher {
             for req in reqs.into_iter() {
                 match req {
                     (req @ FlushConnection { .. }, Some(tx)) => {
-                        self.incr_n_flush_conns();
-                        match self.handle_flush_connection(req) {
-                            Response::FlushStats(flush_stats) => {
-                                self.incr_stats(&flush_stats);
-                                err!(IPCFail, try: tx.send(Ok(Response::Ok))).ok();
-                            }
-                            _ => unreachable!(),
-                        }
+                        let resp = self.handle_flush_connection(req);
+                        app_fatal!(self, tx.send(Ok(resp)));
                     }
                     (Close, Some(tx)) => {
-                        let resp = self.handle_close();
-                        err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                        app_fatal!(self, tx.send(Ok(self.handle_close())));
                         break 'outer;
                     }
 
@@ -269,75 +268,49 @@ impl Threadable for Flusher {
 }
 
 impl Flusher {
-    fn handle_flush_connection(&self, req: Request) -> Response {
-        use crate::broker::socket::Stats as SockStats;
-
-        let now = time::Instant::now();
-        let flush_timeout = self.config.flush_timeout;
-        let max_size = self.config.mqtt_max_packet_size;
-
-        let (mut socket, conn_err) = match req {
-            Request::FlushConnection { socket, err } => (socket, err),
+    fn handle_flush_connection(&mut self, req: Request) -> Response {
+        let (mut pq, conn_err) = match req {
+            Request::FlushConnection { pq, err } => (pq, err),
             _ => unreachable!(),
         };
-        let raddr = socket.conn.peer_addr().unwrap();
 
+        let (raddr, client_id) = (pq.peer_addr(), pq.to_client_id());
         info!(
-            "{} raddr:{} client_id:{} flushing connection",
-            self.prefix, raddr, *socket.client_id
+            "{} raddr:{} client_id:{} flushing connection err:{:?}",
+            self.prefix, raddr, *client_id, conn_err
         );
 
-        let timeout = now + time::Duration::from_secs(flush_timeout as u64);
-        let mut stats = SockStats::default();
-        let sock_stats = loop {
-            let mut status = socket.wt.miot_rx.try_recvs(&self.prefix);
-            socket.wt.packets.extend(status.take_values().into_iter());
+        self.incr_n_flush_conns();
 
-            let sock_stats = match socket.flush_packets(&self.prefix, &self.config) {
-                (QueueStatus::Ok(_), sock_stats) => sock_stats,
-                (QueueStatus::Block(_), sock_stats) if time::Instant::now() > timeout => {
-                    error!(
-                        "{} timeout:{:?} give up flushing packets",
-                        self.prefix, timeout
-                    );
-                    break sock_stats;
+        let (mut items, mut bytes) = (0_usize, 0_usize);
+        loop {
+            let (status, a, b) = pq.write_packets(&self.prefix);
+            items += a;
+            bytes += b;
+
+            match status {
+                QueueStatus::Ok(_) => {
+                    break;
                 }
-                (QueueStatus::Block(_), sock_stats) => {
+                QueueStatus::Block(_) => {
                     thread::sleep(SLEEP_10MS);
-                    sock_stats
                 }
-                (QueueStatus::Disconnected(_), sock_stats) => {
+                QueueStatus::Disconnected(_) => {
                     warn!("{} stop flush, socket disconnected", self.prefix);
-                    break sock_stats;
+                    break;
                 }
-            };
-
-            // after flushing the packets see, the source `miot_tx` is disconnected.
-            // we will have to run this loop under `miot_tx` has disconnected or
-            // downstream socket has disconnected, or timeout exceeds.
-
-            if let QueueStatus::Disconnected(_) = status {
-                break sock_stats;
             }
-
-            stats.update(&sock_stats);
-        };
-        stats.update(&sock_stats);
-
-        let timeout = now + time::Duration::from_secs(flush_timeout as u64);
-        let code = match conn_err {
-            Some(err) => v5::DisconnReasonCode::try_from(err.code() as u8).unwrap(),
-            None => v5::DisconnReasonCode::NormalDisconnect,
-        };
-
-        if let Ok(()) =
-            send_disconnect(&self.prefix, code, &mut socket.conn, timeout, max_size)
-        {
-            info!("{} raddr:{} DISCONNECT", self.prefix, raddr);
-            info!("{} conn_stats:{}", self.prefix, stats.to_json());
         }
+        self.incr_stats(items, bytes);
 
-        Response::FlushStats(stats)
+        pq.as_mut_socket().disconnect(&self.prefix, ReasonCode::Success);
+
+        info!(
+            "{} raddr:{} client_id:{} items:{} bytes:{} flushed and DISCONNECT",
+            self.prefix, raddr, client_id, items, bytes
+        );
+
+        Response::Ok
     }
 
     fn handle_close(&mut self) -> Response {
@@ -358,23 +331,6 @@ impl Flusher {
 }
 
 impl Flusher {
-    fn incr_n_flush_conns(&mut self) {
-        match &mut self.inner {
-            Inner::Main(RunLoop { stats, .. }) => stats.n_flush_conns += 1,
-            _ => unreachable!(),
-        }
-    }
-
-    fn incr_stats(&mut self, sstats: &socket::Stats) {
-        match &mut self.inner {
-            Inner::Main(RunLoop { stats, .. }) => {
-                stats.n_pkts += sstats.items;
-                stats.n_bytes += sstats.bytes;
-            }
-            _ => unreachable!(),
-        }
-    }
-
     fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",
@@ -385,44 +341,28 @@ impl Flusher {
         };
         format!("<f:{}:{}>", self.name, state)
     }
-}
 
-pub fn send_disconnect<W>(
-    prefix: &str,
-    code: v5::DisconnReasonCode, // server side reason code.
-    conn: &mut W,
-    timeout: time::Instant,
-    max_size: u32,
-) -> Result<()>
-where
-    W: io::Write,
-{
-    let disconn = v5::Disconnect {
-        code: ReasonCode::try_from(code as u8)?,
-        properties: None,
-    };
+    fn incr_n_flush_conns(&mut self) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { stats, .. }) => stats.n_flush_conns += 1,
+            _ => unreachable!(),
+        }
+    }
 
-    let mut packetw = v5::MQTTWrite::new(disconn.encode().unwrap().as_ref(), max_size);
-    loop {
-        let (val, would_block) = match packetw.write(conn) {
-            Ok(args) => args,
-            Err(err) => {
-                error!("{} problem writing disconnect packet {}", prefix, err);
-                break Err(err);
+    fn incr_stats(&mut self, items: usize, bytes: usize) {
+        match &mut self.inner {
+            Inner::Main(RunLoop { stats, .. }) => {
+                stats.n_pkts += items;
+                stats.n_bytes += bytes;
             }
-        };
-        packetw = val;
+            _ => unreachable!(),
+        }
+    }
 
-        if would_block && timeout < time::Instant::now() {
-            thread::sleep(SLEEP_10MS);
-        } else if would_block {
-            break err!(
-                Disconnected,
-                desc: "{} failed writing disconnect after {:?}",
-                prefix, time::Instant::now()
-            );
-        } else {
-            break Ok(());
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }
 }

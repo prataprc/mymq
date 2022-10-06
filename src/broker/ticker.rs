@@ -1,38 +1,76 @@
+//! Ticker threading model.
+//!
+//! ```
+//!                        spawn()
+//! from_config() -> Init -----+----> Handle
+//!                            |
+//!                            |
+//!                            V
+//!                           Main
+//! ```
+
 use log::{debug, error, info, trace};
 
-use std::{mem, sync::mpsc, thread, time};
+use std::{fmt, mem, result, sync::mpsc, thread, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable};
-use crate::broker::{AppTx, Cluster, Config, Shard};
-use crate::{Error, ErrorKind, Result, ToJson};
+use crate::broker::{AppTx, ClusterAPI, Config, ShardAPI};
+use crate::{Error, ErrorKind, Result};
 use crate::{ToJson, SLEEP_10MS};
 
 /// Type implement a periodic ticker and wake up other threads.
 ///
 /// Periodically wake up other threads like like [Cluster] and [Shard]. This type is
 /// threadable and singleton.
-pub struct Ticker {
+pub struct Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     pub name: String,
     prefix: String,
     config: Config,
-    inner: Inner,
+
+    inner: Inner<C, S>,
 }
 
-pub enum Inner {
+pub enum Inner<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     Init,
-    // Held by Cluster
-    Handle(Thread<Ticker, Request, Result<Response>>),
-    // Thread
-    Main(RunLoop),
-    // Held by Cluser, replacing both Handle and Main.
-    Close(FinState),
+    Main(RunLoop<C, S>),                                     // Thread
+    Handle(Thread<Ticker<C, S>, Request, Result<Response>>), // Held by Cluster
+    Close(FinState), // Held by Cluser, replacing both Handle and Main.
 }
 
-pub struct RunLoop {
+impl<C, S> fmt::Debug for Inner<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+        match self {
+            Inner::Init => write!(f, "Ticker::Inner::Init"),
+            Inner::Main(_) => write!(f, "Ticker::Inner::Main"),
+            Inner::Handle(_) => write!(f, "Ticker::Inner::Handle"),
+            Inner::Close(_) => write!(f, "Ticker::Inner::Close"),
+        }
+    }
+}
+
+pub struct RunLoop<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     /// Tx-handle to send messages to cluster.
-    cluster: Box<Cluster>,
-    /// Shard-Tx handle to all shards active and replica shards on this node.
-    shards: Vec<Shard>,
+    cluster: Box<C>,
+    /// Shard-Tx handle to all master shards.
+    masters: Vec<S>,
+    /// Shard-Tx handle to all replica shards.
+    replicas: Vec<S>,
 
     /// Born Instant
     born: time::Instant,
@@ -40,7 +78,6 @@ pub struct RunLoop {
     ticker_count: usize,
 
     /// Back channel communicate with application.
-    #[allow(dead_code)]
     app_tx: AppTx,
 }
 
@@ -65,13 +102,18 @@ impl FinState {
     }
 }
 
-impl Default for Ticker {
-    fn default() -> Ticker {
+impl<C, S> Default for Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
+    fn default() -> Ticker<C, S> {
         let config = Config::default();
         let mut def = Ticker {
             name: config.name.clone(),
             prefix: String::default(),
             config,
+
             inner: Inner::Init,
         };
         def.prefix = def.prefix();
@@ -79,7 +121,11 @@ impl Default for Ticker {
     }
 }
 
-impl Drop for Ticker {
+impl<C, S> Drop for Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     fn drop(&mut self) {
         let inner = mem::replace(&mut self.inner, Inner::Init);
         match inner {
@@ -91,7 +137,11 @@ impl Drop for Ticker {
     }
 }
 
-impl ToJson for Ticker {
+impl<C, S> ToJson for Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     fn to_config_json(&self) -> String {
         "".to_string()
     }
@@ -104,18 +154,28 @@ impl ToJson for Ticker {
     }
 }
 
-pub struct SpawnArgs {
-    pub cluster: Box<Cluster>,
-    pub shards: Vec<Shard>,
+pub struct SpawnArgs<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
+    pub cluster: Box<C>,
+    pub masters: Vec<S>,
+    pub replicas: Vec<S>,
     pub app_tx: AppTx,
 }
 
-impl Ticker {
-    pub fn from_config(config: Config) -> Result<Ticker> {
+impl<C, S> Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
+    pub fn from_config(config: Config) -> Result<Ticker<C, S>> {
         let mut val = Ticker {
             name: config.name.clone(),
             prefix: String::default(),
             config: config.clone(),
+
             inner: Inner::Init,
         };
         val.prefix = val.prefix();
@@ -123,14 +183,16 @@ impl Ticker {
         Ok(val)
     }
 
-    pub fn spawn(self, args: SpawnArgs) -> Result<Ticker> {
+    pub fn spawn(self, args: SpawnArgs<C, S>) -> Result<Ticker<C, S>> {
         let mut ticker = Ticker {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
+
             inner: Inner::Main(RunLoop {
                 cluster: args.cluster,
-                shards: args.shards,
+                masters: args.masters,
+                replicas: args.replicas,
 
                 born: time::Instant::now(),
                 ticker_count: 0,
@@ -145,11 +207,24 @@ impl Ticker {
             name: self.config.name.clone(),
             prefix: String::default(),
             config: self.config.clone(),
+
             inner: Inner::Handle(thrd),
         };
         ticker.prefix = ticker.prefix();
 
         Ok(ticker)
+    }
+
+    // calls to interface with ticker-thread.
+    pub fn close_wait(mut self) -> Ticker<C, S> {
+        let inner = mem::replace(&mut self.inner, Inner::Init);
+        match inner {
+            Inner::Handle(thrd) => {
+                app_fatal!(self, thrd.request(Request::Close).flatten());
+                thrd.close_wait()
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
     }
 }
 
@@ -161,21 +236,11 @@ pub enum Response {
     Ok,
 }
 
-// calls to interface with ticker-thread.
-impl Ticker {
-    pub fn close_wait(mut self) -> Ticker {
-        let inner = mem::replace(&mut self.inner, Inner::Init);
-        match inner {
-            Inner::Handle(thrd) => {
-                thrd.request(Request::Close).ok();
-                thrd.close_wait()
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl Threadable for Ticker {
+impl<C, S> Threadable for Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     type Req = Request;
     type Resp = Result<Response>;
 
@@ -198,17 +263,23 @@ impl Threadable for Ticker {
                 }
             }
 
-            let RunLoop { cluster, ticker_count, shards, .. } = match &mut self.inner {
-                Inner::Main(run_loop) => run_loop,
-                _ => unreachable!(),
-            };
+            let RunLoop { cluster, ticker_count, masters, replicas, .. } =
+                match &mut self.inner {
+                    Inner::Main(run_loop) => run_loop,
+                    _ => unreachable!(),
+                };
 
             *ticker_count += 1;
 
             if let Err(err) = cluster.wake() {
                 error!("{} waking cluster err:{}", self.prefix, err);
             }
-            for shard in shards.iter() {
+            for shard in masters.iter() {
+                if let Err(err) = shard.wake() {
+                    error!("{} waking shard err:{}", self.prefix, err);
+                }
+            }
+            for shard in replicas.iter() {
                 if let Err(err) = shard.wake() {
                     error!("{} waking shard err:{}", self.prefix, err);
                 }
@@ -232,7 +303,11 @@ impl Threadable for Ticker {
     }
 }
 
-impl Ticker {
+impl<C, S> Ticker<C, S>
+where
+    C: 'static + Send + ClusterAPI,
+    S: 'static + Send + ShardAPI,
+{
     fn prefix(&self) -> String {
         let state = match &self.inner {
             Inner::Init => "init",
@@ -241,5 +316,12 @@ impl Ticker {
             Inner::Close(_) => "close",
         };
         format!("<t:{}:{}>", self.name, state)
+    }
+
+    fn as_app_tx(&self) -> &AppTx {
+        match &self.inner {
+            Inner::Main(RunLoop { app_tx, .. }) => app_tx,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
     }
 }

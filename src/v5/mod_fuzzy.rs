@@ -2,6 +2,7 @@ use arbitrary::Unstructured;
 use rand::{rngs::StdRng, Rng};
 
 use crate::fuzzy::{self, Fuzzy};
+use crate::PacketType;
 
 use super::*;
 
