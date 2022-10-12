@@ -20,6 +20,12 @@ impl Default for Protocol {
     }
 }
 
+impl From<v5::Protocol> for Protocol {
+    fn from(proto: v5::Protocol) -> Protocol {
+        Protocol::V5(proto)
+    }
+}
+
 impl Protocol {
     pub fn is_listen(&self) -> bool {
         match self {

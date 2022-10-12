@@ -35,10 +35,10 @@ macro_rules! config_field {
 #[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Broker configuration.
-    broker: broker::Config,
+    pub broker: broker::Config,
 
     /// Protocol configuration for MQTT V5.
-    mqtt_v5: v5::Config,
+    pub mqtt_v5: v5::Config,
 }
 
 impl Default for Config {

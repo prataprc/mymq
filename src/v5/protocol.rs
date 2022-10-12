@@ -15,10 +15,9 @@ pub struct Protocol {
     config: Config,
 }
 
-impl Protocol {
-    pub fn new(config: toml::Value) -> Result<Protocol> {
-        let config = Config::try_from(config)?;
-        Ok(Protocol { config })
+impl From<Config> for Protocol {
+    fn from(config: Config) -> Protocol {
+        Protocol { config }
     }
 }
 

@@ -5,6 +5,7 @@ build:
 	cargo build --no-default-features --features client
 	cargo build --no-default-features --features broker
 	cargo build --no-default-features --features backtrace,fuzzy
+	cargo build --bin mymqd --features mymqd
 
 test:
 	cargo test

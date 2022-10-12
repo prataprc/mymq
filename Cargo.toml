@@ -42,6 +42,6 @@ fuzzy = ["arbitrary"]
 netw = ["pnet_datalink", "pcap", "pnet"]
 
 mymqd = [
-    "structopt", "env_logger", "chrono", "ctrlc", "prettytable-rs", "netw", "arbitrary",
-    "rand",
+    "structopt", "env_logger", "chrono", "ctrlc", "prettytable-rs", "arbitrary", "rand",
+    "netw",
 ]

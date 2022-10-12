@@ -1,10 +1,6 @@
-use log::info;
 use structopt::StructOpt;
 
-use std::sync::mpsc;
-
 use crate::{Opt, Result, SubCommand};
-use mymq::broker::{Cluster, Config};
 
 #[derive(Clone, StructOpt)]
 pub struct Show {
