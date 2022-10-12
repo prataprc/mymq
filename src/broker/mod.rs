@@ -93,7 +93,6 @@ pub trait ShardAPI {
 
 pub mod design;
 // TODO: mod consensus;
-// TODO: mod rr;
 pub mod rebalance;
 
 mod config;
