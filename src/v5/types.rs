@@ -1,3 +1,6 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
 use std::{fmt, result};
 
 use crate::util::advance;
@@ -744,7 +747,7 @@ pub enum Property {
 #[cfg(any(feature = "fuzzy", test))]
 impl<'a> Arbitrary<'a> for Property {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        use crate::ClientID;
+        use crate::v5::valid_user_props;
         use PropertyType::*;
 
         let content_types: Vec<String> =

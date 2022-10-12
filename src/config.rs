@@ -1,6 +1,6 @@
 use std::{fs, path};
 
-use crate::{broker, v5};
+use crate::v5;
 use crate::{Error, ErrorKind, Result};
 
 #[macro_export]
@@ -35,7 +35,8 @@ macro_rules! config_field {
 #[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Broker configuration.
-    pub broker: broker::Config,
+    #[cfg(feature = "broker")]
+    pub broker: crate::broker::Config,
 
     /// Protocol configuration for MQTT V5.
     pub mqtt_v5: v5::Config,
@@ -44,7 +45,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            broker: broker::Config::default(),
+            #[cfg(feature = "broker")]
+            broker: crate::broker::Config::default(),
             mqtt_v5: v5::Config::default(),
         }
     }
@@ -55,17 +57,17 @@ impl TryFrom<toml::Value> for Config {
 
     fn try_from(val: toml::Value) -> Result<Config> {
         let config = match val.as_table() {
-            Some(map) => {
-                let broker = match map.get("broker") {
-                    Some(value) => broker::Config::try_from(value.clone())?,
-                    None => broker::Config::default(),
-                };
-                let mqtt_v5 = match map.get("mqtt_v5") {
+            Some(map) => Config {
+                #[cfg(feature = "broker")]
+                broker: match map.get("broker") {
+                    Some(value) => crate::broker::Config::try_from(value.clone())?,
+                    None => crate::broker::Config::default(),
+                },
+                mqtt_v5: match map.get("mqtt_v5") {
                     Some(value) => v5::Config::try_from(value.clone())?,
                     None => v5::Config::default(),
-                };
-                Config { broker, mqtt_v5 }
-            }
+                },
+            },
             None => err!(InvalidInput, desc: "invalid toml configuration")?,
         };
         Ok(config)
@@ -93,7 +95,9 @@ impl Config {
 
     /// Validate configuration
     pub fn validate(&self) -> Result<()> {
+        #[cfg(feature = "broker")]
         self.broker.validate()?;
+
         self.mqtt_v5.validate()?;
         Ok(())
     }

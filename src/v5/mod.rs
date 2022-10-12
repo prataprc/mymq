@@ -1,7 +1,10 @@
 //! Module can speak MQTT Version-5 protocol.
 
 #[cfg(any(feature = "fuzzy", test))]
-use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+use arbitrary::{Error as ArbitraryError, Unstructured};
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::result;
 
 use crate::{Packetize, Result, VarU32};
 

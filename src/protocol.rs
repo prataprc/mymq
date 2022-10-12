@@ -1,3 +1,6 @@
+#[cfg(any(feature = "fuzzy", test))]
+use arbitrary::{Arbitrary, Error as ArbitraryError, Unstructured};
+
 use std::{fmt, io, net, result};
 
 use crate::v5;
@@ -321,7 +324,7 @@ impl From<v5::Packet> for QPacket {
 impl<'a> Arbitrary<'a> for QPacket {
     #[inline]
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
-        QPacket::V5(uns.arbitrary()?)
+        Ok(QPacket::V5(uns.arbitrary()?))
     }
 }
 
