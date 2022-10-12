@@ -290,7 +290,7 @@ impl Socket {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum QPacket {
     V5(v5::Packet),
 }
@@ -301,6 +301,23 @@ impl fmt::Display for QPacket {
         match self {
             QPacket::V5(pkt) => write!(f, "{}", pkt),
         }
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+use std::cmp;
+
+#[cfg(any(feature = "fuzzy", test))]
+impl PartialOrd for QPacket {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.as_topic_name().partial_cmp(other.as_topic_name())
+    }
+}
+
+#[cfg(any(feature = "fuzzy", test))]
+impl Ord for QPacket {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.as_topic_name().cmp(other.as_topic_name())
     }
 }
 

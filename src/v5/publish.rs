@@ -21,6 +21,18 @@ pub struct Publish {
     pub payload: Option<Vec<u8>>,
 }
 
+impl PartialOrd for Publish {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.topic_name.partial_cmp(&other.topic_name)
+    }
+}
+
+impl Ord for Publish {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.topic_name.cmp(&other.topic_name)
+    }
+}
+
 impl fmt::Display for Publish {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         let packet_id = match &self.packet_id {
@@ -70,18 +82,6 @@ impl fmt::Display for Publish {
         }
 
         Ok(())
-    }
-}
-
-impl PartialOrd for Publish {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        self.topic_name.partial_cmp(&other.topic_name)
-    }
-}
-
-impl Ord for Publish {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.topic_name.cmp(&other.topic_name)
     }
 }
 

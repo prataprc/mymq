@@ -1,6 +1,6 @@
 //! Flusher threading model.
 //!
-//! ```
+//! ```ignore
 //!                        spawn()            to_tx()
 //! from_config() -> Init -----+----> Handle ---------> Tx ----+
 //!                            |                        ^      | to_tx()

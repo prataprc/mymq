@@ -1,6 +1,6 @@
 //! ### Design overview
 //!
-//! ```
+//! ```ignore
 //!
 //!   *---------*  Handle   *----------*        *-----------*
 //!   | Cluster |---------->| Listener |        | Handshake |

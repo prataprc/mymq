@@ -1,6 +1,6 @@
 //! Listener threading model.
 //!
-//! ```
+//! ```ignore
 //!                        spawn()
 //! from_config() -> Init -----+----> Handle
 //!                            |

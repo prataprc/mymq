@@ -258,7 +258,7 @@ impl<'a> Arbitrary<'a> for Message {
                 client_id: uns.arbitrary()?,
                 inp_seqno: uns.arbitrary()?,
                 out_seqno: uns.arbitrary()?,
-                publish: QPacket::V5(v5::Publish(uns.arbitrary()?)),
+                publish: QPacket::V5(v5::Packet::Publish(uns.arbitrary()?)),
             },
             6 => Message::LocalAck {
                 shard_id: uns.arbitrary()?,
@@ -267,7 +267,7 @@ impl<'a> Arbitrary<'a> for Message {
 
             7 => Message::Oug {
                 out_seqno: uns.arbitrary()?,
-                publish: QPacket::V5(v5::Publish(uns.arbitrary()?)),
+                publish: QPacket::V5(v5::Packet::Publish(uns.arbitrary()?)),
             },
 
             8 => Message::AddSession {
