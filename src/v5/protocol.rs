@@ -324,8 +324,8 @@ impl Socket {
     }
 
     #[inline]
-    pub fn to_client_id(&self) -> ClientID {
-        self.client_id.clone()
+    pub fn as_client_id(&self) -> &ClientID {
+        &self.client_id
     }
 
     #[inline]

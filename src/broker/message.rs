@@ -13,7 +13,7 @@ use crate::{ClientID, PacketID, Protocol, QPacket, QoS, QueueStatus};
 pub struct RouteIO {
     pub disconnected: bool,
     // Message::ClientAck carrying PingResp, PubAck-QoS-1
-    // Message::{Subscribe, Retain, UnSubscribe, ShardIndex, Routed}
+    // Message::{Retain, Subscribe, UnSubscribe, ShardIndex, Routed}
     pub oug_msgs: Vec<Message>,
     pub cons_io: ConsensIO,
 }

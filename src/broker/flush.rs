@@ -274,7 +274,7 @@ impl Flusher {
             _ => unreachable!(),
         };
 
-        let (raddr, client_id) = (pq.peer_addr(), pq.to_client_id());
+        let (raddr, client_id) = (pq.peer_addr(), pq.as_client_id().clone());
         info!(
             "{} raddr:{} client_id:{} flushing connection err:{:?}",
             self.prefix, raddr, *client_id, conn_err

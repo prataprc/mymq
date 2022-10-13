@@ -88,9 +88,9 @@ pub struct FinState {
 
     pub listeners: Vec<Listener<Cluster>>,
     pub flusher: Flusher,
+    pub ticker: Ticker<Cluster, Shard<Cluster>>,
     pub masters: Vec<Shard<Cluster>>,
     pub replicas: Vec<Shard<Cluster>>,
-    pub ticker: Ticker<Cluster, Shard<Cluster>>,
 
     pub topic_filters: SubscribedTrie,
     pub retained_messages: RetainedTrie,
@@ -239,7 +239,6 @@ impl Cluster {
             config: self.config.clone(),
             algo: rebalance::Algorithm::SingleNode,
         };
-
         let state = match self.config.nodes.len() {
             1 => {
                 let node = Node::try_from(self.config.nodes[0].clone())?;
@@ -250,10 +249,8 @@ impl Cluster {
             }
             _ => todo!(),
         };
-
         let flusher = Flusher::from_config(&self.config)?.spawn(app_tx.clone())?;
         let flusher_tx = flusher.to_tx("cluster-spawn");
-
         let cc_topic_filters = SubscribedTrie::default();
         let cc_retained_topics = RetainedTrie::default();
 
@@ -296,15 +293,17 @@ impl Cluster {
         };
         cluster.prefix = cluster.prefix();
 
-        {
+        let listeners = {
             let args = SpawnListeners {
                 config: &self.config,
                 cluster: &cluster,
                 protos,
                 app_tx: &app_tx,
             };
-            let listeners = Self::spawn_listeners(args)?;
+            Self::spawn_listeners(args)?
+        };
 
+        let masters = {
             let args = SpawnMasters {
                 config: &self.config,
                 cluster: &cluster,
@@ -315,17 +314,22 @@ impl Cluster {
             };
             let masters = Self::spawn_masters(args)?;
             for (_shard_id, shard) in masters.iter() {
-                let iter = masters.iter().map(|(id, s)| (*id, s.to_msg_tx()));
+                let iter = masters.iter().map(|(id, s)| (*id, s.to_msg_tx("cluster")));
                 shard.set_shard_queues(BTreeMap::from_iter(iter));
             }
+            masters
+        };
 
+        let replicas = {
             let args = SpawnReplicas {
                 config: &self.config,
                 cluster: &cluster,
                 app_tx: &app_tx,
             };
-            let replicas = Self::spawn_replicas(args)?;
+            Self::spawn_replicas(args)?
+        };
 
+        let ticker = {
             let args = SpawnTicker {
                 config: &self.config,
                 cluster: &cluster,
@@ -336,13 +340,13 @@ impl Cluster {
                     .collect(),
                 app_tx: &app_tx,
             };
-            let ticker = Self::spawn_ticker(args)?;
+            Self::spawn_ticker(args)?
+        };
 
-            if let Inner::Handle(_waker, thrd) = &cluster.inner {
-                thrd.request(Request::Set { listeners, ticker, masters, replicas })??;
-            } else {
-                unreachable!("{} {:?}", self.prefix, cluster.inner)
-            }
+        if let Inner::Handle(_waker, thrd) = &cluster.inner {
+            thrd.request(Request::Set { listeners, ticker, masters, replicas })??;
+        } else {
+            unreachable!("{} {:?}", self.prefix, cluster.inner)
         }
 
         Ok(cluster)
@@ -693,7 +697,7 @@ impl Cluster {
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let client_id = sock.to_client_id();
+        let client_id = sock.as_client_id().clone();
         let shard_id = rebalance::Rebalancer::session_partition(&*client_id, num_shards);
         sock.set_shard_id(shard_id);
 

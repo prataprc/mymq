@@ -230,9 +230,9 @@ impl Socket {
 
     /// Return the client_id for this conn/socket/session.
     #[inline]
-    pub fn to_client_id(&self) -> ClientID {
+    pub fn as_client_id(&self) -> &ClientID {
         match self {
-            Socket::V5(sock) => sock.to_client_id(),
+            Socket::V5(sock) => sock.as_client_id(),
         }
     }
 

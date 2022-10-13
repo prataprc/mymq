@@ -524,7 +524,7 @@ where
 
         match &mut self.inner {
             Inner::Main(RunLoop { conns, .. }) => {
-                conns.insert(pq.to_client_id(), pq);
+                conns.insert(pq.as_client_id().clone(), pq);
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -581,7 +581,7 @@ where
         for (cid, mut pq) in conns.into_iter() {
             let raddr = pq.peer_addr();
             info!("{} raddr:{} client_id:{} closing socket", self.prefix, raddr, *cid);
-            client_ids.push(pq.to_client_id());
+            client_ids.push(pq.as_client_id().clone());
             addrs.push(raddr);
             tokens.push(pq.as_mut_socket().to_mio_token());
         }
@@ -732,8 +732,8 @@ impl PQueue {
     }
 
     #[inline]
-    pub fn to_client_id(&self) -> ClientID {
-        self.socket.to_client_id()
+    pub fn as_client_id(&self) -> &ClientID {
+        self.socket.as_client_id()
     }
 
     #[inline]

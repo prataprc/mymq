@@ -366,13 +366,13 @@ where
 
                 sessions: BTreeMap::default(),
                 reconnects: Timer::default(),
+
                 inp_seqno: 1,
                 shard_back_log: BTreeMap::default(),
                 index: BTreeMap::default(),
                 ack_timestamps: Vec::default(),
 
                 will_messages: Timer::default(),
-
                 shard_queues: BTreeMap::default(),
                 cc_topic_filters: args.cc_topic_filters,
                 cc_retained_topics: args.cc_retained_topics,
@@ -429,6 +429,7 @@ where
 
                 sessions: BTreeMap::default(),
                 reconnects: Timer::default(),
+
                 stats: Stats::default(),
                 app_tx: app_tx.clone(),
             }),
@@ -443,6 +444,7 @@ where
             uuid: self.uuid,
             prefix: String::default(),
             config: self.config.clone(),
+
             inner: Inner::Handle(Handle { waker, thrd, msg_tx: None }),
         };
         shard.prefix = shard.prefix();
@@ -465,6 +467,7 @@ where
             uuid: self.uuid,
             prefix: String::default(),
             config: self.config.clone(),
+
             inner,
         };
         shard.prefix = shard.prefix();
@@ -473,7 +476,7 @@ where
         shard
     }
 
-    pub fn to_msg_tx(&self) -> Self {
+    pub fn to_msg_tx(&self, who: &str) -> Self {
         let inner = match &self.inner {
             Inner::Handle(Handle { waker, msg_tx: Some(msg_tx), .. }) => {
                 Inner::MsgTx(Arc::clone(waker), msg_tx.clone())
@@ -487,10 +490,12 @@ where
             uuid: self.uuid,
             prefix: self.prefix.clone(),
             config: self.config.clone(),
+
             inner,
         };
         shard.prefix = shard.prefix();
 
+        debug!("{} cloned for {}", shard.prefix, who);
         shard
     }
 }
@@ -582,19 +587,22 @@ where
     fn main_loop(mut self, rx: ThreadRx<C>) -> Self {
         match &self.inner {
             Inner::MainMaster(_) => {
-                // this a work around to wire up all the threads without using unsafe.
+                // work around to wire up all the threads without using unsafe.
                 let msg_rx = match rx.recv().unwrap() {
-                    (Request::SetMiot(miot, msg_rx), Some(tx)) => {
-                        let master_loop = match &mut self.inner {
-                            Inner::MainMaster(master_loop) => master_loop,
-                            inner => unreachable!("{} {:?}", self.prefix, inner),
-                        };
-                        master_loop.miot = miot;
+                    (req @ Request::SetMiot(_, _), Some(tx)) => {
+                        let msg_rx = self.handle_set_miot(req);
                         app_fatal!(&self, tx.send(Ok(Response::Ok)));
                         msg_rx
                     }
                     _ => unreachable!(),
                 };
+                match rx.recv().unwrap() {
+                    (req @ Request::SetShardQueues(_), Some(tx)) => {
+                        let resp = self.handle_set_shard_queues(req);
+                        app_fatal!(self, tx.send(Ok(resp)));
+                    }
+                    _ => unreachable!(),
+                }
 
                 self.master_loop(rx, msg_rx)
             }
@@ -1169,6 +1177,36 @@ where
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
     }
+
+    fn clean_failed_sessions(
+        &mut self,
+        mut fail_sessions: Vec<FailSession>,
+        cons_io: &mut ConsensIO,
+    ) {
+        fail_sessions.sort_by_key(|a| a.session.client_id.clone());
+        fail_sessions.dedup_by_key(|a| a.session.client_id.clone());
+
+        for FailSession { session, err } in fail_sessions.into_iter() {
+            let miot = self.as_mut_miot();
+
+            match miot.remove_connection(&session.client_id) {
+                Ok(Some(pq)) => {
+                    let req = Request::FlushSession { pq, err };
+                    self.handle_flush_session(req, cons_io);
+                }
+                Ok(None) => {
+                    debug!(
+                        "{} client_id:{} connection already removed",
+                        self.prefix, *session.client_id
+                    );
+                }
+                Err(err) => {
+                    self.as_app_tx().send("fatal".to_string()).ok();
+                    error!("{} fatal error {} ", self.prefix, err);
+                }
+            }
+        }
+    }
 }
 
 impl<C> Shard<C>
@@ -1221,7 +1259,7 @@ impl<C> Shard<C>
 where
     C: 'static + Send + ClusterAPI,
 {
-    // (exit,)
+    // return `exit` status
     fn mio_events(
         &mut self,
         rx: &ThreadRx<C>,
@@ -1245,7 +1283,7 @@ where
         }
     }
 
-    // Return (queue-status, disconnected)
+    // Return (queue-status, closed)
     fn drain_control_chan(
         &mut self,
         rx: &ThreadRx<C>,
@@ -1262,20 +1300,16 @@ where
         let mut closed = false;
         for req in reqs.into_iter() {
             match req {
-                (req @ SetShardQueues(_), Some(tx)) => {
-                    let resp = self.handle_set_shard_queues(req);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
-                }
                 (req @ AddSession { .. }, Some(tx)) => {
                     let resp = self.handle_add_session_a(req, cons_io);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    app_fatal!(self, tx.send(Ok(resp)));
                 }
                 (req @ FlushSession { .. }, None) => {
                     let _resp = self.handle_flush_session(req, cons_io);
                 }
                 (req @ Close, Some(tx)) => {
                     let resp = self.handle_close_a(req);
-                    err!(IPCFail, try: tx.send(Ok(resp))).ok();
+                    app_fatal!(self, tx.send(Ok(resp)));
                     closed = true;
                 }
 
@@ -1287,47 +1321,26 @@ where
     }
 }
 
-// Handle incoming messages
-impl<C> Shard<C>
-where
-    C: 'static + Send + ClusterAPI,
-{
-    fn clean_failed_sessions(
-        &mut self,
-        mut fail_sessions: Vec<FailSession>,
-        cons_io: &mut ConsensIO,
-    ) {
-        fail_sessions.sort_by_key(|a| a.session.client_id.clone());
-        fail_sessions.dedup_by_key(|a| a.session.client_id.clone());
-
-        for FailSession { session, err } in fail_sessions.into_iter() {
-            let miot = self.as_mut_miot();
-
-            match miot.remove_connection(&session.client_id) {
-                Ok(Some(pq)) => {
-                    let req = Request::FlushSession { pq, err };
-                    self.handle_flush_session(req, cons_io);
-                }
-                Ok(None) => {
-                    debug!(
-                        "{} client_id:{} connection already removed",
-                        self.prefix, *session.client_id
-                    );
-                }
-                Err(err) => {
-                    self.as_app_tx().send("fatal".to_string()).ok();
-                    error!("{} fatal error {} ", self.prefix, err);
-                }
-            }
-        }
-    }
-}
-
 // Handle out-going messages
 impl<C> Shard<C>
 where
     C: 'static + Send + ClusterAPI,
 {
+    fn handle_set_miot(&mut self, req: Request<C>) -> MsgRx {
+        let (miot, msg_rx) = match req {
+            Request::SetMiot(miot, msg_rx) => (miot, msg_rx),
+            _ => unreachable!(),
+        };
+
+        match &mut self.inner {
+            Inner::MainMaster(master_loop) => {
+                master_loop.miot = miot;
+                msg_rx
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
     fn handle_set_shard_queues(&mut self, req: Request<C>) -> Response {
         let shard_queues = match req {
             Request::SetShardQueues(shard_queues) => shard_queues,
@@ -1396,8 +1409,8 @@ where
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
         sessions.insert(session.client_id.clone(), session);
-        info!("{} raddr:{} adding new session to shard", self.prefix, raddr);
 
+        info!("{} raddr:{} adding new session to shard", self.prefix, raddr);
         Response::Ok
     }
 
@@ -1429,7 +1442,7 @@ where
             _ => unreachable!(),
         };
 
-        let client_id = pq.to_client_id();
+        let client_id = pq.as_client_id().clone();
 
         self.remove_session(&client_id);
 
@@ -1596,7 +1609,7 @@ where
 
         let args = SessionArgsMaster {
             shard_id: self.shard_id,
-            client_id: sock.to_client_id(),
+            client_id: sock.as_client_id().clone(),
             raddr: sock.peer_addr(),
             config: self.config.clone(),
             proto: sock.to_protocol(),
@@ -1619,7 +1632,7 @@ where
         cons_io: &mut ConsensIO,
     ) -> Session {
         // add_connection further down shall wake miot-thread.
-        let MasterLoop { reconnects, miot, .. } = match &mut self.inner {
+        let MasterLoop { reconnects, sessions, miot, .. } = match &mut self.inner {
             Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -1638,8 +1651,11 @@ where
             clean_start: false,
         };
 
-        let (session, clean_start) = match miot.remove_connection(&client_id) {
-            Ok(None) if reconnect && clean_start => {
+        let old_session = sessions.remove(sock.as_client_id());
+        let pq = miot.remove_connection(&client_id);
+
+        let (session, clean_start) = match (old_session, pq) {
+            (None, Ok(None)) if reconnect && clean_start => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
                 cons_io.ctrl_msgs.push(msg);
 
@@ -1651,9 +1667,10 @@ where
                     "{} old_raddr:{} new_raddr:{} session clean_start",
                     self.prefix, old_session.raddr, args.raddr
                 );
+
                 (Session::default().into_master(args), true)
             }
-            Ok(None) if reconnect => {
+            (None, Ok(None)) if reconnect => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
                 cons_io.ctrl_msgs.push(msg);
 
@@ -1665,28 +1682,32 @@ where
                     "{} old_raddr:{} new_raddr:{} session reconnect",
                     self.prefix, old_session.raddr, args.raddr
                 );
+
                 (old_session.into_master(args), false)
             }
-            Ok(None) => {
+            (None, Ok(None)) => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
                 cons_io.ctrl_msgs.push(msg);
 
                 (Session::default().into_master(args), true)
             }
-            Ok(Some(pq)) => {
+            (Some(old_session), Ok(Some(pq))) => {
                 let err: Result<()> = err_session_takeover(&self.prefix, args.raddr);
                 let req = Request::FlushSession { pq, err: err.err() };
                 self.handle_flush_session(req, cons_io);
-                (Session::default().into_master(args), true)
+
+                (old_session.into_master(args), true)
             }
-            Err(err) => {
+            (_, Err(err)) => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
                 cons_io.ctrl_msgs.push(msg);
 
-                self.as_app_tx().send("fatal".to_string()).ok();
-                error!("{} fatal error {} ", self.prefix, err);
+                app_fatal!(self, Result::<()>::Err(err));
+
                 (Session::default().into_master(args), true)
             }
+            (Some(_), Ok(None)) => unreachable!(),
+            (None, Ok(Some(_))) => unreachable!(),
         };
 
         msg.set_clean_start(clean_start);
