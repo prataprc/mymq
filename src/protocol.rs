@@ -10,7 +10,7 @@ use crate::{Subscription, TopicName};
 
 pub type QueuePkt = QueueStatus<QPacket>;
 
-/// Enumerated list of support message-queue protocol.
+/// Enumerated list of supported message-queue protocol.
 #[derive(Clone, Eq, PartialEq)]
 pub enum Protocol {
     V5(v5::Protocol),
@@ -30,6 +30,8 @@ impl From<v5::Protocol> for Protocol {
 }
 
 impl Protocol {
+    /// Whether to launch a listener for this protocol. Broker side configuration.
+    #[inline]
     pub fn is_listen(&self) -> bool {
         match self {
             Protocol::V5(proto) => proto.is_listen(),
@@ -37,6 +39,7 @@ impl Protocol {
         }
     }
 
+    /// Listen socket-address for this protocol. Broker side configuration.
     #[inline]
     pub fn to_listen_address(&self) -> net::SocketAddr {
         match self {
@@ -45,6 +48,7 @@ impl Protocol {
         }
     }
 
+    /// Listen port for this protocol. Broker side configuration.
     #[inline]
     pub fn to_listen_port(&self) -> u16 {
         match self {
@@ -53,6 +57,7 @@ impl Protocol {
         }
     }
 
+    /// Maximum supported QoS by this protocol. Broker side configuration.
     #[inline]
     pub fn maximum_qos(&self) -> QoS {
         match self {
@@ -61,6 +66,8 @@ impl Protocol {
         }
     }
 
+    /// Whether publish-retain feature is supported by this protocol. Broker side
+    /// configuration.
     #[inline]
     pub fn retain_available(&self) -> bool {
         match self {
@@ -69,6 +76,7 @@ impl Protocol {
         }
     }
 
+    /// Maximum packet size allowed by this protocol. Broker side configuration.
     #[inline]
     pub fn max_packet_size(&self) -> u32 {
         match self {
@@ -77,6 +85,8 @@ impl Protocol {
         }
     }
 
+    /// Keep alive, in seconds, ticker supported by this protocol. Broker side
+    /// configuration.
     #[inline]
     pub fn keep_alive(&self) -> Option<u16> {
         match self {
@@ -85,6 +95,7 @@ impl Protocol {
         }
     }
 
+    /// Keep alive factor, configured for this protocol. Broker side configuration.
     #[inline]
     pub fn keep_alive_factor(&self) -> f32 {
         match self {
@@ -93,6 +104,8 @@ impl Protocol {
         }
     }
 
+    /// Whether topic-alias feature is supported and its configuration for this protocol.
+    /// Broker side configuration.
     #[inline]
     pub fn topic_alias_max(&self) -> Option<u16> {
         match self {
@@ -103,6 +116,7 @@ impl Protocol {
 }
 
 impl Protocol {
+    /// Handshake with remote client and complete the connection process.
     #[inline]
     pub fn handshake(&self, prefix: &str, conn: mio::net::TcpStream) -> Result<Socket> {
         match self {
@@ -113,6 +127,7 @@ impl Protocol {
 }
 
 impl Protocol {
+    /// Create a new ping-response packet.
     pub fn new_ping_resp(&self, ping_req: QPacket) -> QPacket {
         match self {
             Protocol::V5(proto) => match ping_req {
@@ -122,6 +137,7 @@ impl Protocol {
         }
     }
 
+    /// Create a new publish acknowledge packet.
     pub fn new_pub_ack(&self, packet_id: PacketID) -> QPacket {
         match self {
             Protocol::V5(proto) => proto.new_pub_ack(packet_id),
@@ -129,6 +145,7 @@ impl Protocol {
         }
     }
 
+    /// Create a new subscribe acknowledge packet.
     pub fn new_sub_ack(&self, sub: &QPacket, rcodes: Vec<ReasonCode>) -> QPacket {
         match self {
             Protocol::V5(proto) => match sub {
@@ -138,6 +155,7 @@ impl Protocol {
         }
     }
 
+    /// Create a new un-subscribe acknowledge packet.
     pub fn new_unsub_ack(&self, unsub: &QPacket, rcodes: Vec<ReasonCode>) -> QPacket {
         match self {
             Protocol::V5(proto) => match unsub {
@@ -183,6 +201,7 @@ impl mio::event::Source for Socket {
 }
 
 impl Socket {
+    /// Set [mio::Token] for underlying connection. Used for non-blocking r/w.
     #[inline]
     pub fn set_mio_token(&mut self, token: mio::Token) {
         match self {
@@ -190,6 +209,8 @@ impl Socket {
         }
     }
 
+    /// Set shard-id for this socket. This happens after handshake and before socket
+    /// is booked as a session.
     #[inline]
     pub fn set_shard_id(&mut self, shard_id: u32) {
         match self {
@@ -199,6 +220,7 @@ impl Socket {
 }
 
 impl Socket {
+    /// Return the remote's socket-address.
     #[inline]
     pub fn peer_addr(&self) -> net::SocketAddr {
         match self {
@@ -206,6 +228,7 @@ impl Socket {
         }
     }
 
+    /// Return the client_id for this conn/socket/session.
     #[inline]
     pub fn to_client_id(&self) -> ClientID {
         match self {
@@ -228,23 +251,23 @@ impl Socket {
     }
 
     #[inline]
-    pub fn keep_alive(&self) -> u16 {
+    pub fn client_keep_alive(&self) -> u16 {
         match self {
-            Socket::V5(sock) => sock.keep_alive(),
+            Socket::V5(sock) => sock.client_keep_alive(),
         }
     }
 
     #[inline]
-    pub fn receive_maximum(&self) -> u16 {
+    pub fn client_receive_maximum(&self) -> u16 {
         match self {
-            Socket::V5(sock) => sock.receive_maximum(),
+            Socket::V5(sock) => sock.client_receive_maximum(),
         }
     }
 
     #[inline]
-    pub fn session_expiry_interval(&self) -> Option<u32> {
+    pub fn client_session_expiry_interval(&self) -> Option<u32> {
         match self {
-            Socket::V5(sock) => sock.session_expiry_interval(),
+            Socket::V5(sock) => sock.client_session_expiry_interval(),
         }
     }
 
@@ -283,9 +306,9 @@ impl Socket {
     }
 
     #[inline]
-    pub fn success_ack(&self) -> QPacket {
+    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
         match self {
-            Socket::V5(sock) => sock.success_ack(),
+            Socket::V5(sock) => sock.new_conn_ack(rcode),
         }
     }
 }

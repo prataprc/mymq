@@ -21,8 +21,8 @@ pub struct SessionArgsMaster {
     pub miot_tx: PacketTx,
     pub session_rx: PacketRx,
 
-    pub client_receive_maximum: u16,
     pub client_keep_alive: u16,
+    pub client_receive_maximum: u16,
     pub client_session_expiry_interval: Option<u32>,
 }
 
@@ -910,7 +910,7 @@ impl Session {
 
         match &self.state {
             SessionState::Master(_) => {
-                Ok(Message::new_suback(self.proto.new_sub_ack(&sub, rcodes)))
+                Ok(Message::new_sub_ack(self.proto.new_sub_ack(&sub, rcodes)))
             }
             ss => unreachable!("{:?}", ss),
         }
@@ -947,7 +947,7 @@ impl Session {
 
         match &self.state {
             SessionState::Master(_) => {
-                Ok(Message::new_unsuback(self.proto.new_unsub_ack(&unsub, rcodes)))
+                Ok(Message::new_unsub_ack(self.proto.new_unsub_ack(&unsub, rcodes)))
             }
             ss => unreachable!("{:?}", ss),
         }

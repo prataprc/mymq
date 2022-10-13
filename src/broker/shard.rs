@@ -1366,7 +1366,7 @@ where
 
         // send back the connection acknowledgment CONNACK here.
         {
-            let packet = sock.success_ack();
+            let packet = sock.new_conn_ack(ReasonCode::Success);
             let status = session.tx_oug_acks(vec![Message::new_conn_ack(packet)]);
 
             match status {
@@ -1604,9 +1604,9 @@ where
             miot_tx,
             session_rx,
 
-            client_receive_maximum: sock.receive_maximum(),
-            client_keep_alive: sock.keep_alive(),
-            client_session_expiry_interval: sock.session_expiry_interval(),
+            client_keep_alive: sock.client_keep_alive(),
+            client_receive_maximum: sock.client_receive_maximum(),
+            client_session_expiry_interval: sock.client_session_expiry_interval(),
         };
 
         (args, upstream, downstream)

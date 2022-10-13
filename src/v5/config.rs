@@ -43,7 +43,7 @@ pub struct Config {
     /// * **Mutable**: No
     pub mqtt_connect_timeout: u32,
 
-    /// Keep Alive in secs, that broker can suggest to the client. If configured
+    /// Keep Alive, in secs, that broker can suggest to the client. If configured
     /// with non-zero value, clients should use this keep-alive instead of the client
     /// configured keep-alive-timeout.
     ///

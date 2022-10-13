@@ -302,11 +302,11 @@ impl Message {
         Message::ClientAck { packet: puback }
     }
 
-    pub fn new_suback(suback: QPacket) -> Message {
+    pub fn new_sub_ack(suback: QPacket) -> Message {
         Message::ClientAck { packet: suback }
     }
 
-    pub fn new_unsuback(unsuback: QPacket) -> Message {
+    pub fn new_unsub_ack(unsuback: QPacket) -> Message {
         Message::ClientAck { packet: unsuback }
     }
 

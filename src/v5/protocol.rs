@@ -12,12 +12,22 @@ pub type QueuePkt = QueueStatus<QPacket>;
 /// Type implement Protocol bridge between MQTT-v5 and broker.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Protocol {
+    client_id: ClientID,
+    shard_id: u32,
+    raddr: net::SocketAddr,
     config: Config,
+    connect: v5::Connect,
 }
 
 impl From<Config> for Protocol {
     fn from(config: Config) -> Protocol {
-        Protocol { config }
+        Protocol {
+            client_id: ClientID::default(),
+            shard_id: u32::default(),
+            raddr: "0.0.0.0:0".parse().unwrap(),
+            config,
+            connect: v5::Connect::default(),
+        }
     }
 }
 
@@ -34,9 +44,7 @@ impl Protocol {
     pub fn to_listen_port(&self) -> u16 {
         self.config.mqtt_port
     }
-}
 
-impl Protocol {
     #[inline]
     pub fn maximum_qos(&self) -> QoS {
         QoS::try_from(self.config.mqtt_maximum_qos).unwrap()
@@ -65,36 +73,6 @@ impl Protocol {
     #[inline]
     pub fn topic_alias_max(&self) -> Option<u16> {
         self.config.topic_alias_max()
-    }
-}
-
-impl Protocol {
-    pub fn new_ping_resp(&self, _ping_req: v5::Packet) -> QPacket {
-        QPacket::V5(v5::Packet::PingResp)
-    }
-
-    pub fn new_pub_ack(&self, packet_id: PacketID) -> QPacket {
-        QPacket::V5(v5::Packet::PubAck(v5::Pub::new_pub_ack(packet_id)))
-    }
-
-    pub fn new_sub_ack(&self, sub: &v5::Packet, rcodes: Vec<ReasonCode>) -> QPacket {
-        match sub {
-            v5::Packet::Subscribe(sub) => {
-                let suback = v5::SubAck::from_sub(sub, rcodes);
-                QPacket::V5(v5::Packet::SubAck(suback))
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    pub fn new_unsub_ack(&self, unsub: &v5::Packet, rcodes: Vec<ReasonCode>) -> QPacket {
-        match unsub {
-            v5::Packet::UnSubscribe(unsub) => {
-                let unsuback = v5::UnsubAck::from_unsub(&unsub, rcodes);
-                QPacket::V5(v5::Packet::UnsubAck(unsuback))
-            }
-            pkt => unreachable!("{}", pkt),
-        }
     }
 }
 
@@ -247,6 +225,36 @@ impl Protocol {
     }
 }
 
+impl Protocol {
+    pub fn new_ping_resp(&self, _ping_req: v5::Packet) -> QPacket {
+        QPacket::V5(v5::Packet::PingResp)
+    }
+
+    pub fn new_pub_ack(&self, packet_id: PacketID) -> QPacket {
+        QPacket::V5(v5::Packet::PubAck(v5::Pub::new_pub_ack(packet_id)))
+    }
+
+    pub fn new_sub_ack(&self, sub: &v5::Packet, rcodes: Vec<ReasonCode>) -> QPacket {
+        match sub {
+            v5::Packet::Subscribe(sub) => {
+                let suback = v5::SubAck::from_sub(sub, rcodes);
+                QPacket::V5(v5::Packet::SubAck(suback))
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn new_unsub_ack(&self, unsub: &v5::Packet, rcodes: Vec<ReasonCode>) -> QPacket {
+        match unsub {
+            v5::Packet::UnSubscribe(unsub) => {
+                let unsuback = v5::UnsubAck::from_unsub(&unsub, rcodes);
+                QPacket::V5(v5::Packet::UnsubAck(unsuback))
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+}
+
 /// Type implement the socket connection for MQTT-v5 and broker.
 pub struct Socket {
     client_id: ClientID,
@@ -327,21 +335,27 @@ impl Socket {
 
     #[inline]
     pub fn to_protocol(&self) -> Protocol {
-        Protocol { config: self.config.clone() }
+        Protocol {
+            client_id: self.client_id.clone(),
+            shard_id: self.shard_id,
+            raddr: self.conn.peer_addr().unwrap(),
+            config: self.config.clone(),
+            connect: self.connect.clone(),
+        }
     }
 
     #[inline]
-    pub fn keep_alive(&self) -> u16 {
+    pub fn client_keep_alive(&self) -> u16 {
         self.connect.keep_alive
     }
 
     #[inline]
-    pub fn receive_maximum(&self) -> u16 {
+    pub fn client_receive_maximum(&self) -> u16 {
         self.connect.receive_maximum()
     }
 
     #[inline]
-    pub fn session_expiry_interval(&self) -> Option<u32> {
+    pub fn client_session_expiry_interval(&self) -> Option<u32> {
         self.connect.session_expiry_interval()
     }
 
@@ -455,7 +469,7 @@ impl Socket {
         self.write_packet(prefix, blob);
     }
 
-    pub fn success_ack(&self) -> QPacket {
+    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
         let val = self.connect.session_expiry_interval();
         let sei = match (self.config.mqtt_session_expiry_interval, val) {
             (Some(_one), Some(two)) => Some(two),
@@ -486,7 +500,10 @@ impl Socket {
             props.server_keep_alive = Some(keep_alive)
         }
 
-        let connack = v5::ConnAck::new_success(Some(props));
+        let connack = match rcode {
+            ReasonCode::Success => v5::ConnAck::new_success(Some(props)),
+            _ => unreachable!(),
+        };
 
         QPacket::V5(v5::Packet::ConnAck(connack))
     }
