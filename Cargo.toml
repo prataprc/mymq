@@ -1,6 +1,10 @@
 [package]
 name = "mymq"
 version = "0.1.0"
+description = "Broker and message queues"
+authors = ["prataprc <prataprc@gmail.com>"]
+license-file = "LICENSE"
+readme = "README.md"
 edition = "2021"
 
 [[bin]]
