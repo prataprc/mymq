@@ -3,9 +3,10 @@ use std::{net, time};
 use crate::Protocol;
 use crate::{Error, ErrorKind, ReasonCode, Result};
 
-/// Type implement keep-alive timer. A passive timer used by application to detect
-/// keep-alive timeouts by calling [KeepAlive::check_expired]. Typically used to
-/// keep track of network in-activity.
+/// Type implement keep-alive timer.
+///
+/// A passive timer used by application to detect keep-alive timeouts by calling
+/// [KeepAlive::check_expired]. Typically used to keep track of network in-activity.
 pub struct KeepAlive {
     pub prefix: String,
     pub keep_alive: Option<u16>,

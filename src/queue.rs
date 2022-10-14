@@ -75,6 +75,7 @@ impl<T> QueueStatus<T> {
     }
 }
 
+/// Type implement the tx-handle for a packet-queue.
 #[derive(Clone)]
 pub struct PacketTx {
     id: u32,                       // Id of owner, owning this packet queue

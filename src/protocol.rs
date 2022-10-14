@@ -313,6 +313,10 @@ impl Socket {
     }
 }
 
+/// Enumerated types of packets supported by protocol.
+///
+/// There shall be one-to-one correspondence between [Protocol] variants and [QPacket]
+/// variants.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum QPacket {
     V5(v5::Packet),

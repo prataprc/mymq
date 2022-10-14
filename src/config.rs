@@ -31,7 +31,7 @@ macro_rules! config_field {
     }};
 }
 
-/// Cluster configuration.
+/// Configuration for broker and supported protocols.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Broker configuration.

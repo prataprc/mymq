@@ -11,6 +11,7 @@ use crate::{ClientID, PacketID, Protocol, Subscription, Timer, TopicFilter, Topi
 use crate::{Error, ErrorKind, ReasonCode, Result};
 use crate::{PacketRx, PacketTx, QPacket, QoS, QueueStatus, RetainForwardRule};
 
+/// Arguments to create a master-session.
 pub struct SessionArgsMaster {
     pub shard_id: u32,
     pub client_id: ClientID,
@@ -26,6 +27,7 @@ pub struct SessionArgsMaster {
     pub client_session_expiry_interval: Option<u32>,
 }
 
+/// Arguments to create a replica-session.
 pub struct SessionArgsReplica {
     pub shard_id: u32,
     pub client_id: ClientID,

@@ -12,6 +12,7 @@ use crate::broker::SessionArgsReplica;
 use crate::broker::{Config, InpSeqno, OutSeqno};
 use crate::{ClientID, PacketID, Protocol, QPacket, QoS, QueueStatus};
 
+/// Context for reading packets from a session and converting them to [Message].
 #[derive(Default)]
 pub struct RouteIO {
     pub disconnected: bool,
@@ -29,6 +30,7 @@ impl RouteIO {
     }
 }
 
+/// Context for Consensus-loop.
 #[derive(Default)]
 pub struct ConsensIO {
     // Message::Subscribe

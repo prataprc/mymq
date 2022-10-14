@@ -55,6 +55,9 @@ pub trait Shardable {
     fn uuid(&self) -> uuid::Uuid;
 }
 
+/// Trait abstraction for [Cluster].
+///
+/// Used by other components of broker.
 pub trait ClusterAPI {
     /// Wake up the cluster
     fn wake(&self) -> Result<()>;
@@ -75,6 +78,9 @@ pub trait ClusterAPI {
     fn to_tx(&self, who: &str) -> Self;
 }
 
+/// Trait abstraction for [Shard].
+///
+/// Used by other components of broker.
 pub trait ShardAPI {
     fn to_shard_id(self) -> u32;
 

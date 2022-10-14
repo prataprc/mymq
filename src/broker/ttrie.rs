@@ -2,6 +2,9 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::{borrow::Borrow, thread};
 
+#[allow(unused_imports)]
+use crate::{TopicFilter, TopicName};
+
 use crate::broker::Spinlock;
 use crate::{ClientID, IterTopicPath, QPacket, Subscription};
 
@@ -11,7 +14,7 @@ use crate::{ClientID, IterTopicPath, QPacket, Subscription};
 
 /// Type implement a MVCC trie for managing topic-subscriptions.
 ///
-/// Indexed with TopicFilter and matched using TopicName.
+/// Indexed with [TopicFilter] and matched using [TopicName].
 pub struct SubscribedTrie {
     mu: Arc<Mutex<u32>>,
     stats: Stats,
@@ -174,7 +177,7 @@ impl SubscribedTrie {
 
 /// Type implement a MVCC trie for managing retain messages.
 ///
-/// Indexed with TopicName and matched using TopicFilter.
+/// Indexed with [TopicName] and matched using [TopicFilter].
 pub struct RetainedTrie {
     mu: Arc<Mutex<u32>>,
     stats: Stats,
@@ -817,8 +820,9 @@ pub struct Stats {
     pub hits: Arc<AtomicUsize>,
 }
 
-/// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec. This match
-/// algorithm is commutative between TopicName and TopicFilter.
+/// A simple matcher, that confirms to Section 4.7 of the MQTT v5 spec.
+///
+/// This match algorithm is commutative between [TopicName] and [TopicFilter].
 pub fn route_match<S: AsRef<str>>(this: &str, index: &[S]) -> Vec<String> {
     let mut outs = Vec::default();
     for other in index.iter() {

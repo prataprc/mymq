@@ -2,7 +2,7 @@ use std::{fmt, net, path, result};
 
 use crate::{Error, ErrorKind, Result};
 
-/// Cluster configuration.
+/// Broker configuration.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Human readable name of the broker-cluster.

@@ -1,6 +1,7 @@
 use crate::F32;
 use crate::{Error, ErrorKind, Result};
 
+/// Configuration for MQTT-V5 protocol.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Config {
     /// Spawn MQTT listener, listening on [Config::mqtt_port].

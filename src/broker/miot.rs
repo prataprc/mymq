@@ -699,6 +699,7 @@ where
     }
 }
 
+/// Packet Queue.
 pub struct PQueue {
     config: Config,
     socket: Socket,
@@ -710,6 +711,7 @@ pub struct PQueue {
     oug_packets: VecDeque<QPacket>,
 }
 
+/// Arguments to construct a packet-queue.
 pub struct PQueueArgs {
     pub config: Config,
     pub socket: Socket,
