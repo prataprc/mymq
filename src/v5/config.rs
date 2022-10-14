@@ -39,7 +39,7 @@ pub struct Config {
     /// connection, this timer will kick in, and within the timeout period if
     /// connect/ack handshake is not complete, connection will be closed.
     ///
-    /// * **Default**: [Config::DEF_CONNECT_TIMEOUT]
+    /// * **Default**: [Config::DEF_MQTT_CONNECT_TIMEOUT]
     /// * **Mutable**: No
     pub mqtt_connect_timeout: u32,
 
@@ -70,7 +70,7 @@ pub struct Config {
     /// MQTT `mqtt_maximum_qos` on the broker side. This is the advertised maximum
     /// supported QoS level by the broker.
     ///
-    /// * **Default**: [Config::DEF_MAX_QOS]
+    /// * **Default**: [Config::DEF_MQTT_MAX_QOS]
     /// * **Mutable**: No
     pub mqtt_maximum_qos: u8,
 

@@ -81,6 +81,16 @@ impl Default for ConnectFlags {
     }
 }
 
+impl From<QoS> for ConnectFlags {
+    fn from(qos: QoS) -> ConnectFlags {
+        match qos {
+            QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
+            QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
+            QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
+        }
+    }
+}
+
 impl ConnectFlags {
     pub const CLEAN_START: ConnectFlags = ConnectFlags(0b_0000_0010);
     pub const WILL_FLAG: ConnectFlags = ConnectFlags(0b_0000_0100);

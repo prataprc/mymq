@@ -122,3 +122,6 @@
 //! * Migration of replica shard from one node not another.
 //! * Demotion of master shard as replica-shard.
 //! * Promotion of replica-shard as master-shard.
+
+#[allow(unused_imports)]
+use crate::broker::rebalance::Topology;

@@ -373,6 +373,17 @@ impl Packet {
         }
     }
 
+    pub fn set_session_present(&mut self, session_present: bool) {
+        match self {
+            Packet::ConnAck(connack) => {
+                connack.set_session_present(session_present);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+}
+
+impl Packet {
     #[inline]
     pub fn is_retain(&self) -> bool {
         match self {

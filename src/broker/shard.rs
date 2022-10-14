@@ -1369,17 +1369,19 @@ where
         };
 
         // create the session
-        let (mut session, session_tx, miot_rx) = {
+        let (mut session, session_tx, miot_rx, session_present) = {
             let (args, upstream, downstream) = self.to_args_master(&sock);
-            let session = self.new_session_a(&sock, args, cons_io);
-            (session, upstream, downstream)
+            let (session, session_present) = self.new_session_a(&sock, args, cons_io);
+            (session, upstream, downstream, session_present)
         };
 
         let raddr = sock.peer_addr();
 
         // send back the connection acknowledgment CONNACK here.
         {
-            let packet = sock.new_conn_ack(ReasonCode::Success);
+            let mut packet = sock.new_conn_ack(ReasonCode::Success);
+            packet.set_session_present(session_present);
+
             let status = session.tx_oug_acks(vec![Message::new_conn_ack(packet)]);
 
             match status {
@@ -1625,12 +1627,13 @@ where
         (args, upstream, downstream)
     }
 
+    // return (session, session-present)
     fn new_session_a(
         &mut self,
         sock: &Socket,
         args: SessionArgsMaster,
         cons_io: &mut ConsensIO,
-    ) -> Session {
+    ) -> (Session, bool) {
         // add_connection further down shall wake miot-thread.
         let MasterLoop { reconnects, sessions, miot, .. } = match &mut self.inner {
             Inner::MainMaster(master_loop) => master_loop,
@@ -1654,11 +1657,8 @@ where
         let old_session = sessions.remove(sock.as_client_id());
         let pq = miot.remove_connection(&client_id);
 
-        let (session, clean_start) = match (old_session, pq) {
+        let (session, clean_start, session_present) = match (old_session, pq) {
             (None, Ok(None)) if reconnect && clean_start => {
-                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
-                cons_io.ctrl_msgs.push(msg);
-
                 reconnects.delete(&client_id).unwrap();
                 let mut iter = reconnects.gc().filter(|s| &s.client_id == &client_id);
                 let old_session = iter.next().unwrap();
@@ -1668,12 +1668,9 @@ where
                     self.prefix, old_session.raddr, args.raddr
                 );
 
-                (Session::default().into_master(args), true)
+                (Session::default().into_master(args), true, false)
             }
             (None, Ok(None)) if reconnect => {
-                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
-                cons_io.ctrl_msgs.push(msg);
-
                 reconnects.delete(&client_id).unwrap();
                 let mut iter = reconnects.gc().filter(|s| &s.client_id == &client_id);
                 let old_session = iter.next().unwrap();
@@ -1683,20 +1680,15 @@ where
                     self.prefix, old_session.raddr, args.raddr
                 );
 
-                (old_session.into_master(args), false)
+                (old_session.into_master(args), false, true)
             }
-            (None, Ok(None)) => {
-                let msg = Message::new_rem_session(self.shard_id, client_id.clone());
-                cons_io.ctrl_msgs.push(msg);
-
-                (Session::default().into_master(args), true)
-            }
+            (None, Ok(None)) => (Session::default().into_master(args), true, false),
             (Some(old_session), Ok(Some(pq))) => {
                 let err: Result<()> = err_session_takeover(&self.prefix, args.raddr);
                 let req = Request::FlushSession { pq, err: err.err() };
                 self.handle_flush_session(req, cons_io);
 
-                (old_session.into_master(args), true)
+                (old_session.into_master(args), false, true)
             }
             (_, Err(err)) => {
                 let msg = Message::new_rem_session(self.shard_id, client_id.clone());
@@ -1704,7 +1696,7 @@ where
 
                 app_fatal!(self, Result::<()>::Err(err));
 
-                (Session::default().into_master(args), true)
+                (Session::default().into_master(args), true, false)
             }
             (Some(_), Ok(None)) => unreachable!(),
             (None, Ok(Some(_))) => unreachable!(),
@@ -1713,7 +1705,7 @@ where
         msg.set_clean_start(clean_start);
         cons_io.ctrl_msgs.push(msg);
 
-        session
+        (session, session_present)
     }
 
     fn new_session_r(&mut self, args: SessionArgsReplica) -> Session {

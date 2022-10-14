@@ -14,6 +14,9 @@ use log::{debug, error, info, trace, warn};
 use std::collections::{BTreeMap, VecDeque};
 use std::{fmt, mem, net, result, sync::Arc, time};
 
+#[allow(unused_imports)]
+use crate::broker::Shard;
+
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, Config, ShardAPI};
 use crate::{Blob, PacketRx, PacketTx, Packetize, QPacket, QueueStatus, Socket};

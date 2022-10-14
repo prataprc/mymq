@@ -410,6 +410,13 @@ impl QPacket {
             QPacket::V5(pkt) => pkt.set_subscription_ids(ids),
         }
     }
+
+    #[inline]
+    pub fn set_session_present(&mut self, session_present: bool) {
+        match self {
+            QPacket::V5(pkt) => pkt.set_session_present(session_present),
+        }
+    }
 }
 
 impl QPacket {

@@ -13,6 +13,9 @@ use log::{debug, error, info, trace};
 
 use std::{fmt, mem, result, sync::mpsc, thread, time};
 
+#[allow(unused_imports)]
+use crate::broker::{Cluster, Shard};
+
 use crate::broker::thread::{Rx, Thread, Threadable};
 use crate::broker::{AppTx, ClusterAPI, Config, ShardAPI};
 use crate::{Error, ErrorKind, Result};

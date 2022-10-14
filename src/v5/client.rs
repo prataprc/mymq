@@ -226,7 +226,7 @@ impl Drop for Client {
 impl Client {
     /// Call this immediately after `connect` or `connect_noblock` on the ClientBuilder,
     /// else this call might panic. Returns a tuple of
-    /// (read-only-client, write-onlyu-client).
+    /// (read-only-client, write-only-client).
     pub fn split_rw(mut self) -> io::Result<(Client, Client)> {
         let cio = mem::replace(&mut self.cio, ClientIO::None);
 
@@ -298,24 +298,18 @@ impl Client {
             flags.push(v5::ConnectFlags::CLEAN_START)
         }
         if self.is_will() {
+            let will_qos = self.connopts.will_qos.unwrap_or(QoS::AtMostOnce);
             flags.push(v5::ConnectFlags::WILL_FLAG);
-            flags.push(match self.connopts.will_qos.unwrap_or(QoS::AtMostOnce) {
-                QoS::AtMostOnce => v5::ConnectFlags::WILL_QOS0,
-                QoS::AtLeastOnce => v5::ConnectFlags::WILL_QOS1,
-                QoS::ExactlyOnce => v5::ConnectFlags::WILL_QOS2,
-            });
-            match self.connopts.will_retain {
-                Some(true) => flags.push(v5::ConnectFlags::WILL_RETAIN),
-                Some(_) | None => (),
+            flags.push(v5::ConnectFlags::from(will_qos));
+            if let Some(true) = self.connopts.will_retain {
+                flags.push(v5::ConnectFlags::WILL_RETAIN)
             }
         }
-        match &self.connect_payload.username {
-            Some(_) => flags.push(v5::ConnectFlags::USERNAME),
-            None => (),
+        if let Some(_) = &self.connect_payload.username {
+            flags.push(v5::ConnectFlags::USERNAME)
         }
-        match &self.connect_payload.password {
-            Some(_) => flags.push(v5::ConnectFlags::PASSWORD),
-            None => (),
+        if let Some(_) = &self.connect_payload.password {
+            flags.push(v5::ConnectFlags::PASSWORD)
         }
 
         let mut connect = v5::Connect {
@@ -401,6 +395,12 @@ impl Client {
                 keep_alive < self.last_sent.elapsed().as_micros()
             }
         }
+    }
+
+    /// Return whether this client's connection is a continuation of earlier session. In
+    /// which case brokers shall remember the topic subscriptions for this `ClientID`.
+    pub fn session_present(&self) -> bool {
+        self.connack.flags.unwrap().unwrap()
     }
 
     /// Send a PingReq to server.
@@ -674,6 +674,9 @@ impl ClientIO {
                 Err(io::Error::new(io::ErrorKind::InvalidData, msg))?
             }
         };
+        connack
+            .validate()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         pktr = val;
 

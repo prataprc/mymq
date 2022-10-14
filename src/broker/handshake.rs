@@ -2,6 +2,9 @@ use log::{error, info};
 
 use std::net;
 
+#[allow(unused_imports)]
+use crate::broker::Cluster;
+
 use crate::broker::thread::{Rx, Threadable};
 use crate::broker::{ClusterAPI, Config};
 use crate::{Protocol, ToJson};

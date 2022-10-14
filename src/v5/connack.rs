@@ -81,6 +81,7 @@ impl ConnAckFlags {
     }
 
     fn validate(&self) -> Result<()> {
+        self.unwrap()?;
         Ok(())
     }
 }
@@ -334,8 +335,12 @@ impl ConnAck {
         ConnAck { flags, code, properties: None }
     }
 
-    pub fn set_session_present(&mut self) {
-        self.flags = ConnAckFlags(*self.flags | *ConnAckFlags::SESSION_PRESENT);
+    pub fn set_session_present(&mut self, session_present: bool) {
+        self.flags = if session_present {
+            ConnAckFlags(*self.flags | *ConnAckFlags::SESSION_PRESENT)
+        } else {
+            ConnAckFlags(*self.flags & !(*ConnAckFlags::SESSION_PRESENT))
+        }
     }
 
     pub fn receive_maximum(&self) -> u16 {
@@ -354,7 +359,8 @@ impl ConnAck {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
+        self.flags.validate()?;
         Ok(())
     }
 }
