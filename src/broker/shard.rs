@@ -627,12 +627,12 @@ impl<C> MasterContext<C>
 where
     C: 'static + Send + ClusterAPI,
 {
-    fn new(msg_rx: MsgRx, inner: Inner<C>) -> MasterContext<C> {
+    fn new(msg_rx: MsgRx, inner: Inner<C>, cons_io: ConsensIO) -> MasterContext<C> {
         MasterContext {
             msg_rx,
             inner,
             session: Session::default(),
-            cons_io: ConsensIO::default(),
+            cons_io,
             disconnected: false,
         }
     }
@@ -664,13 +664,13 @@ where
             };
 
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
-            let mut args = MasterContext::new(msg_rx, inner);
+            let mut args = MasterContext::new(msg_rx, inner, cons_io);
 
-            self.master_pre_cs(&mut args, &mut cons_io);
-            self.master_cs(&mut args, &mut cons_io);
-            self.return_local_acks(&mut args, &mut cons_io);
-            self.master_post_cs(&mut args, &mut cons_io);
-            self.inc_publish_ack(&mut args, &mut cons_io);
+            self.master_pre_cs(&mut args);
+            self.master_cs(&mut args);
+            self.return_local_acks(&mut args);
+            self.master_post_cs(&mut args);
+            self.inc_publish_ack(&mut args);
             self.expire_reconnects();
 
             msg_rx = args.msg_rx;
@@ -691,7 +691,7 @@ where
         self
     }
 
-    fn master_pre_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+    fn master_pre_cs(&mut self, args: &mut MasterContext<C>) {
         let sessions = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
@@ -702,7 +702,7 @@ where
         let mut fail_sessions: Vec<FailSession> = Vec::default();
         let mut route_io = {
             let mut val = RouteIO::default();
-            val.cons_io = mem::replace(cons_io, ConsensIO::default());
+            val.cons_io = mem::replace(&mut args.cons_io, ConsensIO::default());
             val
         };
         let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
@@ -731,7 +731,7 @@ where
             args.disconnected = false;
         }
 
-        self.clean_failed_sessions(fail_sessions, cons_io);
+        self.clean_failed_sessions(fail_sessions, &mut args.cons_io);
         let _empty = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
@@ -739,10 +739,10 @@ where
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let _empty = mem::replace(cons_io, route_io.cons_io);
+        let _empty = mem::replace(&mut args.cons_io, route_io.cons_io);
     }
 
-    fn master_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+    fn master_cs(&mut self, args: &mut MasterContext<C>) {
         let sessions = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
@@ -755,9 +755,12 @@ where
         for (client_id, session) in sessions.into_iter() {
             let _empty_session = mem::replace(&mut args.session, session);
 
-            self.rx_messages(args, cons_io);
+            self.rx_messages(args);
 
-            let oug_qos0 = cons_io.oug_qos0.remove(&client_id).unwrap_or(Vec::default());
+            let oug_qos0 = {
+                let def = Vec::default();
+                args.cons_io.oug_qos0.remove(&client_id).unwrap_or(def)
+            };
             if args.session.tx_oug_back_log(oug_qos0).is_disconnected() {
                 let session = mem::replace(&mut args.session, _empty_session);
                 let err = err_disconnected(&self.prefix).err();
@@ -768,7 +771,8 @@ where
                 fail_sessions.push(FailSession { session, err });
             } else {
                 let session = mem::replace(&mut args.session, _empty_session);
-                cons_io.oug_seqno.insert(client_id.clone(), session.to_cs_oug_seqno());
+                let cs_oug_seqno = session.to_cs_oug_seqno();
+                args.cons_io.oug_seqno.insert(client_id.clone(), cs_oug_seqno);
                 sessions1.insert(client_id, session);
             }
             args.disconnected = false;
@@ -777,7 +781,7 @@ where
         // TODO: replicate relevant fields of cons_io in the consensus loop.
         // TODO: fetch msgs from consensus loop and start commiting.
 
-        self.clean_failed_sessions(fail_sessions, cons_io);
+        self.clean_failed_sessions(fail_sessions, &mut args.cons_io);
         let _empty = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
@@ -786,7 +790,7 @@ where
         };
     }
 
-    fn master_post_cs(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+    fn master_post_cs(&mut self, args: &mut MasterContext<C>) {
         let sessions = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, BTreeMap::default())
@@ -856,7 +860,7 @@ where
             args.disconnected = false;
         }
 
-        self.clean_failed_sessions(fail_sessions, cons_io);
+        self.clean_failed_sessions(fail_sessions, &mut args.cons_io);
         let _empty = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
@@ -968,7 +972,7 @@ where
         }
     }
 
-    fn rx_messages(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+    fn rx_messages(&mut self, args: &mut MasterContext<C>) {
         let MasterLoop { ack_timestamps, .. } = match &mut args.inner {
             Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -993,7 +997,7 @@ where
                 }
                 Message::Routed { client_id, out_seqno, .. } => {
                     *out_seqno = args.session.incr_oug_qos0();
-                    append_index!(&mut cons_io.oug_qos0, client_id, msg);
+                    append_index!(&mut args.cons_io.oug_qos0, client_id, msg);
                 }
                 _ => unreachable!(),
             };
@@ -1002,7 +1006,7 @@ where
         args.disconnected = match args.session.incr_oug_qos12(oug_qos12) {
             Ok(QueueStatus::Ok(msgs)) => {
                 let client_id = &args.session.client_id;
-                appends_index!(&mut cons_io.oug_qos12, client_id, msgs);
+                appends_index!(&mut args.cons_io.oug_qos12, client_id, msgs);
                 false
             }
             Ok(QueueStatus::Block(_)) | Ok(QueueStatus::Disconnected(_)) => true,
@@ -1010,18 +1014,14 @@ where
         };
     }
 
-    fn return_local_acks(
-        &mut self,
-        args: &mut MasterContext<C>,
-        cons_io: &mut ConsensIO,
-    ) {
+    fn return_local_acks(&mut self, args: &mut MasterContext<C>) {
         let MasterLoop { shard_back_log, .. } = match &mut args.inner {
             Inner::MainMaster(master_loop) => master_loop,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
         let mut acks = vec![0; self.config.num_shards as usize];
-        for (_client_id, oug_qos12) in cons_io.oug_qos12.iter() {
+        for (_client_id, oug_qos12) in args.cons_io.oug_qos12.iter() {
             for msg in oug_qos12.iter() {
                 match msg {
                     Message::Routed { src_shard_id, inp_seqno, .. } => {
@@ -1043,7 +1043,7 @@ where
         self.send_to_shards();
     }
 
-    fn inc_publish_ack(&mut self, args: &mut MasterContext<C>, cons_io: &mut ConsensIO) {
+    fn inc_publish_ack(&mut self, args: &mut MasterContext<C>) {
         let (index, sessions, ack_timestamps) = match &mut args.inner {
             Inner::MainMaster(MasterLoop { index, sessions, ack_timestamps, .. }) => {
                 (index, sessions, ack_timestamps)
@@ -1111,7 +1111,7 @@ where
 
         assert!(oug_acks.len() == 0);
 
-        self.clean_failed_sessions(fail_sessions, cons_io);
+        self.clean_failed_sessions(fail_sessions, &mut args.cons_io);
         let _empty = match &mut args.inner {
             Inner::MainMaster(MasterLoop { sessions, .. }) => {
                 mem::replace(sessions, sessions1)
