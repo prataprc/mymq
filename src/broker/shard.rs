@@ -1,7 +1,7 @@
 use log::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use std::{collections::BTreeMap, fmt, mem, net, result, sync::Arc, time};
+use std::{cmp, collections::BTreeMap, fmt, mem, net, result, sync::Arc, time};
 
 use crate::broker::thread::{Rx, Thread, Threadable, Tx};
 use crate::broker::{message, session, ClusterAPI, ShardAPI};
@@ -158,7 +158,6 @@ where
     ///   client.
     ack_timestamps: Vec<Timestamp>,
 
-    /// Message::Routed, will messages published by broken sessions.
     will_messages: Timer<ClientID, Message>,
     /// Corresponding MsgTx handle for all other shards, as Shard::MsgTx,
     shard_queues: BTreeMap<u32, Shard<C>>,
@@ -666,12 +665,13 @@ where
             let mut inner = mem::replace(&mut self.inner, Inner::Init);
             let mut args = MasterContext::new(msg_rx, inner, cons_io);
 
+            self.expire_reconnects();
+
             self.master_pre_cs(&mut args);
             self.master_cs(&mut args);
             self.return_local_acks(&mut args);
             self.master_post_cs(&mut args);
             self.inc_publish_ack(&mut args);
-            self.expire_reconnects();
 
             msg_rx = args.msg_rx;
             inner = args.inner;
@@ -699,12 +699,15 @@ where
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
 
-        let mut fail_sessions: Vec<FailSession> = Vec::default();
         let mut route_io = {
             let mut val = RouteIO::default();
             val.cons_io = mem::replace(&mut args.cons_io, ConsensIO::default());
             val
         };
+
+        self.expire_will_messages(&mut route_io);
+
+        let mut fail_sessions: Vec<FailSession> = Vec::default();
         let mut sessions1: BTreeMap<ClientID, Session> = BTreeMap::default();
         for (client_id, session) in sessions.into_iter() {
             let _empty_session = mem::replace(&mut args.session, session);
@@ -1120,45 +1123,20 @@ where
         };
     }
 
-    fn expire_reconnects(&mut self) {
-        let MasterLoop { reconnects, .. } = match &mut self.inner {
-            Inner::MainMaster(master_loop) => master_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        for session in reconnects.expired() {
-            info!("{} session:{} reconnect expired", self.prefix, *session.client_id);
-        }
-    }
-
-    fn remove_session(&mut self, client_id: &ClientID) {
+    fn mvto_session_reconnect(&mut self, client_id: &ClientID) {
         match &mut self.inner {
             Inner::MainMaster(MasterLoop {
-                index,
-                sessions,
-                reconnects,
-                cc_topic_filters,
-                ..
+                sessions, reconnects, will_messages, ..
             }) => {
-                let mut inp_seqnos = Vec::default();
-                for (_seqno, msg) in index.iter() {
-                    if let Message::ShardIndex { src_client_id, inp_seqno, .. } = msg {
-                        if src_client_id == client_id {
-                            inp_seqnos.push(*inp_seqno);
-                        }
+                if let Some(mut sess) = sessions.remove(client_id) {
+                    let sexp = u64::from(sess.to_session_expiry_interval().unwrap_or(0));
+                    if let Some(wmsg) = sess.take_will_message() {
+                        let wexp = cmp::min(u64::from(wmsg.will_delay_interval()), sexp);
+                        will_messages.add_timeout(wexp, client_id.clone(), wmsg);
                     }
-                }
-                for inp_seqno in inp_seqnos.into_iter() {
-                    index.remove(&inp_seqno);
-                }
 
-                if let Some(mut session) = sessions.remove(client_id) {
-                    session.remove_topic_filters(cc_topic_filters);
-                    reconnects.add_timeout(
-                        u64::from(session.to_session_expiry_interval().unwrap_or(0)),
-                        client_id.clone(),
-                        session.into_reconnect(),
-                    );
+                    let sess = sess.into_reconnect();
+                    reconnects.add_timeout(sexp, client_id.clone(), sess);
                 } else {
                     warn!("{} client_id:{} session not found", self.prefix, client_id);
                 }
@@ -1166,7 +1144,7 @@ where
             Inner::MainReplica(ReplicaLoop { sessions, reconnects, .. }) => {
                 if let Some(session) = sessions.remove(client_id) {
                     reconnects.add_timeout(
-                        0, // NOTE: reconnect never expires on the replica.
+                        u64::from(u32::MAX), // NOTE: reconnect never expires in replica.
                         client_id.clone(),
                         session.into_reconnect(),
                     );
@@ -1176,6 +1154,85 @@ where
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
+    }
+
+    fn expire_reconnects(&mut self) {
+        let MasterLoop { index, reconnects, cc_topic_filters, .. } = match &mut self.inner
+        {
+            Inner::MainMaster(master_loop) => master_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        for mut session in reconnects.expired() {
+            let mut inp_seqnos = Vec::default();
+            for (_seqno, msg) in index.iter() {
+                if let Message::ShardIndex { src_client_id, inp_seqno, .. } = msg {
+                    if src_client_id == &session.client_id {
+                        inp_seqnos.push(*inp_seqno);
+                    }
+                }
+            }
+            let n = inp_seqnos.len();
+            for inp_seqno in inp_seqnos.into_iter() {
+                index.remove(&inp_seqno);
+            }
+
+            let m = session.remove_topic_filters(cc_topic_filters);
+
+            info!("{} session:{} reconnect expired", self.prefix, *session.client_id);
+            info!(
+                "{} session:{} index:{} filters:{} reconnect expired cleanup ...",
+                self.prefix, *session.client_id, n, m,
+            );
+        }
+    }
+
+    fn expire_will_messages(&mut self, route_io: &mut RouteIO) {
+        let (expired, gced) = match &mut self.inner {
+            Inner::MainMaster(MasterLoop { will_messages, .. }) => {
+                let expired: Vec<Message> = will_messages.expired().collect();
+                let gced: Vec<Message> = will_messages.gc().collect();
+                (expired, gced)
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let n = expired.len();
+        for wmsg in expired.into_iter() {
+            self.publish_will_message(wmsg, route_io);
+        }
+        debug!("{} expired:{} will messages", self.prefix, n);
+        debug!("{} garbage_collected:{} will messages", self.prefix, gced.len());
+    }
+
+    fn publish_will_message(&mut self, wmsg: Message, route_io: &mut RouteIO) {
+        let (proto, client_id, publish) = match wmsg {
+            Message::WillMsg { proto, client_id, publish, .. } => {
+                (proto, client_id, publish)
+            }
+            msg => unreachable!("{:?}", msg),
+        };
+
+        if publish.is_retain() {
+            todo!()
+        }
+
+        let server_qos = proto.maximum_qos();
+        let topic_name = publish.as_topic_name().clone();
+
+        let args = session::DoPublishArgs {
+            client_id: client_id.clone(),
+            publish,
+            route_io,
+            server_qos,
+        };
+        let prefix = format!("session:will:{}", client_id);
+        if let Err(err) = session::do_publish(&prefix, self, args) {
+            error!(
+                "{} client_id:{} topic_name:{} publishing will message err:{}",
+                self.prefix, *client_id, *topic_name, err
+            );
+        }
     }
 
     fn clean_failed_sessions(
@@ -1446,7 +1503,7 @@ where
 
         let client_id = pq.as_client_id().clone();
 
-        self.remove_session(&client_id);
+        self.mvto_session_reconnect(&client_id);
 
         let MasterLoop { flusher, .. } = match &mut self.inner {
             Inner::MainMaster(master_loop) => master_loop,
@@ -1460,62 +1517,68 @@ where
     }
 
     fn handle_close_a(&mut self, _req: Request<C>) -> Response {
-        let mut master_loop = match mem::replace(&mut self.inner, Inner::Init) {
-            Inner::MainMaster(master_loop) => master_loop,
+        let fin_state = match mem::replace(&mut self.inner, Inner::Init) {
+            Inner::MainMaster(mut master_loop) => {
+                info!("{} closing shard", self.prefix);
+
+                let miot = {
+                    let miot = mem::replace(&mut master_loop.miot, Miot::default());
+                    miot.close_wait()
+                };
+
+                mem::drop(master_loop.poll);
+                mem::drop(master_loop.waker);
+                mem::drop(master_loop.cluster);
+                mem::drop(master_loop.flusher);
+
+                mem::drop(master_loop.shard_queues);
+                mem::drop(master_loop.cc_topic_filters);
+                mem::drop(master_loop.cc_retained_topics);
+
+                let mut new_sessions = BTreeMap::default();
+                for (client_id, sess) in master_loop.sessions.into_iter() {
+                    match sess.close() {
+                        Ok(stat) => {
+                            new_sessions.insert(client_id, stat);
+                        }
+                        Err(err) => {
+                            error!(
+                                "{} session:{} err:{} fail closing",
+                                self.prefix, *client_id, err
+                            );
+                        }
+                    }
+                }
+
+                let mut stats = Vec::default();
+                for session in master_loop.reconnects.close() {
+                    let client_id = session.client_id.clone();
+                    match session.close() {
+                        Ok(stat) => stats.push(stat),
+                        Err(err) => {
+                            error!(
+                                "{} session:{} err:{} fail closing",
+                                self.prefix, *client_id, err
+                            );
+                        }
+                    }
+                }
+
+                let fin_state = FinState {
+                    miot,
+                    sessions: new_sessions,
+                    reconnects: stats,
+                    inp_seqno: master_loop.inp_seqno,
+                    shard_back_log: BTreeMap::default(), // TODO
+                    ack_timestamps: master_loop.ack_timestamps,
+                    stats: master_loop.stats,
+                };
+                info!("{} stats:{}", self.prefix, fin_state.to_json());
+                fin_state
+            }
+            Inner::Close(fin_state) => fin_state,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
-
-        info!("{} closing shard", self.prefix);
-
-        let miot = mem::replace(&mut master_loop.miot, Miot::default()).close_wait();
-
-        mem::drop(master_loop.poll);
-        mem::drop(master_loop.waker);
-        mem::drop(master_loop.cluster);
-        mem::drop(master_loop.flusher);
-
-        mem::drop(master_loop.shard_queues);
-        mem::drop(master_loop.cc_topic_filters);
-        mem::drop(master_loop.cc_retained_topics);
-
-        let mut new_sessions = BTreeMap::default();
-        for (client_id, sess) in master_loop.sessions.into_iter() {
-            match sess.close() {
-                Ok(stat) => {
-                    new_sessions.insert(client_id, stat);
-                }
-                Err(err) => {
-                    error!(
-                        "{} session:{} err:{} fail closing",
-                        self.prefix, *client_id, err
-                    );
-                }
-            }
-        }
-
-        let mut stats = Vec::default();
-        for session in master_loop.reconnects.close() {
-            let client_id = session.client_id.clone();
-            match session.close() {
-                Ok(stat) => stats.push(stat),
-                Err(err) => {
-                    error!(
-                        "{} session:{} err:{} fail closing",
-                        self.prefix, *client_id, err
-                    );
-                }
-            }
-        }
-        let fin_state = FinState {
-            miot,
-            sessions: new_sessions,
-            reconnects: stats,
-            inp_seqno: master_loop.inp_seqno,
-            shard_back_log: BTreeMap::default(), // TODO
-            ack_timestamps: master_loop.ack_timestamps,
-            stats: master_loop.stats,
-        };
-        info!("{} stats:{}", self.prefix, fin_state.to_json());
 
         let _init = mem::replace(&mut self.inner, Inner::Close(fin_state));
         self.prefix = self.prefix();
@@ -1609,12 +1672,22 @@ where
             new_packet_queue(self.shard_id, size, waker)
         };
 
+        let cid = sock.as_client_id().clone();
+        let will_message = if let Some(publish) = sock.to_will_publish() {
+            let interval = sock.will_delay_interval();
+            let proto = sock.to_protocol();
+            Some(Message::new_will_msg(proto, interval, cid.clone(), publish))
+        } else {
+            None
+        };
+
         let args = SessionArgsMaster {
             shard_id: self.shard_id,
-            client_id: sock.as_client_id().clone(),
+            client_id: cid,
             raddr: sock.peer_addr(),
             config: self.config.clone(),
             proto: sock.to_protocol(),
+            will_message,
 
             miot_tx,
             session_rx,
@@ -1748,7 +1821,7 @@ impl<C> ShardAPI for Shard<C>
 where
     C: 'static + Send + ClusterAPI,
 {
-    fn to_shard_id(self) -> u32 {
+    fn to_shard_id(&self) -> u32 {
         self.shard_id
     }
 
@@ -1785,6 +1858,15 @@ where
 
     fn flush_session(&self, pq: PQueue, err: Option<Error>) {
         self.flush_session(pq, err)
+    }
+
+    fn delete_will_message(&mut self, client_id: &ClientID) -> Result<()> {
+        match &mut self.inner {
+            Inner::MainMaster(MasterLoop { will_messages, .. }) => {
+                will_messages.delete(client_id)
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
     }
 }
 

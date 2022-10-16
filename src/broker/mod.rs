@@ -2,8 +2,8 @@
 
 use std::{path, sync::mpsc};
 
+use crate::{ClientID, QPacket, Socket, TopicName};
 use crate::{Error, Result};
-use crate::{QPacket, Socket, TopicName};
 
 /// Used with [mio] library while polling for events.
 pub const POLL_EVENTS_SIZE: usize = 1024;
@@ -82,7 +82,7 @@ pub trait ClusterAPI {
 ///
 /// Used by other components of broker.
 pub trait ShardAPI {
-    fn to_shard_id(self) -> u32;
+    fn to_shard_id(&self) -> u32;
 
     fn as_topic_filters(&self) -> &SubscribedTrie;
 
@@ -95,6 +95,9 @@ pub trait ShardAPI {
 
     /// Flush session's socket packet queue.
     fn flush_session(&self, pq: PQueue, err: Option<Error>);
+
+    /// Delete will message for `client_id`.
+    fn delete_will_message(&mut self, client_id: &ClientID) -> Result<()>;
 }
 
 pub mod design;

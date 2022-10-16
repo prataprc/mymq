@@ -173,6 +173,12 @@ pub enum Message {
         shard_id: u32,        // shard sending the acknowledgement
         last_acked: InpSeqno, // from publishing-shard.
     },
+    WillMsg {
+        proto: Protocol,
+        interval: u32,       // will_delay_interval
+        client_id: ClientID, // to identifiy the session.
+        publish: QPacket,
+    },
 
     // session boundary
     /// PUBLISH Packets converted from Message::Routed and/or Message::Retain, before
@@ -208,6 +214,7 @@ impl fmt::Debug for Message {
 
             Message::Routed { .. } => write!(f, "Message::Routed"),
             Message::LocalAck { .. } => write!(f, "Message::LocalAck"),
+            Message::WillMsg { .. } => write!(f, "Message::WillMsg"),
 
             Message::Oug { .. } => write!(f, "Message::Oug"),
 
@@ -269,13 +276,19 @@ impl<'a> Arbitrary<'a> for Message {
                 shard_id: uns.arbitrary()?,
                 last_acked: uns.arbitrary()?,
             },
+            7 => Message::WillMsg {
+                proto: Protocol::default(),
+                interval: uns.arbitrary()?,
+                client_id: uns.arbitrary()?,
+                publish: QPacket::V5(v5::Packet::Publish(uns.arbitrary()?)),
+            },
 
-            7 => Message::Oug {
+            8 => Message::Oug {
                 out_seqno: uns.arbitrary()?,
                 publish: QPacket::V5(v5::Packet::Publish(uns.arbitrary()?)),
             },
 
-            8 => Message::AddSession {
+            9 => Message::AddSession {
                 shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
                 raddr: net::SocketAddr::from_str("192.168.2.10:1883").unwrap(),
@@ -283,7 +296,7 @@ impl<'a> Arbitrary<'a> for Message {
                 proto: Protocol::default(),
                 clean_start: uns.arbitrary()?,
             },
-            9 => Message::RemSession {
+            10 => Message::RemSession {
                 shard_id: uns.arbitrary()?,
                 client_id: uns.arbitrary()?,
             },
@@ -345,6 +358,15 @@ impl Message {
         Message::LocalAck { shard_id, last_acked }
     }
 
+    pub fn new_will_msg(
+        proto: Protocol,
+        interval: u32,
+        client_id: ClientID,
+        publish: QPacket,
+    ) -> Message {
+        Message::WillMsg { proto, interval, client_id, publish }
+    }
+
     pub fn new_add_session() -> Message {
         todo!() // directly constructed
     }
@@ -361,7 +383,9 @@ impl Message {
             _ => unreachable!(),
         }
     }
+}
 
+impl Message {
     pub fn to_packet(&self) -> QPacket {
         match self {
             Message::ClientAck { packet, .. } => packet.clone(),
@@ -375,6 +399,13 @@ impl Message {
             Message::Retain { publish, .. } => publish.to_packet_id(),
             Message::Routed { publish, .. } => publish.to_packet_id(),
             Message::Oug { publish, .. } => publish.to_packet_id(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn will_delay_interval(&self) -> u32 {
+        match self {
+            Message::WillMsg { interval, .. } => *interval,
             _ => unreachable!(),
         }
     }

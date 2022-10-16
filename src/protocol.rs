@@ -280,6 +280,38 @@ impl Socket {
 }
 
 impl Socket {
+    /// Return acknowledgement packet with reason code `rcode` to send back to client.
+    #[inline]
+    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
+        match self {
+            Socket::V5(sock) => sock.new_conn_ack(rcode),
+        }
+    }
+
+    /// Send disconnect packet with reason code `rcode.
+    #[inline]
+    pub fn send_disconnect(&mut self, prefix: &str, rcode: ReasonCode) {
+        match self {
+            Socket::V5(sock) => sock.send_disconnect(prefix, rcode),
+        }
+    }
+
+    /// Return the will message, for session, treated as publish after session's death.
+    pub fn to_will_publish(&self) -> Option<QPacket> {
+        match self {
+            Socket::V5(sock) => sock.to_will_publish(),
+        }
+    }
+
+    /// Return the will delay interval to be used along with [Self::to_will_publish].
+    pub fn will_delay_interval(&self) -> u32 {
+        match self {
+            Socket::V5(sock) => sock.will_delay_interval(),
+        }
+    }
+}
+
+impl Socket {
     /// Error shall be MalformedPacket or ProtocolError.
     /// Returned QueueStatus shall not carry any packets, packets are booked in Socket.
     #[inline]
@@ -295,20 +327,6 @@ impl Socket {
     pub fn write_packet(&mut self, prefix: &str, blob: Option<Blob>) -> QueuePkt {
         match self {
             Socket::V5(sock) => sock.write_packet(prefix, blob),
-        }
-    }
-
-    #[inline]
-    pub fn disconnect(&mut self, prefix: &str, code: ReasonCode) {
-        match self {
-            Socket::V5(sock) => sock.disconnect(prefix, code),
-        }
-    }
-
-    #[inline]
-    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
-        match self {
-            Socket::V5(sock) => sock.new_conn_ack(rcode),
         }
     }
 }

@@ -18,6 +18,7 @@ pub struct SessionArgsMaster {
     pub raddr: net::SocketAddr,
     pub config: Config,
     pub proto: Protocol,
+    pub will_message: Option<Message>,
 
     pub miot_tx: PacketTx,
     pub session_rx: PacketRx,
@@ -88,7 +89,7 @@ pub struct Common {
     /// Monotonically increasing `seqno`, starting from 1, that is bumped up for
     /// every outgoing publish packet.
     cs_oug_seqno: OutSeqno,
-    /// Message::Oug outgoing PUBLISH > QoS-1/2, first land here.
+    /// Message::Oug outgoing PUBLISH QoS-1/2, first land here.
     ///
     /// qos12-publish messages are commited after consensus loop.
     /// qos12-retain messages are commited while receiving new subscriptions.
@@ -102,7 +103,7 @@ pub struct Common {
     /// ACK packet-ids in consensus loop.
     ///
     /// Note that length of this collection can't be more than the allowed limit of
-    /// concurrent PUBLISH specified by client.
+    /// concurrent PUBLISH specified by client. Refer `receive_maximum`.
     oug_retry_qos12: Timer<PacketID, Message>,
 }
 
@@ -125,11 +126,12 @@ pub struct Master {
 
     // Immutable set of parameters for this session, after handshake.
     keep_alive: KeepAlive, // Negotiated keep-alive.
-    miot_tx: PacketTx,     // Outbound channel to Miot thread.
-    session_rx: PacketRx,  // Inbound channel from Miot thread.
+    will_message: Option<Message>,
+    miot_tx: PacketTx,    // Outbound channel to Miot thread.
+    session_rx: PacketRx, // Inbound channel from Miot thread.
 
     // Sorted list of QoS-1 & QoS-2, SUB, UNSUB packet_id for managing incoming
-    // duplicate publish and/or  Subscribe and UnSubscribe packets
+    // duplicate publish and/or Subscribe and UnSubscribe packets.
     inc_packet_ids: Vec<PacketID>,
     // Message::ClientAck that needs to be sent to remote client.
     oug_acks: Vec<Message>,
@@ -153,6 +155,7 @@ impl From<SessionArgsMaster> for Master {
             common: Common { config: args.config, ..Common::default() },
 
             keep_alive,
+            will_message: args.will_message,
             miot_tx: args.miot_tx,
             session_rx: args.session_rx,
 
@@ -207,8 +210,18 @@ impl DerefMut for Replica {
 pub struct Reconnect {
     common: Common,
 
-    // arrives from SessionState::Master, and lays dormant
+    // Sorted list of QoS-1 & QoS-2, SUB, UNSUB packet_id for managing incoming
+    // duplicate publish and/or  Subscribe and UnSubscribe packets
+    inc_packet_ids: Vec<PacketID>,
+    // Message::ClientAck that needs to be sent to remote client.
+    oug_acks: Vec<Message>,
+    // Message::Oug outgoing QoS-0 PUBLISH messages.
+    // Message::Oug outgoing QoS-0 Retain messages.
+    oug_back_log: Vec<Message>,
+    // Array of available packet-ids. size is determined by `receive_maximum`.
     next_packet_ids: VecDeque<PacketID>,
+    // Pending qos12 publish (Routed and Retain) messages waiting for next_packet_ids.
+    pending_qos12: VecDeque<Message>,
 }
 
 impl Deref for Reconnect {
@@ -280,6 +293,7 @@ impl Session {
         let raddr = args.raddr;
         let shard_id = args.shard_id;
         let proto = args.proto.clone();
+
         let client_session_expiry_interval = args.client_session_expiry_interval;
 
         let mut master = Master::from(args);
@@ -288,15 +302,6 @@ impl Session {
         let state = mem::replace(&mut self.state, SessionState::None);
         let state = match state {
             SessionState::None => SessionState::Master(master),
-            SessionState::Replica(replica) => {
-                master.common.cs_oug_back_log = replica.common.oug_retry_qos12.values();
-                master.cs_oug_back_log.extend(replica.common.cs_oug_back_log.into_iter());
-
-                master.common.cs_subscriptions = replica.common.cs_subscriptions;
-                master.common.cs_oug_seqno = replica.common.cs_oug_seqno;
-                master.common.oug_retry_qos12 = replica.common.oug_retry_qos12;
-                SessionState::Master(master)
-            }
             SessionState::Reconnect(reconnect) => {
                 master.common.cs_oug_back_log = reconnect.common.oug_retry_qos12.values();
                 master
@@ -307,10 +312,25 @@ impl Session {
                 master.common.cs_subscriptions = reconnect.common.cs_subscriptions;
                 master.common.cs_oug_seqno = reconnect.common.cs_oug_seqno;
                 master.common.oug_retry_qos12 = reconnect.common.oug_retry_qos12;
+
+                master.inc_packet_ids = reconnect.inc_packet_ids;
+                master.oug_acks = reconnect.oug_acks;
+                master.oug_back_log = reconnect.oug_back_log;
+                master.pending_qos12 = reconnect.pending_qos12;
                 master.next_packet_ids = match reconnect.next_packet_ids.len() {
                     0 => master.next_packet_ids,
                     _ => reconnect.next_packet_ids,
                 };
+
+                SessionState::Master(master)
+            }
+            SessionState::Replica(replica) => {
+                master.common.cs_oug_back_log = replica.common.oug_retry_qos12.values();
+                master.cs_oug_back_log.extend(replica.common.cs_oug_back_log.into_iter());
+
+                master.common.cs_subscriptions = replica.common.cs_subscriptions;
+                master.common.cs_oug_seqno = replica.common.cs_oug_seqno;
+                master.common.oug_retry_qos12 = replica.common.oug_retry_qos12;
                 SessionState::Master(master)
             }
             ss => unreachable!("{:?}", ss),
@@ -384,13 +404,20 @@ impl Session {
                     common: Common {
                         prefix: prefix.clone(),
                         config: master.common.config,
+
                         topic_aliases: master.common.topic_aliases,
+
                         cs_subscriptions: master.common.cs_subscriptions,
                         cs_oug_seqno: master.common.cs_oug_seqno,
                         cs_oug_back_log: master.common.cs_oug_back_log,
                         oug_retry_qos12: master.common.oug_retry_qos12,
                     },
+
+                    inc_packet_ids: master.inc_packet_ids,
+                    oug_acks: master.oug_acks,
+                    oug_back_log: master.oug_back_log,
                     next_packet_ids: master.next_packet_ids,
+                    pending_qos12: master.pending_qos12,
                 };
                 SessionState::Reconnect(reconnect)
             }
@@ -399,13 +426,20 @@ impl Session {
                     common: Common {
                         prefix: prefix.clone(),
                         config: replica.common.config,
+
                         topic_aliases: replica.common.topic_aliases,
+
                         cs_subscriptions: replica.common.cs_subscriptions,
                         cs_oug_seqno: replica.common.cs_oug_seqno,
                         cs_oug_back_log: replica.common.cs_oug_back_log,
                         oug_retry_qos12: replica.common.oug_retry_qos12,
                     },
+
+                    inc_packet_ids: Vec::default(),
+                    oug_acks: Vec::default(),
+                    oug_back_log: Vec::default(),
                     next_packet_ids: VecDeque::default(),
+                    pending_qos12: VecDeque::default(),
                 };
                 SessionState::Reconnect(reconnect)
             }
@@ -458,14 +492,24 @@ impl Session {
 }
 
 impl Session {
-    pub fn remove_topic_filters(&mut self, filters: &mut SubscribedTrie) {
+    /// Return number of subscriptions active for this session.
+    pub fn remove_topic_filters(&mut self, filters: &mut SubscribedTrie) -> usize {
         match &self.state {
             SessionState::Master(master) => {
                 for (topic_filter, value) in master.cs_subscriptions.iter() {
                     filters.unsubscribe(topic_filter, value);
                 }
+                master.cs_subscriptions.len()
             }
             ss => unreachable!("{:?}", ss),
+        }
+    }
+
+    /// Return the will message if found for this session.
+    pub fn take_will_message(&mut self) -> Option<Message> {
+        match &mut self.state {
+            SessionState::Master(master) => master.will_message.take(),
+            _ => unreachable!(),
         }
     }
 }
@@ -503,6 +547,7 @@ impl Session {
                 }
             }
         };
+
         rio.disconnected = status.is_disconnected();
 
         Ok(())
@@ -599,69 +644,26 @@ impl Session {
     where
         S: ShardAPI,
     {
-        let server_qos = self.proto.maximum_qos();
-        let publish_qos = publish.to_qos();
-
+        validate_publish(&self.prefix, &self.proto, &publish)?;
         if self.is_duplicate(&publish) {
             return Ok(());
         }
         self.book_packet_id(&publish)?;
-
-        if publish_qos > server_qos {
-            err_unsup_qos(&self.prefix, publish_qos)?
-        }
-
         self.book_retain(&publish)?;
+        self.book_topic_name(&publish)?;
 
-        let inp_seqno = shard.incr_inp_seqno();
-        let topic_name = self.publish_topic_name(&publish)?;
+        let server_qos = self.proto.maximum_qos();
+        let publish_qos = publish.to_qos();
+        let packet_id = publish.to_packet_id();
+        let client_id = self.client_id.clone();
 
-        if publish.is_qos12() {
-            route_io.oug_msgs.push(Message::new_index(
-                &self.client_id,
-                inp_seqno,
-                &publish,
-            ));
-        }
-
-        let mut n_subscrs = 0;
-        let publ_qos = cmp::min(server_qos, publish_qos);
-        for (target_id, (subscr, ids)) in match_subscribers(shard, &topic_name) {
-            if subscr.no_local && target_id == self.client_id {
-                trace!(
-                    "{} topic:{:?} client_id:{:?} skipping as no_local",
-                    self.prefix,
-                    topic_name,
-                    target_id
-                );
-                continue;
-            }
-
-            let publish = {
-                let mut publish = publish.clone();
-                let retain = subscr.retain_as_published && publish.is_retain();
-                publish.set_fixed_header(retain, cmp::min(publ_qos, subscr.qos), false);
-                publish.set_subscription_ids(ids);
-                publish
-            };
-
-            route_io.oug_msgs.push(Message::Routed {
-                // new_routed
-                src_shard_id: self.shard_id,
-                dst_shard_id: subscr.shard_id,
-                client_id: subscr.client_id.clone(),
-                inp_seqno,
-                out_seqno: 0, // NOTE: shall by the receiving session.
-                publish,
-            });
-
-            n_subscrs += 1;
-        }
+        let args = DoPublishArgs { client_id, publish, route_io, server_qos };
+        let n_subscrs = do_publish(&self.prefix, shard, args)?;
 
         match (publish_qos, n_subscrs) {
             (QoS::AtMostOnce, _) => (),
             (QoS::AtLeastOnce, 0) => {
-                let puback = self.proto.new_pub_ack(publish.to_packet_id().unwrap());
+                let puback = self.proto.new_pub_ack(packet_id.unwrap());
                 route_io.oug_msgs.push(Message::new_pub_ack(puback));
             }
             (QoS::AtLeastOnce, _) => (),
@@ -699,12 +701,16 @@ impl Session {
         todo!()
     }
 
-    fn rx_disconnect<S>(&mut self, (_shard, _route_io, dis): HandleArgs<S>) -> Result<()>
+    fn rx_disconnect<S>(&mut self, (shard, _route_io, dis): HandleArgs<S>) -> Result<()>
     where
         S: ShardAPI,
     {
         let code = dis.to_disconnect_code();
         let reason_string = dis.to_reason_string();
+
+        if let ReasonCode::Success = code {
+            shard.delete_will_message(&self.client_id)?;
+        }
 
         debug!("{} client disconnected code:{}", self.prefix, code);
         let code = ReasonCode::Success;
@@ -793,18 +799,15 @@ impl Session {
         Ok(())
     }
 
-    fn book_retain(&mut self, pkt: &QPacket) -> Result<()> {
-        let is_retain = pkt.is_retain();
-        if is_retain && !self.proto.retain_available() {
-            err_unsup_retain(&self.prefix)?;
-        } else if is_retain {
+    fn book_retain(&mut self, publish: &QPacket) -> Result<()> {
+        if publish.is_retain() {
             todo!()
         }
 
         Ok(())
     }
 
-    fn publish_topic_name(&mut self, pkt: &QPacket) -> Result<TopicName> {
+    fn book_topic_name(&mut self, pkt: &QPacket) -> Result<TopicName> {
         let server_alias_max = self.proto.topic_alias_max();
 
         let master = match &mut self.state {
@@ -1273,6 +1276,82 @@ where
     }
 
     subscrs
+}
+
+pub struct DoPublishArgs<'a> {
+    pub client_id: ClientID,
+    pub publish: QPacket,
+    pub route_io: &'a mut RouteIO,
+    pub server_qos: QoS,
+}
+
+pub fn do_publish<'a, S>(
+    prefix: &str,
+    shard: &mut S,
+    args: DoPublishArgs<'a>,
+) -> Result<usize>
+where
+    S: ShardAPI,
+{
+    let DoPublishArgs { client_id, publish, route_io, server_qos } = args;
+    let publish_qos = publish.to_qos();
+
+    let inp_seqno = shard.incr_inp_seqno();
+    let topic_name = publish.as_topic_name();
+
+    if publish.is_qos12() {
+        route_io.oug_msgs.push(Message::new_index(&client_id, inp_seqno, &publish));
+    }
+
+    let mut n_subscrs = 0_usize;
+    let publ_qos = cmp::min(server_qos, publish_qos);
+    for (target_id, (subscr, ids)) in match_subscribers(shard, &topic_name) {
+        if subscr.no_local && target_id == client_id {
+            trace!(
+                "{} topic:{:?} client_id:{:?} skipping as no_local",
+                prefix,
+                topic_name,
+                target_id
+            );
+            continue;
+        }
+
+        let publish = {
+            let mut publish = publish.clone();
+            let retain = subscr.retain_as_published && publish.is_retain();
+            publish.set_fixed_header(retain, cmp::min(publ_qos, subscr.qos), false);
+            publish.set_subscription_ids(ids);
+            publish
+        };
+
+        route_io.oug_msgs.push(Message::Routed {
+            // new_routed
+            src_shard_id: shard.to_shard_id(),
+            dst_shard_id: subscr.shard_id,
+            client_id: subscr.client_id.clone(),
+            inp_seqno,
+            out_seqno: 0, // NOTE: shall be set by the receiving session.
+            publish,
+        });
+
+        n_subscrs += 1;
+    }
+
+    Ok(n_subscrs)
+}
+
+fn validate_publish(prefix: &str, proto: &Protocol, publish: &QPacket) -> Result<()> {
+    let server_qos = proto.maximum_qos();
+    let publish_qos = publish.to_qos();
+    if publish_qos > server_qos {
+        err_unsup_qos(&prefix, publish_qos)?
+    }
+
+    if publish.is_retain() && !proto.retain_available() {
+        err_unsup_retain(&prefix)?;
+    }
+
+    Ok(())
 }
 
 fn err_disconnect(code: Option<ReasonCode>) -> Result<()> {

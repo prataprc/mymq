@@ -303,7 +303,7 @@ impl Flusher {
         }
         self.incr_stats(items, bytes);
 
-        pq.as_mut_socket().disconnect(&self.prefix, ReasonCode::Success);
+        pq.as_mut_socket().send_disconnect(&self.prefix, ReasonCode::Success);
 
         info!(
             "{} raddr:{} client_id:{} items:{} bytes:{} flushed and DISCONNECT",

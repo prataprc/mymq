@@ -142,9 +142,16 @@ impl Protocol {
                         error!("{}, invalid connect-packet err:{}", prefix, err);
                         self.send_connack(prefix, err.code(), conn)?;
                         break Err(err);
-                    } else {
-                        break self.new_socket(conn, connect);
                     }
+
+                    if let Some(publ) = connect.to_will_publish() {
+                        if let Err(err) = validate_publish(prefix, &self.config, &publ) {
+                            self.send_connack(prefix, err.code(), conn)?;
+                            break Err(err);
+                        }
+                    }
+
+                    break self.new_socket(conn, connect);
                 }
                 Ok(pkt) => {
                     let code = ReasonCode::ProtocolError;
@@ -366,6 +373,63 @@ impl Socket {
 }
 
 impl Socket {
+    pub fn send_disconnect(&mut self, prefix: &str, rcode: ReasonCode) {
+        let blob = {
+            let disconn = v5::Disconnect { code: rcode, properties: None };
+            disconn.encode().ok()
+        };
+        self.write_packet(prefix, blob);
+    }
+
+    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
+        let val = self.connect.session_expiry_interval();
+        let sei = match (self.config.mqtt_session_expiry_interval, val) {
+            (Some(_one), Some(two)) => Some(two),
+            (Some(one), None) => Some(one),
+            (None, Some(two)) => Some(two),
+            (None, None) => None,
+        };
+
+        let mut props = v5::ConnAckProperties {
+            session_expiry_interval: sei,
+            receive_maximum: Some(self.config.mqtt_receive_maximum),
+            maximum_qos: Some(self.config.mqtt_maximum_qos.try_into().unwrap()),
+            retain_available: Some(self.config.mqtt_retain_available),
+            max_packet_size: Some(self.config.mqtt_max_packet_size),
+            assigned_client_identifier: None,
+            wildcard_subscription_available: Some(true),
+            subscription_identifiers_available: Some(true),
+            shared_subscription_available: None,
+            topic_alias_max: self.config.topic_alias_max(),
+            ..v5::ConnAckProperties::default()
+        };
+
+        if self.connect.payload.client_id.len() == 0 {
+            props.assigned_client_identifier = Some((*self.client_id).clone());
+        }
+
+        if let Some(keep_alive) = self.config.keep_alive() {
+            props.server_keep_alive = Some(keep_alive)
+        }
+
+        let connack = match rcode {
+            ReasonCode::Success => v5::ConnAck::new_success(Some(props)),
+            _ => unreachable!(),
+        };
+
+        QPacket::V5(v5::Packet::ConnAck(connack))
+    }
+
+    pub fn to_will_publish(&self) -> Option<QPacket> {
+        self.connect.to_will_publish().map(|pkt| QPacket::V5(v5::Packet::Publish(pkt)))
+    }
+
+    pub fn will_delay_interval(&self) -> u32 {
+        self.connect.will_delay_interval()
+    }
+}
+
+impl Socket {
     // return a single packet, if fully received.
     // MalformedPacket, implies a DISCONNECT and socket close
     // ProtocolError, implies DISCONNECT and socket close
@@ -460,53 +524,6 @@ impl Socket {
         let _none = mem::replace(&mut self.wt.pw, pw);
         res
     }
-
-    pub fn disconnect(&mut self, prefix: &str, code: ReasonCode) {
-        let blob = {
-            let disconn = v5::Disconnect { code, properties: None };
-            disconn.encode().ok()
-        };
-        self.write_packet(prefix, blob);
-    }
-
-    pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
-        let val = self.connect.session_expiry_interval();
-        let sei = match (self.config.mqtt_session_expiry_interval, val) {
-            (Some(_one), Some(two)) => Some(two),
-            (Some(one), None) => Some(one),
-            (None, Some(two)) => Some(two),
-            (None, None) => None,
-        };
-
-        let mut props = v5::ConnAckProperties {
-            session_expiry_interval: sei,
-            receive_maximum: Some(self.config.mqtt_receive_maximum),
-            maximum_qos: Some(self.config.mqtt_maximum_qos.try_into().unwrap()),
-            retain_available: Some(self.config.mqtt_retain_available),
-            max_packet_size: Some(self.config.mqtt_max_packet_size),
-            assigned_client_identifier: None,
-            wildcard_subscription_available: Some(true),
-            subscription_identifiers_available: Some(true),
-            shared_subscription_available: None,
-            topic_alias_max: self.config.topic_alias_max(),
-            ..v5::ConnAckProperties::default()
-        };
-
-        if self.connect.payload.client_id.len() == 0 {
-            props.assigned_client_identifier = Some((*self.client_id).clone());
-        }
-
-        if let Some(keep_alive) = self.config.keep_alive() {
-            props.server_keep_alive = Some(keep_alive)
-        }
-
-        let connack = match rcode {
-            ReasonCode::Success => v5::ConnAck::new_success(Some(props)),
-            _ => unreachable!(),
-        };
-
-        QPacket::V5(v5::Packet::ConnAck(connack))
-    }
 }
 
 impl Socket {
@@ -547,4 +564,30 @@ impl Socket {
             }
         }
     }
+}
+
+fn validate_publish(prefix: &str, config: &Config, publish: &v5::Publish) -> Result<()> {
+    let server_qos = QoS::try_from(config.mqtt_maximum_qos)?;
+
+    if publish.qos > server_qos {
+        err_unsup_qos(prefix, publish.qos)
+    } else if publish.retain && !config.mqtt_retain_available {
+        err_unsup_retain(prefix)
+    } else {
+        Ok(())
+    }
+}
+
+fn err_unsup_qos(prefix: &str, qos: QoS) -> Result<()> {
+    err!(
+        ProtocolError,
+        code: QoSNotSupported,
+        "{} publish-qos exceeds server-qos {:?}",
+        prefix,
+        qos
+    )
+}
+
+fn err_unsup_retain(prefix: &str) -> Result<()> {
+    err!(ProtocolError, code: RetainNotSupported, "{} retain unavailable", prefix)
 }
