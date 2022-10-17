@@ -21,6 +21,12 @@
   given Client.
 * Create a Cheatsheet for MQTT protocol.
 
+### Retain message
+
+* When going multi-node, retain messages for topics must be distributed between Cluster
+  instances in participating nodes. In other words, `set_retain_topic` and
+  `reset_retain_topic` API must be part of cluster consensus loop.
+
 ### Will message
 
 * Will QoS, Retain
