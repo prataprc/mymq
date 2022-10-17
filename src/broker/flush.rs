@@ -275,10 +275,6 @@ impl Flusher {
         };
 
         let (raddr, client_id) = (pq.peer_addr(), pq.as_client_id().clone());
-        info!(
-            "{} raddr:{} client_id:{} flushing connection err:{:?}",
-            self.prefix, raddr, *client_id, conn_err
-        );
 
         self.incr_n_flush_conns();
 
@@ -303,11 +299,12 @@ impl Flusher {
         }
         self.incr_stats(items, bytes);
 
-        pq.as_mut_socket().send_disconnect(&self.prefix, ReasonCode::Success);
+        let code = conn_err.map(|e| e.code()).unwrap_or(ReasonCode::Success);
+        pq.as_mut_socket().send_disconnect(&self.prefix, code);
 
         info!(
-            "{} raddr:{} client_id:{} items:{} bytes:{} flushed and DISCONNECT",
-            self.prefix, raddr, client_id, items, bytes
+            "{} raddr:{} client_id:{} code:{} items:{} bytes:{} flushed and DISCONNECT",
+            self.prefix, raddr, *client_id, code, items, bytes
         );
 
         Response::Ok

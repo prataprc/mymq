@@ -706,20 +706,16 @@ impl Session {
         S: ShardAPI,
     {
         let code = dis.to_disconnect_code();
-        let reason_string = dis.to_reason_string();
+        let reason_string = dis.to_reason_string().unwrap_or("".to_string());
+        debug!(
+            "{} code:{} reason_string:{} client disconnected",
+            self.prefix, code, reason_string
+        );
 
         if let ReasonCode::Success = code {
             shard.delete_will_message(&self.client_id)?;
         }
-
-        debug!("{} client disconnected code:{}", self.prefix, code);
-        let code = ReasonCode::Success;
-
-        if let Some(txt) = reason_string {
-            debug!("{} disconnect with reason string {}", self.prefix, txt);
-        }
-
-        err_disconnect(ReasonCode::try_from(code).ok())
+        err_disconnect(Some(ReasonCode::Success))
     }
 
     fn rx_auth<S>(&mut self, (_shard, _route_io, _auth): HandleArgs<S>) -> Result<()>
