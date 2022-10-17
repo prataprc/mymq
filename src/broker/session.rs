@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::{cmp, fmt, mem, net, result};
 
+use crate::broker::{ClusterAPI, KeepAlive, Message, OutSeqno, ShardAPI};
 use crate::broker::{Config, RouteIO, SubscribedTrie};
-use crate::broker::{KeepAlive, Message, OutSeqno, ShardAPI};
 use crate::PacketType;
 use crate::{ClientID, PacketID, Protocol, Subscription, Timer, TopicFilter, TopicName};
 use crate::{Error, ErrorKind, ReasonCode, Result};
@@ -598,8 +598,14 @@ impl Session {
         }
         self.book_packet_id(&sub)?;
 
+        let subscrs = if self.proto.retain_available() {
+            sub.to_subscriptions()
+        } else {
+            Vec::default()
+        };
+
         let mut retain_msgs = Vec::default();
-        for subscr in sub.to_subscriptions() {
+        for subscr in subscrs.into_iter() {
             let topic_filter = &subscr.topic_filter;
             let is_new = self.state.as_mut_subscriptions().get(topic_filter).is_none();
 
@@ -649,7 +655,7 @@ impl Session {
             return Ok(());
         }
         self.book_packet_id(&publish)?;
-        self.book_retain(&publish)?;
+        book_retain_publish(shard, &publish);
         self.book_topic_name(&publish)?;
 
         let server_qos = self.proto.maximum_qos();
@@ -657,7 +663,13 @@ impl Session {
         let packet_id = publish.to_packet_id();
         let client_id = self.client_id.clone();
 
-        let args = DoPublishArgs { client_id, publish, route_io, server_qos };
+        let args = DoPublishArgs {
+            client_id,
+            publish,
+            route_io,
+            server_qos,
+            retain_available: self.proto.retain_available(),
+        };
         let n_subscrs = do_publish(&self.prefix, shard, args)?;
 
         match (publish_qos, n_subscrs) {
@@ -790,14 +802,6 @@ impl Session {
                 }
             }
             pt => unreachable!("{:?} packet type", pt),
-        }
-
-        Ok(())
-    }
-
-    fn book_retain(&mut self, publish: &QPacket) -> Result<()> {
-        if publish.is_retain() {
-            todo!()
         }
 
         Ok(())
@@ -1279,6 +1283,7 @@ pub struct DoPublishArgs<'a> {
     pub publish: QPacket,
     pub route_io: &'a mut RouteIO,
     pub server_qos: QoS,
+    pub retain_available: bool,
 }
 
 pub fn do_publish<'a, S>(
@@ -1289,7 +1294,14 @@ pub fn do_publish<'a, S>(
 where
     S: ShardAPI,
 {
-    let DoPublishArgs { client_id, publish, route_io, server_qos } = args;
+    let DoPublishArgs {
+        client_id,
+        publish,
+        route_io,
+        server_qos,
+        retain_available,
+    } = args;
+
     let publish_qos = publish.to_qos();
 
     let inp_seqno = shard.incr_inp_seqno();
@@ -1314,7 +1326,10 @@ where
 
         let publish = {
             let mut publish = publish.clone();
-            let retain = subscr.retain_as_published && publish.is_retain();
+
+            let retain =
+                retain_available && (subscr.retain_as_published && publish.is_retain());
+
             publish.set_fixed_header(retain, cmp::min(publ_qos, subscr.qos), false);
             publish.set_subscription_ids(ids);
             publish
@@ -1334,6 +1349,19 @@ where
     }
 
     Ok(n_subscrs)
+}
+
+pub fn book_retain_publish<S>(shard: &mut S, publish: &QPacket)
+where
+    S: ShardAPI,
+{
+    let publish_retain = publish.is_retain();
+    if publish_retain && publish.has_payload() {
+        shard.as_cluster().set_retain_topic(publish.clone());
+    } else if publish_retain {
+        let topic_name = publish.as_topic_name().clone();
+        shard.as_cluster().reset_retain_topic(topic_name);
+    }
 }
 
 fn validate_publish(prefix: &str, proto: &Protocol, publish: &QPacket) -> Result<()> {

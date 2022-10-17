@@ -435,36 +435,31 @@ impl ClusterAPI for Cluster {
         }
     }
 
-    fn add_connection(&self, sock: Socket) -> Result<()> {
+    fn add_connection(&self, sock: Socket) {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 app_fatal!(self, tx.request(Request::AddConnection(sock)).flatten());
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        Ok(())
+        }
     }
 
-    fn set_retain_topic(&self, publish: QPacket) -> Result<()> {
+    fn set_retain_topic(&self, publish: QPacket) {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 app_fatal!(self, tx.post(Request::SetRetainTopic { publish }));
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
-
-        Ok(())
     }
 
-    fn reset_retain_topic(&self, topic_name: TopicName) -> Result<()> {
+    fn reset_retain_topic(&self, topic_name: TopicName) {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
                 app_fatal!(self, tx.post(Request::ResetRetainTopic { topic_name }));
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
-        Ok(())
     }
 
     fn close_wait(mut self) -> Cluster {
@@ -611,21 +606,6 @@ impl Cluster {
 
         (status, closed)
     }
-
-    fn retain_expires(&mut self) {
-        let RunLoop { cc_retained_topics, retain_timer, .. } = match &mut self.inner {
-            Inner::Main(run_loop) => run_loop,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
-
-        let pkts: Vec<QPacket> = retain_timer.gc().collect();
-        debug!("{} gc:{} pkts in retain_timer", self.prefix, pkts.len());
-
-        // gather all retained packets and cleanup the RetainedTrie.
-        for pkt in retain_timer.expired().collect::<Vec<QPacket>>() {
-            cc_retained_topics.remove(pkt.as_topic_name());
-        }
-    }
 }
 
 // Main loop
@@ -663,7 +643,7 @@ impl Cluster {
 
         // book keeping for message expiry.
         if let Some(secs) = publish.message_expiry_interval() {
-            retain_timer.add_timeout(secs as u64, topic_name.clone(), publish);
+            retain_timer.add_timeout(u64::from(secs), topic_name.clone(), publish);
         }
     }
 
@@ -773,6 +753,29 @@ impl Cluster {
         self.prefix = self.prefix();
 
         Response::Ok
+    }
+
+    fn retain_expires(&mut self) {
+        let RunLoop { cc_retained_topics, retain_timer, .. } = match &mut self.inner {
+            Inner::Main(run_loop) => run_loop,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        };
+
+        let gced: Vec<QPacket> = retain_timer.gc().collect();
+
+        // gather all retained packets and cleanup the RetainedTrie.
+        let mut expired = 0_usize;
+        for pkt in retain_timer.expired().collect::<Vec<QPacket>>() {
+            cc_retained_topics.remove(pkt.as_topic_name());
+            expired += 1;
+        }
+
+        debug!(
+            "{} expired:{} gced:{} messages in retain_timer",
+            self.prefix,
+            expired,
+            gced.len()
+        );
     }
 }
 

@@ -218,7 +218,9 @@ impl Publish {
             }
         }
     }
+}
 
+impl Publish {
     pub fn to_topic_alias(&self) -> Option<u16> {
         match &self.properties {
             Some(props) => props.topic_alias,
@@ -239,6 +241,14 @@ impl Publish {
     #[inline]
     pub fn is_qos12(&self) -> bool {
         !self.is_qos0()
+    }
+
+    pub fn has_payload(&self) -> bool {
+        match &self.payload {
+            Some(payload) if payload.is_empty() => false,
+            Some(_) => true,
+            None => false,
+        }
     }
 
     pub fn message_expiry_interval(&self) -> Option<u32> {

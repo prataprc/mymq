@@ -1213,9 +1213,7 @@ where
             msg => unreachable!("{:?}", msg),
         };
 
-        if publish.is_retain() {
-            todo!()
-        }
+        session::book_retain_publish(self, &publish);
 
         let server_qos = proto.maximum_qos();
         let topic_name = publish.as_topic_name().clone();
@@ -1225,6 +1223,7 @@ where
             publish,
             route_io,
             server_qos,
+            retain_available: proto.retain_available(),
         };
         let prefix = format!("session:will:{}", client_id);
         if let Err(err) = session::do_publish(&prefix, self, args) {
@@ -1805,40 +1804,14 @@ where
     }
 }
 
-impl<C> Shard<C>
-where
-    C: 'static + Send + ClusterAPI,
-{
-    pub fn as_cluster(&self) -> &C {
-        match &self.inner {
-            Inner::MainMaster(MasterLoop { cluster, .. }) => cluster,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-}
-
 impl<C> ShardAPI for Shard<C>
 where
     C: 'static + Send + ClusterAPI,
 {
+    type Clstr = C;
+
     fn to_shard_id(&self) -> u32 {
         self.shard_id
-    }
-
-    fn as_topic_filters(&self) -> &SubscribedTrie {
-        match &self.inner {
-            Inner::MainMaster(MasterLoop { cc_topic_filters, .. }) => cc_topic_filters,
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
-    }
-
-    fn as_retained_topics(&self) -> &RetainedTrie {
-        match &self.inner {
-            Inner::MainMaster(MasterLoop { cc_retained_topics, .. }) => {
-                cc_retained_topics
-            }
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        }
     }
 
     fn incr_inp_seqno(&mut self) -> u64 {
@@ -1865,6 +1838,29 @@ where
             Inner::MainMaster(MasterLoop { will_messages, .. }) => {
                 will_messages.delete(client_id)
             }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn as_topic_filters(&self) -> &SubscribedTrie {
+        match &self.inner {
+            Inner::MainMaster(MasterLoop { cc_topic_filters, .. }) => cc_topic_filters,
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn as_retained_topics(&self) -> &RetainedTrie {
+        match &self.inner {
+            Inner::MainMaster(MasterLoop { cc_retained_topics, .. }) => {
+                cc_retained_topics
+            }
+            inner => unreachable!("{} {:?}", self.prefix, inner),
+        }
+    }
+
+    fn as_cluster(&self) -> &Self::Clstr {
+        match &self.inner {
+            Inner::MainMaster(MasterLoop { cluster, .. }) => cluster,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         }
     }

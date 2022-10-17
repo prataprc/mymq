@@ -527,6 +527,13 @@ impl QPacket {
     }
 
     #[inline]
+    pub fn has_payload(&self) -> bool {
+        match self {
+            QPacket::V5(pkt) => pkt.has_payload(),
+        }
+    }
+
+    #[inline]
     pub fn message_expiry_interval(&self) -> Option<u32> {
         match self {
             QPacket::V5(pkt) => pkt.message_expiry_interval(),

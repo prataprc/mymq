@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::info;
 
 use std::net;
 
@@ -52,13 +52,7 @@ where
         let conn = self.conn.take().unwrap();
 
         if let Ok(socket) = self.proto.handshake(&self.prefix, conn) {
-            let raddr = socket.peer_addr();
-            if let Err(err) = self.cluster.add_connection(socket) {
-                error!(
-                    "{} raddr:{} add connection failed err:{}",
-                    self.prefix, raddr, err
-                )
-            }
+            self.cluster.add_connection(socket);
         }
 
         self

@@ -212,6 +212,53 @@ impl Packetize for Packet {
 }
 
 impl Packet {
+    pub fn set_packet_id(&mut self, packet_id: u16) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_packet_id(packet_id);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_retain(&mut self, retain: bool) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.retain = retain;
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_fixed_header(&mut self, retain: bool, qos: QoS, dup: bool) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_fixed_header(retain, qos, dup);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
+        match self {
+            Packet::Publish(publish) => {
+                publish.set_subscription_ids(ids);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    pub fn set_session_present(&mut self, session_present: bool) {
+        match self {
+            Packet::ConnAck(connack) => {
+                connack.set_session_present(session_present);
+            }
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+}
+
+impl Packet {
     pub fn to_packet_type(&self) -> PacketType {
         match self {
             Packet::Connect(_) => PacketType::Connect,
@@ -314,6 +361,30 @@ impl Packet {
         }
     }
 
+    #[inline]
+    pub fn is_retain(&self) -> bool {
+        match self {
+            Packet::Publish(publish) => publish.retain,
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    #[inline]
+    pub fn has_payload(&self) -> bool {
+        match self {
+            Packet::Publish(publish) => publish.has_payload(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
+    #[inline]
+    pub fn message_expiry_interval(&self) -> Option<u32> {
+        match self {
+            Packet::Publish(publish) => publish.message_expiry_interval(),
+            pkt => unreachable!("{}", pkt),
+        }
+    }
+
     #[cfg(any(feature = "fuzzy", test))]
     pub fn normalize(&mut self) {
         match self {
@@ -332,71 +403,6 @@ impl Packet {
             Packet::PingResp => (),
             Packet::Disconnect(val) => val.normalize(),
             Packet::Auth(val) => val.normalize(),
-        }
-    }
-}
-
-impl Packet {
-    pub fn set_packet_id(&mut self, packet_id: u16) {
-        match self {
-            Packet::Publish(publish) => {
-                publish.set_packet_id(packet_id);
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    pub fn set_retain(&mut self, retain: bool) {
-        match self {
-            Packet::Publish(publish) => {
-                publish.retain = retain;
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    pub fn set_fixed_header(&mut self, retain: bool, qos: QoS, dup: bool) {
-        match self {
-            Packet::Publish(publish) => {
-                publish.set_fixed_header(retain, qos, dup);
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    pub fn set_subscription_ids(&mut self, ids: Vec<u32>) {
-        match self {
-            Packet::Publish(publish) => {
-                publish.set_subscription_ids(ids);
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    pub fn set_session_present(&mut self, session_present: bool) {
-        match self {
-            Packet::ConnAck(connack) => {
-                connack.set_session_present(session_present);
-            }
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-}
-
-impl Packet {
-    #[inline]
-    pub fn is_retain(&self) -> bool {
-        match self {
-            Packet::Publish(publish) => publish.retain,
-            pkt => unreachable!("{}", pkt),
-        }
-    }
-
-    #[inline]
-    pub fn message_expiry_interval(&self) -> Option<u32> {
-        match self {
-            Packet::Publish(publish) => publish.message_expiry_interval(),
-            pkt => unreachable!("{}", pkt),
         }
     }
 }

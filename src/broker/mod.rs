@@ -63,13 +63,13 @@ pub trait ClusterAPI {
     fn wake(&self) -> Result<()>;
 
     /// Add a incoming connection to cluster
-    fn add_connection(&self, sock: Socket) -> Result<()>;
+    fn add_connection(&self, sock: Socket);
 
     /// Set a publish message for topic-name
-    fn set_retain_topic(&self, publish: QPacket) -> Result<()>;
+    fn set_retain_topic(&self, publish: QPacket);
 
     /// Remove publish message for given topic-name.
-    fn reset_retain_topic(&self, topic_name: TopicName) -> Result<()>;
+    fn reset_retain_topic(&self, topic_name: TopicName);
 
     /// Close this cluster
     fn close_wait(self) -> Self;
@@ -82,11 +82,9 @@ pub trait ClusterAPI {
 ///
 /// Used by other components of broker.
 pub trait ShardAPI {
+    type Clstr: ClusterAPI;
+
     fn to_shard_id(&self) -> u32;
-
-    fn as_topic_filters(&self) -> &SubscribedTrie;
-
-    fn as_retained_topics(&self) -> &RetainedTrie;
 
     fn incr_inp_seqno(&mut self) -> InpSeqno;
 
@@ -98,6 +96,12 @@ pub trait ShardAPI {
 
     /// Delete will message for `client_id`.
     fn delete_will_message(&mut self, client_id: &ClientID) -> Result<()>;
+
+    fn as_topic_filters(&self) -> &SubscribedTrie;
+
+    fn as_retained_topics(&self) -> &RetainedTrie;
+
+    fn as_cluster(&self) -> &Self::Clstr;
 }
 
 pub mod design;

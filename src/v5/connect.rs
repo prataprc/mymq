@@ -477,9 +477,9 @@ impl Connect {
 
         self.flags.validate()?;
 
-        let flags = *self.flags;
-        QoS::try_from((flags & ConnectFlags::WILL_QOS_MASK) >> 3)?;
-        if (flags & *ConnectFlags::WILL_FLAG) > 0 {
+        QoS::try_from((*self.flags & ConnectFlags::WILL_QOS_MASK) >> 3)?;
+        let (_clean_start, will_flag, _will_qos, will_retain) = self.flags.unwrap();
+        if will_flag {
             // NOTE: Spec says that properites and payload MUST be specified
             if self.payload.will_topic.is_none() {
                 err!(
@@ -503,6 +503,13 @@ impl Connect {
                     PP
                 )?;
             }
+        } else if will_retain {
+            err!(
+                MalformedPacket,
+                code: MalformedPacket,
+                "{} will_flag:false will_retain:true",
+                PP
+            )?;
         }
 
         let pld = &self.payload;

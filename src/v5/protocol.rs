@@ -145,7 +145,7 @@ impl Protocol {
                     }
 
                     if let Some(publ) = connect.to_will_publish() {
-                        if let Err(err) = validate_publish(prefix, &self.config, &publ) {
+                        if let Err(err) = validate_wpublish(prefix, &self.config, &publ) {
                             self.send_connack(prefix, err.code(), conn)?;
                             break Err(err);
                         }
@@ -566,7 +566,7 @@ impl Socket {
     }
 }
 
-fn validate_publish(prefix: &str, config: &Config, publish: &v5::Publish) -> Result<()> {
+fn validate_wpublish(prefix: &str, config: &Config, publish: &v5::Publish) -> Result<()> {
     let server_qos = QoS::try_from(config.mqtt_maximum_qos)?;
 
     if publish.qos > server_qos {
