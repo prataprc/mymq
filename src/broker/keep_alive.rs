@@ -8,14 +8,17 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 /// A passive timer used by application to detect keep-alive timeouts by calling
 /// [KeepAlive::check_expired]. Typically used to keep track of network in-activity.
 pub struct KeepAlive {
-    pub prefix: String,
-    pub keep_alive: Option<u16>,
-    pub interval: Option<u16>,
-    pub alive_at: time::Instant,
+    prefix: String,
+    keep_alive: Option<u16>,
+    interval: Option<u16>,
+    alive_at: time::Instant,
 }
 
 impl KeepAlive {
-    /// Create a new keep-alive timer.
+    /// Create a new keep-alive timer. `keep_alive` is client requested keep_alive.
+    /// Protocol configured keep alive specified in `proto` take priority. If both
+    /// `keep_alive` and `proto` is configured with keep_alive as ZERO seconds, then
+    /// the session never expires.
     pub fn new(proto: &Protocol, raddr: net::SocketAddr, keep_alive: u16) -> KeepAlive {
         let factor = proto.keep_alive_factor();
         let (keep_alive, interval) = match proto.keep_alive() {
@@ -35,13 +38,19 @@ impl KeepAlive {
         }
     }
 
+    /// Return the negotiated keep alive for the session.
+    pub fn to_keep_alive(&self) -> Option<u16> {
+        self.keep_alive
+    }
+
     /// Check whether this keep-alive timer has elapsed. Application should call this
     /// method to learn the timeout status. Returns elapsed time since timeout expiry.
     pub fn check_expired(&self) -> Result<time::Duration> {
         match self.interval {
-            Some(intrvl) => {
+            Some(interval) => {
                 let now = time::Instant::now();
-                match self.alive_at + time::Duration::from_secs(intrvl as u64) {
+                let interval = time::Duration::from_secs(u64::from(interval));
+                match self.alive_at + interval {
                     deadline if now > deadline => err!(
                         ProtocolError,
                         code: KeepAliveTimeout,

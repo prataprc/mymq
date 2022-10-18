@@ -413,7 +413,7 @@ impl Socket {
         }
 
         let connack = match rcode {
-            ReasonCode::Success => v5::ConnAck::new_success(Some(props)),
+            ReasonCode::Success => v5::ConnAck::new_success(props),
             _ => unreachable!(),
         };
 

@@ -322,11 +322,11 @@ impl Packetize for ConnAck {
 }
 
 impl ConnAck {
-    pub fn new_success(ps: Option<ConnAckProperties>) -> ConnAck {
+    pub fn new_success(props: ConnAckProperties) -> ConnAck {
         ConnAck {
             flags: ConnAckFlags::default(),
             code: ConnAckReasonCode::Success,
-            properties: ps,
+            properties: Some(props),
         }
     }
 
