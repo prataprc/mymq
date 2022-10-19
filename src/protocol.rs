@@ -113,6 +113,15 @@ impl Protocol {
             Protocol::None => unreachable!(),
         }
     }
+
+    /// Broker side configuration.
+    #[inline]
+    pub fn session_expiry_interval(&self) -> Option<u32> {
+        match self {
+            Protocol::V5(proto) => proto.session_expiry_interval(),
+            Protocol::None => unreachable!(),
+        }
+    }
 }
 
 impl Protocol {

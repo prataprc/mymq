@@ -59,9 +59,9 @@ pub struct Config {
     /// * **Mutable**: No
     pub mqtt_keep_alive_factor: F32,
 
-    /// MQTT `session_expiry_interval` on the broker side. If `session_expiry_interval`
-    /// is ZERO or None, then `session_expiry_interval` from CONNECT packet is used.
-    /// CONNECT has no `session_expiry_interval` interval or it is ZERO, then session
+    /// MQTT `session_expiry_interval` on the broker side. If CONNECT
+    /// `session_expiry_interval` is ZERO or None, then this configuration is used.
+    /// If negotiated `session_expiry_interval` is ZERO or None, then session
     /// ends immediately at connection close.
     ///
     /// * **Default**: None,

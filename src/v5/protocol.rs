@@ -74,6 +74,11 @@ impl Protocol {
     pub fn topic_alias_max(&self) -> Option<u16> {
         self.config.topic_alias_max()
     }
+
+    #[inline]
+    pub fn session_expiry_interval(&self) -> Option<u32> {
+        self.config.mqtt_session_expiry_interval
+    }
 }
 
 impl Protocol {
@@ -384,9 +389,9 @@ impl Socket {
     pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
         let val = self.connect.session_expiry_interval();
         let sei = match (self.config.mqtt_session_expiry_interval, val) {
-            (Some(_one), Some(two)) => Some(two),
-            (Some(one), None) => Some(one),
-            (None, Some(two)) => Some(two),
+            (Some(_here), Some(there)) => Some(there),
+            (Some(here), None) => Some(here),
+            (None, Some(there)) => Some(there),
             (None, None) => None,
         };
 

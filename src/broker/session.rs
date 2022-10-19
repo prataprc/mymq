@@ -302,6 +302,15 @@ impl Session {
         let state = mem::replace(&mut self.state, SessionState::None);
         let state = match state {
             SessionState::None => SessionState::Master(master),
+            SessionState::Replica(replica) => {
+                master.common.cs_oug_back_log = replica.common.oug_retry_qos12.values();
+                master.cs_oug_back_log.extend(replica.common.cs_oug_back_log.into_iter());
+
+                master.common.cs_subscriptions = replica.common.cs_subscriptions;
+                master.common.cs_oug_seqno = replica.common.cs_oug_seqno;
+                master.common.oug_retry_qos12 = replica.common.oug_retry_qos12;
+                SessionState::Master(master)
+            }
             SessionState::Reconnect(reconnect) => {
                 master.common.cs_oug_back_log = reconnect.common.oug_retry_qos12.values();
                 master
@@ -322,15 +331,6 @@ impl Session {
                     _ => reconnect.next_packet_ids,
                 };
 
-                SessionState::Master(master)
-            }
-            SessionState::Replica(replica) => {
-                master.common.cs_oug_back_log = replica.common.oug_retry_qos12.values();
-                master.cs_oug_back_log.extend(replica.common.cs_oug_back_log.into_iter());
-
-                master.common.cs_subscriptions = replica.common.cs_subscriptions;
-                master.common.cs_oug_seqno = replica.common.cs_oug_seqno;
-                master.common.oug_retry_qos12 = replica.common.oug_retry_qos12;
                 SessionState::Master(master)
             }
             ss => unreachable!("{:?}", ss),
@@ -483,7 +483,10 @@ impl Session {
     }
 
     pub fn to_session_expiry_interval(&self) -> Option<u32> {
-        self.client_session_expiry_interval
+        match self.client_session_expiry_interval {
+            Some(_) => self.client_session_expiry_interval,
+            None => self.proto.session_expiry_interval(),
+        }
     }
 
     pub fn as_protocol(&self) -> &Protocol {
