@@ -326,10 +326,7 @@ impl Session {
                 master.oug_acks = reconnect.oug_acks;
                 master.oug_back_log = reconnect.oug_back_log;
                 master.pending_qos12 = reconnect.pending_qos12;
-                master.next_packet_ids = match reconnect.next_packet_ids.len() {
-                    0 => master.next_packet_ids,
-                    _ => reconnect.next_packet_ids,
-                };
+                master.next_packet_ids = reconnect.next_packet_ids;
 
                 SessionState::Master(master)
             }
@@ -692,6 +689,8 @@ impl Session {
     where
         S: ShardAPI,
     {
+        // * remove from oug_retry_qos12 timer.
+        // * put the packet-id back into next_packet_ids.
         todo!()
     }
 
