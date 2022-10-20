@@ -506,7 +506,11 @@ where
     SetMiot(Miot<Shard<C>>, MsgRx),
     SetShardQueues(BTreeMap<u32, Shard<C>>),
     AddSession(Socket),
-    FlushSession { pq: PQueue, err: Option<Error> },
+    FlushSession {
+        pq: PQueue,
+        take_over: bool,
+        err: Option<Error>,
+    },
     Close,
 }
 
@@ -550,7 +554,7 @@ where
     pub fn flush_session(&self, pq: PQueue, err: Option<Error>) {
         match &self.inner {
             Inner::Tx(_waker, tx) => {
-                let req = Request::FlushSession { pq, err };
+                let req = Request::FlushSession { pq, take_over: false, err };
                 app_fatal!(self, tx.post(req));
             }
             inner => unreachable!("{} {:?}", self.prefix, inner),
@@ -1123,37 +1127,42 @@ where
         };
     }
 
-    fn mvto_session_reconnect(&mut self, client_id: &ClientID) {
-        match &mut self.inner {
-            Inner::MainMaster(MasterLoop {
-                sessions, reconnects, will_messages, ..
-            }) => {
-                if let Some(mut sess) = sessions.remove(client_id) {
-                    let sexp = u64::from(sess.to_session_expiry_interval().unwrap_or(0));
-                    if let Some(wmsg) = sess.take_will_message() {
-                        let wexp = cmp::min(u64::from(wmsg.will_delay_interval()), sexp);
-                        will_messages.add_timeout(wexp, client_id.clone(), wmsg);
-                    }
+    fn mvto_session_reconnect(&mut self, client_id: &ClientID, take_over: bool) {
+        if let Inner::MainMaster(master) = &mut self.inner {
+            let mut sess = match master.sessions.remove(client_id) {
+                Some(sess) => sess,
+                None => {
+                    warn!("{} client_id:{} session missing", self.prefix, client_id);
+                    return;
+                }
+            };
 
-                    let sess = sess.into_reconnect();
-                    reconnects.add_timeout(sexp, client_id.clone(), sess);
+            let sexp = u64::from(sess.to_session_expiry_interval().unwrap_or(0));
+
+            if let Some(wmsg) = sess.take_will_message() {
+                let wexp = if take_over {
+                    0
                 } else {
-                    warn!("{} client_id:{} session not found", self.prefix, client_id);
-                }
+                    cmp::min(u64::from(wmsg.will_delay_interval()), sexp)
+                };
+                master.will_messages.add_timeout(wexp, client_id.clone(), wmsg);
             }
-            Inner::MainReplica(ReplicaLoop { sessions, reconnects, .. }) => {
-                if let Some(session) = sessions.remove(client_id) {
-                    reconnects.add_timeout(
-                        u64::from(u32::MAX), // NOTE: reconnect never expires in replica.
-                        client_id.clone(),
-                        session.into_reconnect(),
-                    );
-                } else {
-                    warn!("{} client_id:{} session not found", self.prefix, client_id);
-                }
+
+            let sess = sess.into_reconnect();
+            master.reconnects.add_timeout(sexp, client_id.clone(), sess);
+        } else if let Inner::MainReplica(replica) = &mut self.inner {
+            if let Some(session) = replica.sessions.remove(client_id) {
+                replica.reconnects.add_timeout(
+                    u64::from(u32::MAX), // NOTE: reconnect never expires in replica.
+                    client_id.clone(),
+                    session.into_reconnect(),
+                );
+            } else {
+                warn!("{} client_id:{} session not found", self.prefix, client_id);
             }
-            inner => unreachable!("{} {:?}", self.prefix, inner),
-        };
+        } else {
+            unreachable!("{} {:?}", self.prefix, self.inner)
+        }
     }
 
     fn expire_reconnects(&mut self) {
@@ -1247,7 +1256,7 @@ where
 
             match miot.remove_connection(&session.client_id) {
                 Ok(Some(pq)) => {
-                    let req = Request::FlushSession { pq, err };
+                    let req = Request::FlushSession { pq, take_over: false, err };
                     self.handle_flush_session(req, cons_io);
                 }
                 Ok(None) => {
@@ -1495,14 +1504,14 @@ where
         r: Request<C>,
         cons_io: &mut ConsensIO,
     ) -> Response {
-        let (pq, err) = match r {
-            Request::FlushSession { pq, err } => (pq, err),
+        let (pq, take_over, err) = match r {
+            Request::FlushSession { pq, take_over, err } => (pq, take_over, err),
             _ => unreachable!(),
         };
 
         let client_id = pq.as_client_id().clone();
 
-        self.mvto_session_reconnect(&client_id);
+        self.mvto_session_reconnect(&client_id, take_over);
 
         let MasterLoop { flusher, .. } = match &mut self.inner {
             Inner::MainMaster(master_loop) => master_loop,
@@ -1757,7 +1766,7 @@ where
             (None, Ok(None)) => (Session::default().into_master(args), true, false),
             (Some(old_session), Ok(Some(pq))) => {
                 let err: Result<()> = err_session_takeover(&self.prefix, args.raddr);
-                let req = Request::FlushSession { pq, err: err.err() };
+                let req = Request::FlushSession { pq, take_over: true, err: err.err() };
                 self.handle_flush_session(req, cons_io);
 
                 (old_session.into_master(args), false, true)
