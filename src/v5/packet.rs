@@ -358,10 +358,20 @@ impl fmt::Debug for MQTTWrite {
 }
 
 impl MQTTWrite {
-    pub fn new(buf: &[u8], max_size: u32) -> MQTTWrite {
-        let mut data = Vec::with_capacity(max_size as usize);
-        data.extend_from_slice(buf);
-        MQTTWrite::Init { data, max_size: max_size as usize }
+    pub fn new(buf: &[u8], max_size: u32) -> Result<MQTTWrite> {
+        let n = u32::try_from(buf.len())?;
+        if n < max_size {
+            let mut data = Vec::with_capacity(max_size as usize);
+            data.extend_from_slice(buf);
+            let val = MQTTWrite::Init { data, max_size: max_size as usize };
+            Ok(val)
+        } else {
+            err!(
+                ProtocolError,
+                desc: "n:{} max:{} MQTTWrite exceeds suggested max_size",
+                n, max_size
+            )
+        }
     }
 
     pub fn to_max_packet_size(&self) -> u32 {
@@ -430,13 +440,22 @@ impl MQTTWrite {
         }
     }
 
-    pub fn reset(self, buf: &[u8]) -> Self {
+    pub fn reset(self, buf: &[u8]) -> Result<Self> {
+        use MQTTWrite::{Fin, Init};
+
+        let n = buf.len();
         match self {
-            MQTTWrite::Init { mut data, max_size }
-            | MQTTWrite::Fin { mut data, max_size } => {
+            Init { max_size, .. } | Fin { max_size, .. } if n < max_size => {
+                err!(
+                    ProtocolError,
+                    desc: "n:{} max:{} MQTTWrite reset exceeds suggested max_size",
+                    n, max_size
+                )
+            }
+            Init { mut data, max_size } | Fin { mut data, max_size } => {
                 data.truncate(0);
                 data.extend_from_slice(buf);
-                MQTTWrite::Init { data, max_size }
+                Ok(MQTTWrite::Init { data, max_size })
             }
             _ => unreachable!(),
         }

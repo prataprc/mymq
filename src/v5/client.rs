@@ -657,7 +657,7 @@ impl ClientIO {
         let max_packet_size = connect.max_packet_size(client.max_packet_size);
 
         let mut pktr = v5::MQTTRead::new(max_packet_size);
-        let mut pktw = v5::MQTTWrite::new(&[], max_packet_size);
+        let mut pktw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
 
         write_packet(
             client,
@@ -1040,7 +1040,13 @@ where
     if let Some(pkt) = pkt {
         match pkt.encode() {
             Ok(blob) => {
-                pw = pw.reset(blob.as_ref());
+                if u32::try_from(blob.as_ref().len()).unwrap() > max_packet_size {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "exceeds max_size",
+                    ));
+                }
+                pw = pw.reset(blob.as_ref()).unwrap();
             }
             Err(err) => {
                 pw = mem::replace(pktw, pw);
@@ -1057,17 +1063,17 @@ where
             }
             Ok((val, _)) => val,
             Err(err) if err.kind() == ErrorKind::MalformedPacket => {
-                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                pw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
                 let s = format!("malformed packet in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::ProtocolError => {
-                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                pw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
                 let s = format!("protocol error in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::InvalidData, s));
             }
             Err(err) if err.kind() == ErrorKind::Disconnected => {
-                pw = v5::MQTTWrite::new(&[], max_packet_size);
+                pw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
                 let s = format!("client disconnected in v5::MQTTWrite");
                 break Err(io::Error::new(io::ErrorKind::ConnectionReset, s));
             }

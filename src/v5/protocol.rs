@@ -193,7 +193,7 @@ impl Protocol {
         let mut packetw = {
             let code = ConnAckReasonCode::try_from(rc).unwrap();
             let cack = v5::ConnAck::from_reason_code(code);
-            v5::MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size)
+            v5::MQTTWrite::new(cack.encode().unwrap().as_ref(), max_size)?
         };
 
         loop {
@@ -222,6 +222,15 @@ impl Protocol {
     }
 
     fn new_socket(&self, conn: mio::net::TcpStream, cpkt: v5::Connect) -> Result<Socket> {
+        let rd = Source {
+            pr: v5::MQTTRead::new(self.config.mqtt_max_packet_size),
+            deadline: None,
+        };
+        let wt = Sink {
+            pw: v5::MQTTWrite::new(&[], self.config.mqtt_max_packet_size)?,
+            deadline: None,
+        };
+
         let socket = Socket {
             client_id: ClientID::from(&cpkt),
             shard_id: 0,
@@ -229,8 +238,8 @@ impl Protocol {
             conn,
             connect: cpkt,
             token: mio::Token(0),
-            rd: Source::default(),
-            wt: Sink::default(),
+            rd,
+            wt,
         };
 
         Ok(socket)
@@ -282,14 +291,12 @@ pub struct Socket {
 #[derive(Default)]
 struct Source {
     pr: v5::MQTTRead,
-    timeout: time::Duration,
     deadline: Option<time::SystemTime>,
 }
 
 #[derive(Default)]
 struct Sink {
     pw: v5::MQTTWrite,
-    timeout: time::Duration,
     deadline: Option<time::SystemTime>,
 }
 
@@ -450,19 +457,20 @@ impl Socket {
             Err(err) => return Err(err),
         };
 
+        let rd_timeout = self.config.mqtt_sock_read_timeout;
         let status = match &pr {
             Init { .. } | Header { .. } | Remain { .. } if !self.read_elapsed() => {
                 trace!("{} read retrying", prefix);
-                self.set_read_timeout(true, self.config.mqtt_sock_read_timeout);
+                self.set_read_timeout(true, rd_timeout);
                 QueueStatus::Block(Vec::new())
             }
             Init { .. } | Header { .. } | Remain { .. } => {
-                error!("{} rd_timeout:{:?} disconnecting", prefix, self.rd.timeout);
-                self.set_read_timeout(false, self.config.mqtt_sock_read_timeout);
+                error!("{} rd_timeout:{:?} disconnecting", prefix, rd_timeout);
+                self.set_read_timeout(false, rd_timeout);
                 QueueStatus::Disconnected(Vec::new())
             }
             Fin { .. } => {
-                self.set_read_timeout(false, self.config.mqtt_sock_read_timeout);
+                self.set_read_timeout(false, rd_timeout);
                 let pkt = pr.parse()?;
                 pr = pr.reset();
                 QueueStatus::Ok(vec![pkt.into()])
@@ -481,39 +489,45 @@ impl Socket {
         use crate::v5::MQTTWrite::{Fin, Init, Remain};
         use std::io::Write;
 
+        let max_size = self.wt.pw.to_max_packet_size();
         let mut pw = match (blob, &self.wt.pw) {
             (Some(blob), Fin { .. }) => {
+                let n = u32::try_from(blob.as_ref().len()).unwrap();
+                if n > max_size {
+                    error!("{} n:{} max:{} write_packet exceeds ", prefix, n, max_size);
+                    return QueueStatus::Disconnected(Vec::new());
+                }
+
                 if let Err(err) = self.conn.flush() {
                     error!("{} fail conn.flush() err:{}", prefix, err);
                     return QueueStatus::Disconnected(Vec::new());
                 }
 
                 let pw = mem::replace(&mut self.wt.pw, v5::MQTTWrite::default());
-                pw.reset(blob.as_ref())
+                pw.reset(blob.as_ref()).unwrap()
             }
             (Some(_blob), _) => unreachable!(),
             _ => mem::replace(&mut self.wt.pw, v5::MQTTWrite::default()),
         };
 
-        let write_timeout = self.config.mqtt_sock_write_timeout;
-        let timeout = self.wt.timeout;
+        let wt_timeout = self.config.mqtt_sock_write_timeout;
 
         let (res, pw) = loop {
             pw = match pw.write(&mut self.conn) {
                 Ok((pw, _would_block)) => match &pw {
                     Init { .. } | Remain { .. } if !self.write_elapsed() => {
                         trace!("{} write retrying", prefix);
-                        self.set_write_timeout(true, write_timeout);
+                        self.set_write_timeout(true, wt_timeout);
                         pw
                         // TODO: thread yield ?
                     }
                     Init { .. } | Remain { .. } => {
-                        self.set_write_timeout(false, write_timeout);
-                        error!("{} wt_timeout:{:?} disconnecting..", prefix, timeout);
+                        self.set_write_timeout(false, wt_timeout);
+                        error!("{} wt_timeout:{:?} disconnecting..", prefix, wt_timeout);
                         break (QueueStatus::Disconnected(Vec::new()), pw);
                     }
                     Fin { .. } => {
-                        self.set_write_timeout(false, write_timeout);
+                        self.set_write_timeout(false, wt_timeout);
                         break (QueueStatus::Ok(Vec::new()), pw);
                     }
                     v5::MQTTWrite::None => unreachable!(),
