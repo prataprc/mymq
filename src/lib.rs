@@ -49,9 +49,7 @@
 //       implementation
 
 #![feature(backtrace_frames)]
-#![feature(backtrace)]
 #![feature(error_iter)]
-#![feature(map_first_last)]
 #![feature(result_flattening)]
 
 /// Used by threads to sleep wait for an event to accur..
