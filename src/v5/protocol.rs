@@ -222,12 +222,14 @@ impl Protocol {
     }
 
     fn new_socket(&self, conn: TcpStream, connect: v5::Connect) -> Result<Socket> {
+        let max_packet_size = connect.max_packet_size(self.config.mqtt_max_packet_size);
+
         let rd = Source {
             pr: v5::MQTTRead::new(self.config.mqtt_max_packet_size),
             deadline: None,
         };
         let wt = Sink {
-            pw: v5::MQTTWrite::new(&[], self.config.mqtt_max_packet_size)?,
+            pw: v5::MQTTWrite::new(&[], max_packet_size)?,
             deadline: None,
         };
 
@@ -420,10 +422,10 @@ impl Socket {
                 ClientID::Assigned(val) => Some(val.clone()),
                 ClientID::Identifd(_) => None,
             },
+            topic_alias_max: self.config.topic_alias_max(),
             wildcard_subscription_available: Some(true),
             subscription_identifiers_available: Some(true),
             shared_subscription_available: None,
-            topic_alias_max: self.config.topic_alias_max(),
             ..v5::ConnAckProperties::default()
         };
 

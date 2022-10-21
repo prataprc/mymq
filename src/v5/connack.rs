@@ -342,11 +342,23 @@ impl ConnAck {
             ConnAckFlags(*self.flags & !(*ConnAckFlags::SESSION_PRESENT))
         }
     }
+}
 
+impl ConnAck {
     pub fn receive_maximum(&self) -> u16 {
         match &self.properties {
             Some(props) => props.receive_maximum(),
             None => ConnAckProperties::RECEIVE_MAXIMUM,
+        }
+    }
+
+    pub fn max_packet_size(&self, def: u32) -> u32 {
+        match &self.properties {
+            Some(props) => match props.max_packet_size {
+                Some(val) => val,
+                None => def,
+            },
+            None => def,
         }
     }
 

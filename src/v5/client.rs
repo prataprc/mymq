@@ -576,7 +576,7 @@ impl Client {
         use ClientIO::*;
 
         match &mut self.cio {
-            Blocking { .. } | BlockRd { .. } | BlockWt { .. } => {
+            Block { .. } | BlockRd { .. } | BlockWt { .. } => {
                 panic!("cannot use mio on standard socket")
             }
             NoBlock { sock, .. } | NoBlockRd { sock, .. } | NoBlockWt { sock, .. } => {
@@ -604,7 +604,7 @@ impl Client {
 
 #[allow(dead_code)]
 enum ClientIO {
-    Blocking {
+    Block {
         sock: net::TcpStream,
         pktr: v5::MQTTRead,
         pktw: v5::MQTTWrite,
@@ -636,7 +636,7 @@ enum ClientIO {
 impl fmt::Debug for ClientIO {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
         match self {
-            ClientIO::Blocking { .. } => write!(f, "ClientIO::Blocking"),
+            ClientIO::Block { .. } => write!(f, "ClientIO::Block"),
             ClientIO::NoBlock { .. } => write!(f, "ClientIO::NoBlock"),
             ClientIO::BlockRd { .. } => write!(f, "ClientIO::BlockRd"),
             ClientIO::BlockWt { .. } => write!(f, "ClientIO::BlockWt"),
@@ -654,10 +654,12 @@ impl ClientIO {
         mut sock: net::TcpStream,
         blocking: bool,
     ) -> io::Result<(ClientIO, v5::ConnAck)> {
-        let max_packet_size = connect.max_packet_size(client.max_packet_size);
-
-        let mut pktr = v5::MQTTRead::new(max_packet_size);
-        let mut pktw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
+        let (mut pktr, mut pktw) = {
+            let max_packet_size = connect.max_packet_size(client.max_packet_size);
+            let pktr = v5::MQTTRead::new(max_packet_size);
+            let pktw = v5::MQTTWrite::new(&[], max_packet_size).unwrap();
+            (pktr, pktw)
+        };
 
         write_packet(
             client,
@@ -680,8 +682,12 @@ impl ClientIO {
 
         pktr = val;
 
+        let pktw = {
+            let max_packet_size = connack.max_packet_size(client.max_packet_size);
+            v5::MQTTWrite::new(&[], max_packet_size).unwrap()
+        };
         let cio = match blocking {
-            true => ClientIO::Blocking { sock, pktr, pktw },
+            true => ClientIO::Block { sock, pktr, pktw },
             false => {
                 let sock = mio::net::TcpStream::from_std(sock);
                 ClientIO::NoBlock { sock, pktr, pktw }
@@ -693,7 +699,7 @@ impl ClientIO {
 
     fn split_sock(self) -> io::Result<(ClientIO, ClientIO)> {
         match self {
-            ClientIO::Blocking { sock: rd_sock, pktr, pktw } => {
+            ClientIO::Block { sock: rd_sock, pktr, pktw } => {
                 let wt_sock = rd_sock.try_clone()?;
                 rd_sock.shutdown(net::Shutdown::Write)?;
                 wt_sock.shutdown(net::Shutdown::Read)?;
@@ -727,7 +733,7 @@ impl ClientIO {
 
     fn local_addr(&self) -> io::Result<net::SocketAddr> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.local_addr(),
+            ClientIO::Block { sock, .. } => sock.local_addr(),
             ClientIO::NoBlock { sock, .. } => sock.local_addr(),
             ClientIO::BlockRd { sock, .. } => sock.local_addr(),
             ClientIO::BlockWt { sock, .. } => sock.local_addr(),
@@ -739,7 +745,7 @@ impl ClientIO {
 
     fn peer_addr(&self) -> io::Result<net::SocketAddr> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.peer_addr(),
+            ClientIO::Block { sock, .. } => sock.peer_addr(),
             ClientIO::NoBlock { sock, .. } => sock.peer_addr(),
             ClientIO::BlockRd { sock, .. } => sock.peer_addr(),
             ClientIO::BlockWt { sock, .. } => sock.peer_addr(),
@@ -751,7 +757,7 @@ impl ClientIO {
 
     fn nodelay(&self) -> io::Result<bool> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.nodelay(),
+            ClientIO::Block { sock, .. } => sock.nodelay(),
             ClientIO::NoBlock { sock, .. } => sock.nodelay(),
             ClientIO::BlockRd { sock, .. } => sock.nodelay(),
             ClientIO::BlockWt { sock, .. } => sock.nodelay(),
@@ -763,7 +769,7 @@ impl ClientIO {
 
     fn read_timeout(&self) -> io::Result<Option<time::Duration>> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.read_timeout(),
+            ClientIO::Block { sock, .. } => sock.read_timeout(),
             ClientIO::NoBlock { .. } => Ok(None),
             ClientIO::BlockRd { sock, .. } => sock.read_timeout(),
             ClientIO::BlockWt { sock, .. } => sock.read_timeout(),
@@ -775,7 +781,7 @@ impl ClientIO {
 
     fn write_timeout(&self) -> io::Result<Option<time::Duration>> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.write_timeout(),
+            ClientIO::Block { sock, .. } => sock.write_timeout(),
             ClientIO::NoBlock { .. } => Ok(None),
             ClientIO::BlockRd { sock, .. } => sock.write_timeout(),
             ClientIO::BlockWt { sock, .. } => sock.write_timeout(),
@@ -787,7 +793,7 @@ impl ClientIO {
 
     fn ttl(&self) -> io::Result<u32> {
         match self {
-            ClientIO::Blocking { sock, .. } => sock.ttl(),
+            ClientIO::Block { sock, .. } => sock.ttl(),
             ClientIO::NoBlock { sock, .. } => sock.ttl(),
             ClientIO::BlockRd { sock, .. } => sock.ttl(),
             ClientIO::BlockWt { sock, .. } => sock.ttl(),
@@ -801,7 +807,7 @@ impl ClientIO {
         use ClientIO::*;
 
         match self {
-            Blocking { .. } | BlockRd { .. } | BlockWt { .. } => true,
+            Block { .. } | BlockRd { .. } | BlockWt { .. } => true,
             NoBlock { .. } | NoBlockRd { .. } | NoBlockWt { .. } => false,
             None => unreachable!(),
         }
@@ -811,9 +817,7 @@ impl ClientIO {
 impl ClientIO {
     fn read(&mut self, client: &mut Client) -> io::Result<v5::Packet> {
         match self {
-            ClientIO::Blocking { sock, pktr, .. } => {
-                read_packet(client, sock, pktr, true)
-            }
+            ClientIO::Block { sock, pktr, .. } => read_packet(client, sock, pktr, true),
             ClientIO::NoBlock { sock, pktr, .. } => {
                 read_packet(client, sock, pktr, false)
             }
@@ -834,7 +838,7 @@ impl ClientIO {
 
     fn read_noblock(&mut self, client: &mut Client) -> io::Result<v5::Packet> {
         match self {
-            ClientIO::Blocking { sock, pktr, .. } => {
+            ClientIO::Block { sock, pktr, .. } => {
                 sock.set_nonblocking(true)?;
                 let res = read_packet(client, sock, pktr, false);
                 sock.set_nonblocking(false)?;
@@ -862,7 +866,7 @@ impl ClientIO {
 
     fn write(&mut self, client: &mut Client, pkt: v5::Packet) -> io::Result<()> {
         match self {
-            ClientIO::Blocking { sock, pktw, .. } => {
+            ClientIO::Block { sock, pktw, .. } => {
                 write_packet(client, sock, pktw, Some(pkt), true)
             }
             ClientIO::NoBlock { sock, pktw, .. } => {
@@ -888,7 +892,7 @@ impl ClientIO {
         pkt: Option<v5::Packet>,
     ) -> io::Result<()> {
         match self {
-            ClientIO::Blocking { sock, pktw, .. } => {
+            ClientIO::Block { sock, pktw, .. } => {
                 write_packet(client, sock, pktw, pkt, false)
             }
             ClientIO::NoBlock { sock, pktw, .. } => {
