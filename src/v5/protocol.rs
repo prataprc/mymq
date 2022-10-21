@@ -426,6 +426,7 @@ impl Socket {
             wildcard_subscription_available: Some(true),
             subscription_identifiers_available: Some(true),
             shared_subscription_available: None,
+            server_keep_alive: self.config.keep_alive(),
             ..v5::ConnAckProperties::default()
         };
 
