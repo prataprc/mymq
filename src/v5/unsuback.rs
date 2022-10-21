@@ -20,7 +20,7 @@ pub enum UnsubAckReasonCode {
     UnspecifiedError = 0x80,
     ImplementationError = 0x83,
     NotAuthorized = 0x87,
-    InvalidTopicFilter = 0x8f,
+    TopicFilterInvalid = 0x8f,
     PacketIdInuse = 0x91,
 }
 
@@ -34,7 +34,7 @@ impl TryFrom<u8> for UnsubAckReasonCode {
             0x80 => UnsubAckReasonCode::UnspecifiedError,
             0x83 => UnsubAckReasonCode::ImplementationError,
             0x87 => UnsubAckReasonCode::NotAuthorized,
-            0x8f => UnsubAckReasonCode::InvalidTopicFilter,
+            0x8f => UnsubAckReasonCode::TopicFilterInvalid,
             0x91 => UnsubAckReasonCode::PacketIdInuse,
             val => err!(
                 MalformedPacket,

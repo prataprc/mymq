@@ -360,17 +360,19 @@ impl fmt::Debug for MQTTWrite {
 impl MQTTWrite {
     pub fn new(buf: &[u8], max_size: u32) -> Result<MQTTWrite> {
         let n = u32::try_from(buf.len())?;
-        if n < max_size {
+        if n > max_size {
+            err!(
+                ProtocolError,
+                code: PacketTooLarge,
+                "n:{} max:{} MQTTWrite exceeds suggested max_size",
+                n,
+                max_size
+            )
+        } else {
             let mut data = Vec::with_capacity(max_size as usize);
             data.extend_from_slice(buf);
             let val = MQTTWrite::Init { data, max_size: max_size as usize };
             Ok(val)
-        } else {
-            err!(
-                ProtocolError,
-                desc: "n:{} max:{} MQTTWrite exceeds suggested max_size",
-                n, max_size
-            )
         }
     }
 
@@ -445,11 +447,13 @@ impl MQTTWrite {
 
         let n = buf.len();
         match self {
-            Init { max_size, .. } | Fin { max_size, .. } if n < max_size => {
+            Init { max_size, .. } | Fin { max_size, .. } if n > max_size => {
                 err!(
                     ProtocolError,
-                    desc: "n:{} max:{} MQTTWrite reset exceeds suggested max_size",
-                    n, max_size
+                    code: PacketTooLarge,
+                    "n:{} max:{} MQTTWrite reset exceeds suggested max_size",
+                    n,
+                    max_size
                 )
             }
             Init { mut data, max_size } | Fin { mut data, max_size } => {
@@ -464,12 +468,7 @@ impl MQTTWrite {
 
 fn check_packet_limit(pkt_len: usize, max_size: usize) -> Result<()> {
     if pkt_len > max_size {
-        err!(
-            MalformedPacket,
-            code: PacketTooLarge,
-            "MQTTRead::read packet_len:{}",
-            pkt_len
-        )
+        err!(ProtocolError, code: PacketTooLarge, "MQTTRead::read packet_len:{}", pkt_len)
     } else {
         Ok(())
     }

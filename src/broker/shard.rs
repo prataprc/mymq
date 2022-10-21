@@ -686,7 +686,7 @@ where
         }
 
         match &self.inner {
-            Inner::MainMaster(_) => self.handle_close_a(Request::Close),
+            Inner::MainMaster(_) => self.handle_close_m(Request::Close),
             Inner::Close(_) => Response::Ok,
             inner => unreachable!("{} {:?}", self.prefix, inner),
         };
@@ -1366,14 +1366,14 @@ where
         for req in reqs.into_iter() {
             match req {
                 (req @ AddSession { .. }, Some(tx)) => {
-                    let resp = self.handle_add_session_a(req, cons_io);
+                    let resp = self.handle_add_session_m(req, cons_io);
                     app_fatal!(self, tx.send(Ok(resp)));
                 }
                 (req @ FlushSession { .. }, None) => {
                     let _resp = self.handle_flush_session(req, cons_io);
                 }
                 (req @ Close, Some(tx)) => {
-                    let resp = self.handle_close_a(req);
+                    let resp = self.handle_close_m(req);
                     app_fatal!(self, tx.send(Ok(resp)));
                     closed = true;
                 }
@@ -1421,22 +1421,25 @@ where
         }
     }
 
-    fn handle_add_session_a(
+    fn handle_add_session_m(
         &mut self,
         req: Request<C>,
         cons_io: &mut ConsensIO,
     ) -> Response {
-        use crate::broker::PQueueArgs;
+        use crate::broker::{generate_client_id, PQueueArgs};
 
-        let sock = match req {
+        let mut sock = match req {
             Request::AddSession(sock) => sock,
             _ => unreachable!(),
         };
 
+        // if client_id is not specified by client, assign here.
+        sock.assign_client_id(generate_client_id(&self.config, &sock));
+
         // create the session
         let (mut session, session_tx, miot_rx, session_present) = {
             let (args, upstream, downstream) = self.to_args_master(&sock);
-            let (session, session_present) = self.new_session_a(&sock, args, cons_io);
+            let (session, session_present) = self.new_session_m(&sock, args, cons_io);
             (session, upstream, downstream, session_present)
         };
 
@@ -1524,7 +1527,7 @@ where
         Response::Ok
     }
 
-    fn handle_close_a(&mut self, _req: Request<C>) -> Response {
+    fn handle_close_m(&mut self, _req: Request<C>) -> Response {
         let fin_state = match mem::replace(&mut self.inner, Inner::Init) {
             Inner::MainMaster(mut master_loop) => {
                 info!("{} closing shard", self.prefix);
@@ -1709,7 +1712,7 @@ where
     }
 
     // return (session, session-present)
-    fn new_session_a(
+    fn new_session_m(
         &mut self,
         sock: &Socket,
         args: SessionArgsMaster,

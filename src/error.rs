@@ -241,11 +241,6 @@ impl std::error::Error for Error {
             None => None,
         }
     }
-
-    #[cfg(feature = "backtrace")]
-    fn backtrace(&self) -> Option<&Backtrace> {
-        Some(&self.backtrace)
-    }
 }
 
 impl From<std::convert::Infallible> for Error {
@@ -354,6 +349,7 @@ pub enum ErrorKind {
     NoError,
     // general error
     InvalidInput,
+    InvalidConfig,
     Fatal,
     // protocol errors
     MalformedPacket,
@@ -387,6 +383,7 @@ impl fmt::Display for ErrorKind {
             NoError => write!(f, "NoError"),
             // general error
             InvalidInput => write!(f, "InvalidInput"),
+            InvalidConfig => write!(f, "InvalidConfig"),
             Fatal => write!(f, "Fatal"),
             // protocol errors
             ProtocolError => write!(f, "ProtocolError"),
@@ -442,7 +439,7 @@ pub enum ReasonCode {
     BadAuthenticationMethod = 0x8C,
     KeepAliveTimeout = 0x8D,
     SessionTakenOver = 0x8E,
-    InvalidTopicFilter = 0x8F,
+    TopicFilterInvalid = 0x8F,
     TopicNameInvalid = 0x90,
     PacketIdInuse = 0x91,
     PacketIdNotFound = 0x92,
@@ -498,7 +495,7 @@ impl TryFrom<u8> for ReasonCode {
             0x8C => Ok(ReasonCode::BadAuthenticationMethod),
             0x8D => Ok(ReasonCode::KeepAliveTimeout),
             0x8E => Ok(ReasonCode::SessionTakenOver),
-            0x8F => Ok(ReasonCode::InvalidTopicFilter),
+            0x8F => Ok(ReasonCode::TopicFilterInvalid),
             0x90 => Ok(ReasonCode::TopicNameInvalid),
             0x91 => Ok(ReasonCode::PacketIdInuse),
             0x92 => Ok(ReasonCode::PacketIdNotFound),
@@ -551,7 +548,7 @@ impl fmt::Display for ReasonCode {
             BadAuthenticationMethod => "bad authentication method",
             KeepAliveTimeout => "keep alive timeout",
             SessionTakenOver => "session taken over",
-            InvalidTopicFilter => "topic filter invalid",
+            TopicFilterInvalid => "topic filter invalid",
             TopicNameInvalid => "topic name invalid",
             PacketIdInuse => "packet identifier in use",
             PacketIdNotFound => "packet identifier not found",

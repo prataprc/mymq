@@ -51,7 +51,16 @@ pub struct Config {
     pub pkt_batch_size: u32,
 
     /// Interval between publish retry for QoS-1/2 messages, in seconds.
+    ///
+    /// * **Default**: [Config::DEF_PUBLISH_RETRY_INTERVAL]
+    /// * **Mutable**: No
     pub publish_retry_interval: u32,
+
+    /// Client ID generator.
+    ///
+    /// * **Default**: [Config::DEF_CLIENT_ID_GENERATOR]
+    /// * **Mutable**: No
+    pub client_id_generator: String,
 }
 
 impl Default for Config {
@@ -67,6 +76,7 @@ impl Default for Config {
             flush_timeout: Self::DEF_FLUSH_TIMEOUT,
             pkt_batch_size: Self::DEF_PKT_BATCH_SIZE,
             publish_retry_interval: Self::DEF_PUBLISH_RETRY_INTERVAL,
+            client_id_generator: Self::DEF_CLIENT_ID_GENERATOR.to_string(),
         }
     }
 }
@@ -96,6 +106,7 @@ impl TryFrom<toml::Value> for Config {
                     def,
                     as_bool().map(|b| b.to_string())
                 );
+                config_field!(t, client_id_generator, def, as_str());
 
                 if let Some(val) = t.get("node").map(|v| v.as_array()).flatten() {
                     def.nodes = vec![];
@@ -122,8 +133,25 @@ impl Config {
     pub const DEF_PKT_BATCH_SIZE: u32 = 1024; // default is 1MB.
     /// Refer to [Config::publish_retry_interval]
     pub const DEF_PUBLISH_RETRY_INTERVAL: u32 = 5; // in seconds
+    /// Refer to [Config::client_id_generator]
+    pub const DEF_CLIENT_ID_GENERATOR: &'static str = "uuid_v4";
 
     pub fn validate(&self) -> Result<()> {
+        use crate::util::ceil_power_of_2;
+
+        if self.max_nodes > 1 {
+            err!(InvalidConfig, desc: "max_nodes:{} > 1", self.max_nodes)?
+        }
+
+        if u64::from(self.num_shards) != ceil_power_of_2(self.num_shards) {
+            err!(InvalidConfig, desc: "num_shards:{} not power of 2", self.num_shards)?
+        }
+
+        match self.client_id_generator.as_str() {
+            "uuid_v4" => (),
+            val => err!(InvalidConfig, desc: "client_id_generator:{} invalid", val)?,
+        };
+
         Ok(())
     }
 }

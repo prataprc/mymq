@@ -104,6 +104,13 @@ pub trait ShardAPI {
     fn as_cluster(&self) -> &Self::Clstr;
 }
 
+fn generate_client_id(config: &Config, _sock: &Socket) -> ClientID {
+    match config.client_id_generator.as_str() {
+        "uuid_v5" => ClientID::new_uuid_v4(),
+        _ => unreachable!(), // NOTE: must have been already validated
+    }
+}
+
 pub mod design;
 // TODO: mod consensus;
 pub mod rebalance;

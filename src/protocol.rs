@@ -226,6 +226,15 @@ impl Socket {
             Socket::V5(sock) => sock.set_shard_id(shard_id),
         }
     }
+
+    /// Broker can assign client id if not specified by the remote. Note that calling
+    /// this function will set the client_id only if it is not set by remote.
+    #[inline]
+    pub fn assign_client_id(&mut self, client_id: ClientID) {
+        match self {
+            Socket::V5(sock) => sock.assign_client_id(client_id),
+        }
+    }
 }
 
 impl Socket {
@@ -306,6 +315,7 @@ impl Socket {
     }
 
     /// Return the will message, for session, treated as publish after session's death.
+    #[inline]
     pub fn to_will_publish(&self) -> Option<QPacket> {
         match self {
             Socket::V5(sock) => sock.to_will_publish(),
@@ -313,6 +323,7 @@ impl Socket {
     }
 
     /// Return the will delay interval to be used along with [Self::to_will_publish].
+    #[inline]
     pub fn will_delay_interval(&self) -> u32 {
         match self {
             Socket::V5(sock) => sock.will_delay_interval(),

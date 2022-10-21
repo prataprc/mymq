@@ -38,12 +38,24 @@ impl AsRef<[u8]> for Blob {
 }
 
 /// Type client-id implements a unique ID, managed internally as string.
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Default)]
-pub struct ClientID(pub String);
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+pub enum ClientID {
+    Identifd(String),
+    Assigned(String),
+}
+
+impl Default for ClientID {
+    fn default() -> ClientID {
+        ClientID::new_uuid_v4()
+    }
+}
 
 impl fmt::Display for ClientID {
     fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
-        write!(f, "{}", self.0)
+        match self {
+            ClientID::Identifd(val) => write!(f, "{}", val),
+            ClientID::Assigned(val) => write!(f, "{}", val),
+        }
     }
 }
 
@@ -51,19 +63,19 @@ impl Deref for ClientID {
     type Target = String;
 
     fn deref(&self) -> &String {
-        &self.0
+        match self {
+            ClientID::Identifd(val) => val,
+            ClientID::Assigned(val) => val,
+        }
     }
 }
 
 impl DerefMut for ClientID {
     fn deref_mut(&mut self) -> &mut String {
-        &mut self.0
-    }
-}
-
-impl From<String> for ClientID {
-    fn from(val: String) -> ClientID {
-        ClientID(val)
+        match self {
+            ClientID::Identifd(val) => val,
+            ClientID::Assigned(val) => val,
+        }
     }
 }
 
@@ -71,8 +83,8 @@ impl From<String> for ClientID {
 impl<'a> Arbitrary<'a> for ClientID {
     fn arbitrary(uns: &mut Unstructured<'a>) -> result::Result<Self, ArbitraryError> {
         let client_id = match uns.arbitrary::<u8>()? % 2 {
-            0 => ClientID::new_uuid_v4(),
-            1 => ClientID("".to_string()),
+            0 => ClientID::Identifd(ClientID::new_uuid_v4().deref().clone()),
+            1 => ClientID::Identifd("".to_string()),
             _ => unreachable!(),
         };
 
@@ -84,7 +96,18 @@ impl ClientID {
     /// Use uuid-v4 to generate a unique client ID. Stringified representaion shall
     /// look like: `0c046132-816a-49eb-90c9-2d8161c50409`
     pub fn new_uuid_v4() -> ClientID {
-        ClientID(uuid::Uuid::new_v4().to_string())
+        ClientID::Assigned(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn from_client(client_id: String) -> ClientID {
+        ClientID::Identifd(client_id)
+    }
+
+    pub fn assign_client_id(self, client_id: ClientID) -> ClientID {
+        match self {
+            ClientID::Identifd(val) if val.len() == 0 => client_id,
+            client_id => client_id,
+        }
     }
 }
 
@@ -218,10 +241,10 @@ impl TopicName {
     pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
-            err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicName")?;
+            err!(MalformedPacket, code: TopicNameInvalid, "ZERO length TopicName")?;
         }
         if self.0.chars().any(|ch| matches!(ch, '#' | '+' | '\u{0}')) {
-            err!(MalformedPacket, code: MalformedPacket, "invalid char found")?;
+            err!(MalformedPacket, code: TopicNameInvalid, "invalid char found")?;
         }
 
         Ok(())
@@ -370,23 +393,23 @@ impl TopicFilter {
     pub fn validate(&self) -> Result<()> {
         // All Topic Names and Topic Filters MUST be at least one character long.
         if self.0.len() == 0 {
-            err!(MalformedPacket, code: MalformedPacket, "ZERO length TopicFilter")?;
+            err!(MalformedPacket, code: TopicFilterInvalid, "ZERO length TopicFilter")?;
         }
         if self.0.chars().any(|ch| matches!(ch, '\u{0}')) {
-            err!(MalformedPacket, code: MalformedPacket, "null char found")?;
+            err!(MalformedPacket, code: TopicFilterInvalid, "null char found")?;
         }
 
         let levels = self.iter_topic_path();
 
         let mut iter = levels.clone().filter(|l| l.len() > 1);
         if iter.any(|l| l.chars().any(|c| matches!(c, '#' | '+'))) {
-            err!(MalformedPacket, code: MalformedPacket, "wildcard mixed with chars")?;
+            err!(MalformedPacket, code: TopicFilterInvalid, "wildcard mixed with chars")?;
         }
 
         let mut iter = levels.clone().skip_while(|l| l != &"#");
         iter.next(); // skip the '#'
         if let Some(_) = iter.next() {
-            err!(MalformedPacket, code: MalformedPacket, "chars after # wildcard")?;
+            err!(MalformedPacket, code: TopicFilterInvalid, "chars after # wildcard")?;
         }
 
         Ok(())

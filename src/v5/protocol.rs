@@ -221,7 +221,7 @@ impl Protocol {
         }
     }
 
-    fn new_socket(&self, conn: mio::net::TcpStream, cpkt: v5::Connect) -> Result<Socket> {
+    fn new_socket(&self, conn: TcpStream, connect: v5::Connect) -> Result<Socket> {
         let rd = Source {
             pr: v5::MQTTRead::new(self.config.mqtt_max_packet_size),
             deadline: None,
@@ -232,11 +232,11 @@ impl Protocol {
         };
 
         let socket = Socket {
-            client_id: ClientID::from(&cpkt),
+            client_id: connect.payload.client_id.clone(),
             shard_id: 0,
             config: self.config.clone(),
             conn,
-            connect: cpkt,
+            connect,
             token: mio::Token(0),
             rd,
             wt,
@@ -334,6 +334,12 @@ impl Socket {
     pub fn set_shard_id(&mut self, shard_id: u32) {
         self.shard_id = shard_id;
     }
+
+    #[inline]
+    pub fn assign_client_id(&mut self, client_id: ClientID) {
+        self.client_id = mem::replace(&mut self.client_id, ClientID::default())
+            .assign_client_id(client_id)
+    }
 }
 
 impl Socket {
@@ -394,12 +400,14 @@ impl Socket {
     }
 
     pub fn new_conn_ack(&self, rcode: ReasonCode) -> QPacket {
-        let val = self.connect.session_expiry_interval();
-        let sei = match (self.config.mqtt_session_expiry_interval, val) {
-            (Some(_here), Some(there)) => Some(there),
-            (Some(here), None) => Some(here),
-            (None, Some(there)) => Some(there),
-            (None, None) => None,
+        let sei = {
+            let val = self.connect.session_expiry_interval();
+            match (self.config.mqtt_session_expiry_interval, val) {
+                (Some(_here), Some(there)) => Some(there),
+                (Some(here), None) => Some(here),
+                (None, Some(there)) => Some(there),
+                (None, None) => None,
+            }
         };
 
         let mut props = v5::ConnAckProperties {
@@ -408,7 +416,10 @@ impl Socket {
             maximum_qos: Some(self.config.mqtt_maximum_qos.try_into().unwrap()),
             retain_available: Some(self.config.mqtt_retain_available),
             max_packet_size: Some(self.config.mqtt_max_packet_size),
-            assigned_client_identifier: None,
+            assigned_client_identifier: match &self.client_id {
+                ClientID::Assigned(val) => Some(val.clone()),
+                ClientID::Identifd(_) => None,
+            },
             wildcard_subscription_available: Some(true),
             subscription_identifiers_available: Some(true),
             shared_subscription_available: None,

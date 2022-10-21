@@ -38,15 +38,15 @@ impl<'a> Arbitrary<'a> for ConnectFlags {
         }
         if uns.arbitrary::<bool>()? {
             flags.push(Self::WILL_FLAG);
+            if uns.arbitrary::<bool>()? {
+                flags.push(Self::WILL_RETAIN);
+            }
         }
         flags.push(match uns.arbitrary::<QoS>()? {
             QoS::AtMostOnce => Self::WILL_QOS0,
             QoS::AtLeastOnce => Self::WILL_QOS1,
             QoS::ExactlyOnce => Self::WILL_QOS2,
         });
-        if uns.arbitrary::<bool>()? {
-            flags.push(Self::WILL_RETAIN);
-        }
         if uns.arbitrary::<bool>()? {
             flags.push(Self::USERNAME);
         }
@@ -278,14 +278,18 @@ impl fmt::Display for Connect {
     }
 }
 
-impl<'a> From<&'a Connect> for ClientID {
+impl<'a> TryFrom<&'a Connect> for ClientID {
+    type Error = Error;
+
     /// Gather client_id from MQTT v5 `connect` packet. If v5 client has not provided
     /// a `client_id` in its connect-packet, fall back to [ClientID::new_uuid_v4]
-    fn from(connect: &v5::Connect) -> ClientID {
-        match connect.payload.client_id.len() {
+    fn try_from(connect: &v5::Connect) -> Result<ClientID> {
+        let val = match connect.payload.client_id.len() {
             0 => ClientID::new_uuid_v4(),
             _ => connect.payload.client_id.clone(),
-        }
+        };
+
+        Ok(val)
     }
 }
 
@@ -385,7 +389,7 @@ impl Packetize for Connect {
             keep_alive,
             properties,
             payload: ConnectPayload {
-                client_id: ClientID(client_id),
+                client_id: ClientID::from_client(client_id),
                 will_properties,
                 will_topic,
                 will_payload,

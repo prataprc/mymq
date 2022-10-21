@@ -8,10 +8,10 @@ use crate::{Error, ErrorKind, ReasonCode, Result};
 /// A passive timer used by application to detect keep-alive timeouts by calling
 /// [KeepAlive::check_expired]. Typically used to keep track of network in-activity.
 pub struct KeepAlive {
-    prefix: String,
-    keep_alive: Option<u16>,
-    interval: Option<u16>,
-    alive_at: time::Instant,
+    pub prefix: String,
+    pub keep_alive: Option<u16>,
+    pub interval: Option<u16>,
+    pub alive_at: time::Instant,
 }
 
 impl KeepAlive {
@@ -41,6 +41,11 @@ impl KeepAlive {
     /// Return the negotiated keep alive for the session.
     pub fn to_keep_alive(&self) -> Option<u16> {
         self.keep_alive
+    }
+
+    /// Return the keep alive interval after adjusted for keep-alive-factor.
+    pub fn to_interval(&self) -> Option<u16> {
+        self.interval
     }
 
     /// Check whether this keep-alive timer has elapsed. Application should call this
